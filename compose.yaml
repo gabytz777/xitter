@@ -53,6 +53,23 @@ services:
     mem_reservation: 512m
     oom_score_adj: -500
 
+  # The model that answers as the Grok-like assistant (src/grok.ts). Tiny on
+  # purpose, and capped hard so it can't starve the app on this small host.
+  # llama.cpp rather than Ollama: the CPU build is a fraction of the size, and
+  # nothing here has a GPU to use.
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    restart: unless-stopped
+    # -hf pulls the model into LLAMA_CACHE on the first start
+    command: ["-hf", "${GROK_MODEL:-bartowski/SmolLM2-135M-Instruct-GGUF:Q4_K_M}", "--host", "0.0.0.0", "--port", "8080", "-c", "2048"]
+    environment:
+      LLAMA_CACHE: /models
+    volumes:
+      - llm:/models
+    mem_limit: 768m
+    mem_reservation: 192m
+    cpus: 1.0
+
   pool:
     profiles: ["sqlpool"]
     build: docker/pgbouncer
@@ -106,3 +123,4 @@ volumes:
   media:
   data:
   realm-db:
+  llm:
