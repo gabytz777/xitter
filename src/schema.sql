@@ -610,6 +610,7 @@ create table if not exists polls (
 );
 -- an image poll: one uploaded photo per choice, in choice order
 alter table polls add column if not exists choice_media bigint[];
+create index if not exists polls_choice_media_idx on polls using gin (choice_media) where choice_media is not null;
 
 create table if not exists poll_votes (
 	poll_id bigint not null references polls (id) on delete cascade,
@@ -634,6 +635,7 @@ create table if not exists scheduled_posts (
 create index if not exists scheduled_posts_due_idx on scheduled_posts (execute_at) where kind = 'scheduled';
 create index if not exists scheduled_posts_user_idx on scheduled_posts (user_id, kind);
 alter table scheduled_posts add column if not exists attempts int not null default 0;
+alter table scheduled_posts add column if not exists last_error text;
 
 alter table posts add column if not exists place_id text;
 

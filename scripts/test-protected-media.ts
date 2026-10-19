@@ -39,16 +39,16 @@ try {
 	const get = async (who: string, id: string) => fetch(`${origin}/media/${id}.gif`, { headers: { cookie: await login(who) } });
 
 	const mine = await get(`pm${stamp}`, hidden);
-	check("the owner gets it, privately cached", mine.status === 200 && mine.headers.get("cache-control")?.startsWith("private") === true, mine.headers.get("cache-control"));
+	check("the owner gets it without persistent caching", mine.status === 200 && mine.headers.get("cache-control") === "private, no-store", mine.headers.get("cache-control"));
 	const fan = await get(`pf${stamp}`, hidden);
 	check("a follower gets it", fan.status === 200);
 	check("a stranger doesn't", (await get(`ps${stamp}`, hidden)).status === 404);
 	check("signed out doesn't", (await fetch(`${origin}/media/${hidden}.gif`)).status === 404);
 	const pub = await get(`pf${stamp}`, open);
-	check("public media stays publicly cached", pub.status === 200 && pub.headers.get("cache-control")?.startsWith("public") === true, pub.headers.get("cache-control"));
+	// A public upload can become protected or be deleted at the same URL.
+	check("public media also avoids persistent or shared caching", pub.status === 200 && pub.headers.get("cache-control") === "private, no-store", pub.headers.get("cache-control"));
 	await sql`delete from posts where id = ${openPost}::bigint`;
-	await Bun.sleep(31_000);
-	check("a deleted post's media is gone for others", (await get(`pf${stamp}`, open)).status === 404);
+	check("a deleted post's media is immediately gone for others", (await get(`pf${stamp}`, open)).status === 404);
 	check("but its owner still gets it", (await get(`ps${stamp}`, open)).status === 200);
 } finally {
 	for (const id of media) rmSync(join(dir, id), { force: true });

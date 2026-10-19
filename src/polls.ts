@@ -74,6 +74,7 @@ export function pollCard(p: PollRow) {
 }
 
 export async function pollsByIds(viewerId: string, ids: string[]): Promise<Map<string, PollRow>> {
+	ids = ids.filter(isId);
 	if (!ids.length) return new Map();
 	const rows = await sql`select p.id::text, p.choices, p.duration_minutes, p.ends_at,
 			case when p.choice_media is null then null else (select json_agg(case when m.id is null then null else json_build_object('id', m.id::text, 'mime', m.mime, 'width', m.width, 'height', m.height) end order by c.n)
@@ -101,6 +102,7 @@ export async function createCard(userId: string, raw: unknown): Promise<{ status
 	} catch {
 		throw new PollError("card_data must be JSON.");
 	}
+	if (!data || typeof data !== "object" || Array.isArray(data)) throw new PollError("card_data must be a JSON object.");
 	const kind = String(data["twitter:card"] ?? "");
 	// an image poll names no count: as many choices as have labels
 	const image = kind === IMAGE_POLL;
@@ -121,25 +123,32 @@ export async function createCard(userId: string, raw: unknown): Promise<{ status
 	if (image) {
 		media = choices.map((_, i) => /^mis:\/\/(\d{1,19})$/.exec(String(data[`twitter:image:choice${i + 1}_image:src:id`] ?? ""))?.[1] ?? null);
 		const given = media.filter((m): m is string => !!m);
+		if (given.some((id) => !isId(id))) throw new PollError("Choice images must be photos you just uploaded.");
 		if (!given.length) throw new PollError("An image poll needs at least one image.");
 		const ok = await sql`select id::text from media where id = any(${sql.array(given, "INT8")}) and user_id = ${userId}::bigint and kind = 'photo' and post_id is null and state = 'ready'`;
 		if (ok.length !== new Set(given).size) throw new PollError("Choice images must be photos you just uploaded.");
 	}
 	const id = newId();
-	await sql`insert into polls (id, user_id, choices, duration_minutes) values (${id}::bigint, ${userId}::bigint, ${sql.array(choices, "TEXT")}, ${duration})`;
-	// a choice without a photo keeps 0, which matches no upload
-	if (media) await sql`update polls set choice_media = ${sql.array(media.map((m) => m ?? "0"), "INT8")} where id = ${id}::bigint`;
+	// Store labels and image references together; a failed card creation must
+	// not leave a half-configured poll behind.
+	await sql`insert into polls (id, user_id, choices, duration_minutes, choice_media)
+		values (${id}::bigint, ${userId}::bigint, ${sql.array(choices, "TEXT")}, ${duration},
+			${media ? sql.array(media.map((m) => m ?? "0"), "INT8") : null})`;
 	return { status: "OK", card_uri: `card://${id}` };
 }
 
 // the post being created takes the card; its clock starts now
 export async function attachPoll(userId: string, postId: string, cardUri: string): Promise<void> {
 	const id = /^card:\/\/(\d{1,19})$/.exec(cardUri)?.[1];
-	if (!id) throw new PollError("Unknown card.");
-	const rows = await sql`update polls set ends_at = now() + make_interval(mins => duration_minutes)
-		where id = ${id}::bigint and user_id = ${userId}::bigint and ends_at is null returning id`;
-	if (!rows.length) throw new PollError("That poll can't be used.");
-	await sql`update posts set poll_id = ${id}::bigint where id = ${postId}::bigint`;
+	if (!id || !isId(id) || !isId(postId)) throw new PollError("Unknown card.");
+	await sql.begin(async (tx) => {
+		const [post] = await tx`select id from posts where id = ${postId}::bigint and user_id = ${userId}::bigint and poll_id is null for update`;
+		if (!post) throw new PollError("That post can't use this poll.");
+		const rows = await tx`update polls set ends_at = now() + make_interval(mins => duration_minutes)
+			where id = ${id}::bigint and user_id = ${userId}::bigint and ends_at is null returning id`;
+		if (!rows.length) throw new PollError("That poll can't be used.");
+		await tx`update posts set poll_id = ${id}::bigint where id = ${postId}::bigint`;
+	});
 }
 
 export async function vote(viewerId: string, form: FormData): Promise<Record<string, unknown>> {

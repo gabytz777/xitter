@@ -151,28 +151,72 @@ async function postOr404(v: Viewer, id: string) {
 	return p;
 }
 
-// one image or video sent as the whole request body, through the client's own
-// chunked upload so the same checks and video conversion apply
+const MAX_MEDIA_SEGMENT = 5 * 1024 * 1024;
+const mediaLimit = (type: string) => type.startsWith("video/") ? settings().limits.video_mb * 1024 * 1024 : type === "image/gif" ? 15 * 1024 * 1024 : settings().limits.image_mb * 1024 * 1024;
+
+async function callMedia(v: Viewer, query: Record<string, string>, form?: FormData) {
+	const url = new URL(`${PUBLIC_ORIGIN}/i/media/upload.json?${new URLSearchParams(query)}`);
+	const res = await mediaUpload(new Request(url, { method: "POST", body: form }), url, v);
+	const out = res.status === 204 ? {} : await res.json().catch(() => ({}));
+	if (res.status >= 400) throw new ApiError(res.status, out?.errors?.[0]?.message ?? out?.error ?? "Upload failed.");
+	return out;
+}
+
+const mediaResult = (id: string, out: any) => ({
+	media_id: id,
+	processing: out.processing_info?.state ?? "succeeded",
+	...(out.processing_info?.check_after_secs !== undefined ? { check_after_secs: out.processing_info.check_after_secs } : {}),
+	...(out.processing_info?.progress_percent !== undefined ? { progress_percent: out.processing_info.progress_percent } : {}),
+	...(out.processing_info?.error ? { error: out.processing_info.error } : {}),
+	...(out.expires_after_secs !== undefined ? { expires_after_secs: out.expires_after_secs } : {}),
+	...(out.total_bytes !== undefined ? { total_bytes: out.total_bytes, received_bytes: out.received_bytes, segments: out.segments } : {}),
+});
+
+async function beginMedia(req: Request, v: Viewer) {
+	const b = await body(req);
+	const type = typeof b.media_type === "string" ? b.media_type.trim().toLowerCase() : "";
+	if (!/^(image|video)\/[a-z0-9.+-]+$/.test(type)) throw new ApiError(415, "Give the file's image/* or video/* media_type.");
+	const total = typeof b.total_bytes === "number" || typeof b.total_bytes === "string" ? Number(b.total_bytes) : NaN;
+	if (!Number.isSafeInteger(total) || total <= 0) throw new ApiError(400, "total_bytes must be the file's positive byte length.");
+	if (total > mediaLimit(type)) throw new ApiError(413, "That file is too large.");
+	const out = await callMedia(v, { command: "INIT", total_bytes: String(total), media_type: type, media_category: type.startsWith("video/") ? "tweet_video" : type === "image/gif" ? "tweet_gif" : "tweet_image" });
+	return { media_id: out.media_id_string, max_segment_bytes: MAX_MEDIA_SEGMENT, expires_after_secs: 3600 };
+}
+
+async function appendMedia(req: Request, v: Viewer, id: string, segment: string) {
+	if (!isId(id)) throw new ApiError(404, "Unknown upload.");
+	const index = Number(segment);
+	if (!Number.isInteger(index) || index < 0 || index > 10_000) throw new ApiError(400, "segment_index must be between 0 and 10000.");
+	const data = await boundedBody(req, MAX_MEDIA_SEGMENT);
+	if (!data.length) throw new ApiError(400, "The segment is empty.");
+	const form = new FormData();
+	form.set("media", new Blob([data], { type: "application/octet-stream" }));
+	await callMedia(v, { command: "APPEND", media_id: id, segment_index: String(index) }, form);
+	return { media_id: id, segment_index: index };
+}
+
+async function finishMedia(v: Viewer, id: string) {
+	if (!isId(id)) throw new ApiError(404, "Unknown upload.");
+	const status = await callMedia(v, { command: "STATUS", media_id: id });
+	if (status.processing_info?.state !== "uploading") return mediaResult(id, status);
+	if (status.received_bytes !== status.total_bytes) throw new ApiError(400, "Upload all segments before finalizing.");
+	return mediaResult(id, await callMedia(v, { command: "FINALIZE", media_id: id }));
+}
+
+// The simple whole-body endpoint remains useful for small files. Larger files
+// use the same uploader through bounded segments below the server's body cap.
 async function uploadMedia(req: Request, v: Viewer) {
 	const type = (req.headers.get("content-type") ?? "").split(";")[0].trim();
 	if (!/^(image|video)\//.test(type)) throw new ApiError(415, "Send the file as the body with its image/* or video/* content type.");
-	const maxBytes = type.startsWith("video/") ? settings().limits.video_mb * 1024 * 1024 : type === "image/gif" ? 15 * 1024 * 1024 : settings().limits.image_mb * 1024 * 1024;
-	const data = await boundedBody(req, maxBytes);
+	const data = await boundedBody(req, mediaLimit(type));
 	if (!data.length) throw new ApiError(400, "The body is empty.");
-	const call = async (query: Record<string, string>, form?: FormData) => {
-		const url = new URL(`${PUBLIC_ORIGIN}/i/media/upload.json?${new URLSearchParams(query)}`);
-		const res = await mediaUpload(new Request(url, { method: "POST", body: form }), url, v);
-		const out = res.status === 204 ? {} : await res.json().catch(() => ({}));
-		if (res.status >= 400) throw new ApiError(res.status, out?.errors?.[0]?.message ?? out?.error ?? "Upload failed.");
-		return out;
-	};
 	const video = type.startsWith("video/");
-	const init = await call({ command: "INIT", total_bytes: String(data.length), media_type: type, media_category: video ? "tweet_video" : type === "image/gif" ? "tweet_gif" : "tweet_image" });
+	const init = await callMedia(v, { command: "INIT", total_bytes: String(data.length), media_type: type, media_category: video ? "tweet_video" : type === "image/gif" ? "tweet_gif" : "tweet_image" });
 	const id = init.media_id_string;
 	const form = new FormData();
 	form.set("media", new Blob([data], { type }));
-	await call({ command: "APPEND", media_id: id, segment_index: "0" }, form);
-	const done = await call({ command: "FINALIZE", media_id: id });
+	await callMedia(v, { command: "APPEND", media_id: id, segment_index: "0" }, form);
+	const done = await callMedia(v, { command: "FINALIZE", media_id: id });
 	return { media_id: id, processing: done.processing_info?.state ?? "succeeded" };
 }
 
@@ -292,6 +336,16 @@ const ROUTES: Route[] = [
 		},
 	})),
 	{ method: "POST", pattern: /^\/media$/, scope: "write", bucket: "upload", run: async (v, _m, req) => ({ data: await uploadMedia(req, v), status: 201 }) },
+	{ method: "POST", pattern: /^\/media\/uploads$/, scope: "write", bucket: "upload", run: async (v, _m, req) => ({ data: await beginMedia(req, v), status: 201 }) },
+	{ method: "POST", pattern: /^\/media\/(\d{1,19})\/segments\/(\d+)$/, scope: "write", bucket: "write", run: async (v, m, req) => ({ data: await appendMedia(req, v, m[1], m[2]) }) },
+	{ method: "POST", pattern: /^\/media\/(\d{1,19})\/finalize$/, scope: "write", bucket: "write", run: async (v, m) => {
+		if (!isId(m[1])) throw new ApiError(404, "Unknown upload.");
+		return { data: await finishMedia(v, m[1]) };
+	} },
+	{ method: "GET", pattern: /^\/media\/(\d{1,19})$/, scope: "read", run: async (v, m) => {
+		if (!isId(m[1])) throw new ApiError(404, "Unknown upload.");
+		return { data: mediaResult(m[1], await callMedia(v, { command: "STATUS", media_id: m[1] })) };
+	} },
 ];
 
 export async function publicApi(req: Request, url: URL): Promise<Response> {

@@ -24,7 +24,11 @@ const ENDPOINTS: Endpoint[] = [
 	["POST", "/posts/{id}/repost", "write", "Repost. <code>DELETE</code> to undo."],
 	["POST", "/posts/{id}/bookmark", "write", "Bookmark. <code>DELETE</code> to undo."],
 	["POST", "/users/{screen_name}/follow", "write", "Follow (asks, for a protected account). <code>DELETE</code> to unfollow."],
-	["POST", "/media", "write", "Upload an image, GIF or video: the file is the whole body, with its <code>Content-Type</code>. Returns a <code>media_id</code> for <code>/posts</code>; a video may still be <code>processing</code>."],
+	["POST", "/media", "write", "Upload a small image, GIF or video as the whole body, with its <code>Content-Type</code>. Returns a <code>media_id</code> for <code>/posts</code>. For larger files or retries, use <a href=\"#chunked-uploads\">chunked uploads</a>."],
+	["POST", "/media/uploads", "write", "Start an upload. JSON: <code>media_type</code> and <code>total_bytes</code>. Returns <code>media_id</code>, <code>max_segment_bytes</code> and <code>expires_after_secs</code>."],
+	["POST", "/media/{id}/segments/{segment_index}", "write", "Send one segment as the raw body. Indices start at 0; retrying an index replaces that segment."],
+	["POST", "/media/{id}/finalize", "write", "Finish an upload after sending every segment. Returns its processing state."],
+	["GET", "/media/{id}", "read", "Check your upload's processing state. Pending uploads also report <code>total_bytes</code>, <code>received_bytes</code> and <code>segments</code>."],
 ];
 
 const DOCS_CSS = `table{width:100%;border-collapse:collapse}
@@ -51,6 +55,17 @@ export function apiDocsPage(req: Request): Promise<Response> {
 
 <h2>Paging</h2>
 <p>Lists take <code>limit</code> (20 by default, 100 at most). Those that page give <code>next_cursor</code>: pass it back as <code>cursor</code> for the next page; it is <code>null</code> at the end.</p>
+
+<h2 id="chunked-uploads">Chunked uploads</h2>
+<p>Use chunks for files larger than the server's 16 MiB request limit, or to retry an interrupted upload. Each segment can be up to 5 MiB; the instance's image and video file limits still apply.</p>
+<ol>
+<li>Start with <code>POST /media/uploads</code>. Give the file's MIME type and exact byte length, then save the returned <code>media_id</code>.</li>
+<li>Send consecutive segments to <code>POST /media/{id}/segments/0</code>, <code>/1</code>, and so on. Use a raw binary body. You can send segments out of order and retry the same index without counting its bytes twice.</li>
+<li>To resume, read <code>GET /media/{id}</code>. While <code>processing</code> is <code>uploading</code>, <code>segments</code> lists the received <code>segment_index</code> and <code>bytes</code> for each segment.</li>
+<li>Call <code>POST /media/{id}/finalize</code>; you can retry it for the same upload. If processing is still pending, poll <code>GET /media/{id}</code> after <code>check_after_secs</code>. Publish with the <code>media_id</code> once <code>processing</code> is <code>succeeded</code>. A <code>failed</code> result includes an <code>error</code>: check it, fix the file and start a new upload.</li>
+</ol>
+<p>Pending uploads expire after an hour. Their state is kept by the server process: if it restarts, start a new upload. You can have up to eight pending uploads. Only tokens for the account that started an upload can inspect or change it.</p>
+<p>Starting an upload counts toward the upload limit. Sending segments and finalizing use the normal write limit; progress checks use the read limit.</p>
 
 <h2>Limits</h2>
 <p>The same as in the app: ${window("read")} requests in all, ${window("post")} posts, ${window("engage")} likes, reposts, bookmarks and follows together, and ${window("upload")} uploads. Every answer carries <code>x-rate-limit-limit</code>, <code>-remaining</code> and <code>-reset</code> (a Unix time); over a limit you get <code>429</code> with <code>retry-after</code>.</p>
