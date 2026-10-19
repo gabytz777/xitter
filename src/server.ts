@@ -44,6 +44,7 @@ import { startMailDigests } from "./mail-digest";
 import { SERVICE_WORKER, startPush } from "./push";
 import { emailRoute } from "./email-address";
 import { embedImage, linkPreview, oembed } from "./embeds";
+import { isReserved } from "./invites";
 
 const MIME: Record<string, string> = {
 	js: "text/javascript; charset=utf-8",
@@ -260,6 +261,16 @@ async function route(req: Request): Promise<Response | undefined> {
 	const url = new URL(req.url);
 	const p = url.pathname;
 	if (p.startsWith("/abs/")) return serveClient(req, p);
+	// A profile for a handle nobody has: the client would render "this account
+	// doesn't exist", so send the browser to the Rick Astley instead. Set
+	// RICKROLL=0 to turn it off and get the usual page back.
+	if (process.env.RICKROLL !== "0" && req.method === "GET" && /^\/[A-Za-z0-9_]{4,15}$/.test(p)) {
+		const handle = p.slice(1).toLowerCase();
+		if (!isReserved(handle)) {
+			const [account] = await sql`select 1 from users where lower(screen_name) = ${handle}`;
+			if (!account) return new Response(null, { status: 302, headers: { location: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "cache-control": "no-store" } });
+		}
+	}
 	// chat: the live socket (its token from GenerateXChatTokenMutation) and
 	// the way to the key backup realm
 	if (p === "/xchat/ws") {
@@ -324,8 +335,9 @@ async function route(req: Request): Promise<Response | undefined> {
 	const viewer = await getViewer(req);
 	// a suspended account can't sign in, so it appeals here with its password
 	if (p === "/appeal") return appealRoute(req, server.requestIP(req)?.address ?? "");
-	// maintenance: staff carry on, everyone else signed in waits
-	if (viewer && !viewer.role && settings().operations.maintenance) {
+	// maintenance: staff carry on, everyone else waits. Signed-out visitors see
+	// it too, so an instance that is down for maintenance doesn't look alive.
+	if (settings().operations.maintenance && !viewer?.role) {
 		if (API_PREFIX.test(p) || req.method !== "GET") return apiError(503, 130, settings().operations.message);
 		return maintenancePage();
 	}

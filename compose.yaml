@@ -19,6 +19,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    mem_limit: 2g
+    mem_reservation: 512m
+    # this host runs a desktop; keep the app from being the kernel's first
+    # choice of victim (zram was full when it was OOM-killed)
+    oom_score_adj: -500
   db:
     image: postgres:18-bookworm
     restart: unless-stopped
@@ -33,6 +38,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    mem_limit: 2g
+    mem_reservation: 512m
+    oom_score_adj: -500
 
   # Juicebox realm for chat passcode recovery (see deploy/juicebox)
   realm:
@@ -62,6 +70,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    mem_limit: 512m
+    mem_reservation: 128m
 
 volumes:
   db:
