@@ -80,6 +80,7 @@ export async function resetRoute(req: Request, url: URL): Promise<Response> {
 		// Older links must not be able to replace the newly chosen password either.
 		await tx`update password_resets set used = true where user_id = ${row.user_id}::bigint and not used`;
 		await tx`delete from sessions where user_id = ${row.user_id}::bigint`;
+		await tx`delete from api_tokens where user_id = ${row.user_id}::bigint`;
 		await tx`delete from login_challenges where user_id = ${row.user_id}::bigint`;
 		await tx`update email_confirmations set used = true where user_id = ${row.user_id}::bigint and not used`;
 		return true;

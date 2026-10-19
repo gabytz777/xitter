@@ -1,7 +1,14 @@
 {
 	"version": 1,
-	"sequence": 4,
+	"sequence": 5,
 	"instances": [
+		{
+			"id": "social.opsex.best",
+			"name": "Xitter",
+			"source_url": null,
+			"public_key": "aE7RikVEmC2lKQPAkfVtNk1GpJtx87H7PYaLxHxbZTM",
+			"state": "active"
+		},
 		{
 			"id": "xit.chococat.lol",
 			"name": "Xit",

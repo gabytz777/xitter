@@ -10,8 +10,11 @@ copy during setup, and it stays on that machine.
 ## What works
 
 - Posting, replies, quotes, reposts, likes, bookmarks (with folders), pinned
-  posts, pinned replies, highlights, @mentions and hashtags; editing posts, polls, scheduling,
-  places
+  posts, pinned replies, highlights, @mentions and hashtags; editing posts, polls,
+  scheduled threads (up to 26 posts), places
+- Scheduled threads publish together. Failed threads retry; permanent failures
+  or exhausted retries return the complete thread to drafts. Each account can
+  queue 100 future posts.
 - Who can reply (everyone, followed accounts, verified, mentioned), post views,
   reposts, likes and quotes lists
 - Images, GIFs and video (converted with ffmpeg), alt text, content warnings on
@@ -65,7 +68,10 @@ copy during setup, and it stays on that machine.
 - Admin > Feature switches: any of the client's own switches, set for everyone
 - Rate limits per account and address (`src/ratelimit.ts`)
 - A public JSON API under `/api/v1` with personal tokens (`/account/api`,
-  read or read and write); `/api` documents it
+  read or read and write), including chunked video uploads with progress and
+  retry support; `/api` documents it. Pending uploads expire after one hour and
+  are lost if the server restarts. Changing or resetting a password revokes all
+  of that account's API tokens.
 - An admin panel at `/admin`: users, standing (restrict, limit, suspend),
   badges (blue, gold organisation, grey government organisation or official),
   translator globes (blue translator, gold translator moderator, yellow approver),
@@ -302,7 +308,8 @@ expiry, write paths and request limits against one.
   needing a server. `.github/workflows/tests.yml` runs these on pushes and pull
   requests, then checks password and two-factor concurrency, poll visibility,
   search operators, API request limits, email confirmations, data exports,
-  scheduled edits, bookmark pagination, account settings and encrypted chat
+  scheduled threads and quotas, bookmark pagination, media privacy, chunked
+  video uploads, account settings and encrypted chat
   against a fresh PostgreSQL 18 database and a local server. The pinned client
   is not downloaded; checks that need it report a skip.
 - The `test-*-concurrency.ts`, `test-poll-visibility.ts` and

@@ -99,6 +99,27 @@ export function take(keys: [Bucket, string][], onRefused?: (bucket: Bucket, firs
 	return tightest!;
 }
 
+// A thread already spends one post token in the request middleware. Charge
+// its additional posts only after validation, using the same shared window.
+export class RateLimitError extends Error {
+	constructor(public hit: Hit) {
+		super("Rate limit exceeded.");
+	}
+}
+
+export function chargePostCost(viewer: Pick<Viewer, "id" | "role">, cost: number): void {
+	if (!Number.isSafeInteger(cost) || cost < 0) throw new RangeError("Post cost must be a nonnegative integer.");
+	if (OFF || viewer.role || cost === 0) return;
+	const w = current("post", viewer.id, Date.now());
+	const limit = limitOf("post");
+	// No await between checking and spending: simultaneous requests cannot
+	// oversubscribe the budget, and a rejected thread spends no partial cost.
+	if (cost > limit - w.count) {
+		throw new RateLimitError({ ok: false, limit, remaining: Math.max(0, limit - w.count), reset: w.reset });
+	}
+	w.count += cost;
+}
+
 // counts one request against `bucket` for `who` (an account id or an address)
 export const hit = (bucket: Bucket, who: string): Hit => take([[bucket, who]]);
 

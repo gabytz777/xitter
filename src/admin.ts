@@ -508,6 +508,7 @@ const ACTIONS: Record<string, Action> = {
 				if (target.instance) throw new AdminError(`That account lives on ${target.instance}, which manages it. Here you can only moderate it.`, 403);
 				await tx`update users set password_hash = ${hash} where id = ${id}::bigint`;
 				await tx`delete from sessions where user_id = ${id}::bigint`;
+				await tx`delete from api_tokens where user_id = ${id}::bigint`;
 				await tx`update password_resets set used = true where user_id = ${id}::bigint and not used`;
 				await tx`delete from login_challenges where user_id = ${id}::bigint`;
 				await tx`update email_confirmations set used = true where user_id = ${id}::bigint and not used`;

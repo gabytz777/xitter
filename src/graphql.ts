@@ -1,3 +1,4 @@
+import { RateLimitError, limitedResponse } from "./ratelimit";
 // GraphQL operations, routed by name. The client sends a query id that changes
 // with every build; the name after it is stable.
 
@@ -1100,6 +1101,7 @@ export async function runOperation(name: string, viewer: Viewer, vars: Vars): Pr
 	try {
 		return Response.json(await handlers[name](viewer, vars));
 	} catch (e) {
+		if (e instanceof RateLimitError) return limitedResponse(e.hit);
 		// the chat app reads these as they are
 		if (e instanceof ChatError) return Response.json({ errors: [{ message: e.message, code: e.code }], data: {} });
 		// the main client takes the code from extensions and shows the message

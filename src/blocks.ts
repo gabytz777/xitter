@@ -62,8 +62,8 @@ export async function setBlock(blockerId: string, blockedId: string, on: boolean
 	return true;
 }
 
-export async function isBlockedEitherWay(a: string, b: string): Promise<boolean> {
-	const rows = await sql`select 1 from blocks where (blocker_id = ${a}::bigint and blocked_id = ${b}::bigint)
+export async function isBlockedEitherWay(a: string, b: string, db: typeof sql = sql): Promise<boolean> {
+	const rows = await db`select 1 from blocks where (blocker_id = ${a}::bigint and blocked_id = ${b}::bigint)
 		or (blocker_id = ${b}::bigint and blocked_id = ${a}::bigint) limit 1`;
 	return rows.length > 0;
 }

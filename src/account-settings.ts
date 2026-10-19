@@ -94,6 +94,7 @@ export async function accountSettingsRoute(method: string, path: string, viewer:
 			await tx`update password_resets set used = true where user_id = ${viewer.id}::bigint and not used`;
 			// Other devices have to sign in again with the new password.
 			await tx`delete from sessions where user_id = ${viewer.id}::bigint and token <> ${viewer.token}`;
+			await tx`delete from api_tokens where user_id = ${viewer.id}::bigint`;
 			await tx`delete from login_challenges where user_id = ${viewer.id}::bigint`;
 			await tx`update email_confirmations set used = true where user_id = ${viewer.id}::bigint and not used`;
 			return true;

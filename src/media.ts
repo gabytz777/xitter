@@ -27,6 +27,9 @@ const MAX_PENDING_MS = 60 * 60 * 1000;
 type Pending = { userId: string; total: number; category: string; video: boolean; chunks: Map<number, number>; received: number; started: number };
 const pending = new Map<string, Pending>();
 const finalizing = new Map<string, Pending>();
+// Reserve source-URL downloads before their first await, then keep the slot
+// through assembly. They must share the same per-account work limit.
+const sourceUploads = new Map<string, string>();
 const pendingDir = (id: string) => join(MEDIA_DIR, ".pending", id);
 const segmentFile = (id: string, index: number) => join(pendingDir(id), String(index));
 
@@ -102,6 +105,15 @@ export const absolute = (path: string | null) => (path?.startsWith("/") ? PUBLIC
 
 const MAX_PENDING_PER_USER = 8;
 const MAX_SEGMENTS = 10_000;
+
+function activeUploadCount(userId: string): number {
+	const ids = new Set<string>();
+	for (const [id, p] of pending) if (p.userId === userId) ids.add(id);
+	for (const [id, p] of finalizing) if (p.userId === userId) ids.add(id);
+	for (const [id, owner] of sourceUploads) if (owner === userId) ids.add(id);
+	return ids.size;
+}
+
 const uploadError = (message: string, status = 400) => Response.json({ error: message, errors: [{ code: 324, message }] }, { status });
 
 async function params(req: Request, url: URL): Promise<{ fields: Record<string, string>; file?: Buffer }> {
@@ -235,52 +247,58 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 				if (source.origin !== ownOrigin || source.pathname !== "/i/api/xitter/gif" || !source.searchParams.get("u")) {
 					return uploadError("GIF uploads must use this instance's GIF proxy.", 403);
 				}
-				const response = await gifProxy(source);
-				if (!response.ok || !response.body) return uploadError("Could not download the selected GIF.");
-				const announcedSize = Number(response.headers.get("content-length"));
-				if (Number.isFinite(announcedSize) && announcedSize > MAX_GIF) {
-					await response.body.cancel();
-					return uploadError("File is too large.");
-				}
-				const reader = response.body.getReader();
-				const chunks: Buffer[] = [];
-				let size = 0;
-				try {
-					while (true) {
-						const { done, value } = await reader.read();
-						if (done) break;
-						size += value.byteLength;
-						if (size > MAX_GIF) {
-							await reader.cancel();
-							return uploadError("File is too large.");
-						}
-						chunks.push(Buffer.from(value));
-					}
-				} finally {
-					reader.releaseLock();
-				}
-				const data = Buffer.concat(chunks, size);
-				const image = sniffImage(data);
-				if (!image || image.mime !== "image/gif") return uploadError("The selected source is not a valid GIF.");
+				if (activeUploadCount(viewer.id) >= MAX_PENDING_PER_USER) return uploadError("Finish your other uploads first.", 429);
 				const newMedia = newId();
-				mkdirSync(pendingDir(newMedia), { recursive: true });
-				writeFileSync(segmentFile(newMedia, 0), data);
-				return finalize(newMedia, {
-					userId: viewer.id,
-					total: data.length,
-					category: fields.media_category ?? "tweet_gif",
-					video: false,
-					chunks: new Map([[0, data.length]]),
-					received: data.length,
-					started: Date.now(),
-				});
+				sourceUploads.set(newMedia, viewer.id);
+				try {
+					const response = await gifProxy(source);
+					if (!response.ok || !response.body) return uploadError("Could not download the selected GIF.");
+					const announcedSize = Number(response.headers.get("content-length"));
+					if (Number.isFinite(announcedSize) && announcedSize > MAX_GIF) {
+						await response.body.cancel();
+						return uploadError("File is too large.");
+					}
+					const reader = response.body.getReader();
+					const chunks: Buffer[] = [];
+					let size = 0;
+					try {
+						while (true) {
+							const { done, value } = await reader.read();
+							if (done) break;
+							size += value.byteLength;
+							if (size > MAX_GIF) {
+								await reader.cancel();
+								return uploadError("File is too large.");
+							}
+							chunks.push(Buffer.from(value));
+						}
+					} finally {
+						reader.releaseLock();
+					}
+					const data = Buffer.concat(chunks, size);
+					const image = sniffImage(data);
+					if (!image || image.mime !== "image/gif") return uploadError("The selected source is not a valid GIF.");
+					mkdirSync(pendingDir(newMedia), { recursive: true });
+					writeFileSync(segmentFile(newMedia, 0), data);
+					return await finalize(newMedia, {
+						userId: viewer.id,
+						total: data.length,
+						category: fields.media_category ?? "tweet_gif",
+						video: false,
+						chunks: new Map([[0, data.length]]),
+						received: data.length,
+						started: Date.now(),
+					});
+				} finally {
+					sourceUploads.delete(newMedia);
+				}
 			}
 			const total = Number(fields.total_bytes);
 			const video = /^video\//.test(fields.media_type ?? "") || /video/.test(fields.media_category ?? "");
 			if (video && !(await videoSupported())) return uploadError("Video uploads are not available on this server.");
 			if (!video && fields.media_type && !/^image\//.test(fields.media_type)) return uploadError("Only images and videos can be uploaded.");
 			if (!Number.isInteger(total) || total <= 0 || total > (video ? maxVideoBytes() : MAX_GIF)) return uploadError("File is too large or empty.");
-			if ([...pending.values()].filter((p) => p.userId === viewer.id).length >= MAX_PENDING_PER_USER) return uploadError("Finish your other uploads first.", 429);
+			if (activeUploadCount(viewer.id) >= MAX_PENDING_PER_USER) return uploadError("Finish your other uploads first.", 429);
 			const newMedia = newId();
 			pending.set(newMedia, { userId: viewer.id, total, category: fields.media_category ?? "", video, chunks: new Map(), received: 0, started: Date.now() });
 			return Response.json({ ...idFields(newMedia), expires_after_secs: 86400 }, { status: 202 });

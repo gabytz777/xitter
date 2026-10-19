@@ -31,11 +31,23 @@ class ApiError extends Error {
 
 // ---- tokens
 
-export async function createToken(userId: string, name: string, scope: "read" | "write") {
-	const [{ n }] = await sql`select count(*)::int as n from api_tokens where user_id = ${userId}::bigint`;
-	if (n >= MAX_TOKENS) throw new ApiError(400, `You can have up to ${MAX_TOKENS} tokens. Delete one first.`);
+export async function createToken(userId: string, name: string, scope: "read" | "write", issuingSession?: string) {
 	const token = `xit_${Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString("hex")}`;
-	await sql`insert into api_tokens (id, user_id, name, token_hash, scope) values (${newId()}::bigint, ${userId}::bigint, ${name}, ${hash(token)}, ${scope})`;
+	await sql.begin(async (tx) => {
+		// Password recovery and token creation take the same account lock. A
+		// request authenticated before recovery must not mint a credential after it.
+		const [account] = await tx`select id from users where id = ${userId}::bigint
+			and status <> 'suspended' and deactivated_at is null and instance is null for update`;
+		if (!account) throw new ApiError(401, "Sign in again to make an API token.");
+		if (issuingSession !== undefined) {
+			const [session] = await tx`select token from sessions where token = ${issuingSession} and user_id = ${userId}::bigint
+				and (expires_at is null or expires_at > clock_timestamp())`;
+			if (!session) throw new ApiError(401, "Sign in again to make an API token.");
+		}
+		const [{ n }] = await tx`select count(*)::int as n from api_tokens where user_id = ${userId}::bigint`;
+		if (n >= MAX_TOKENS) throw new ApiError(400, `You can have up to ${MAX_TOKENS} tokens. Delete one first.`);
+		await tx`insert into api_tokens (id, user_id, name, token_hash, scope) values (${newId()}::bigint, ${userId}::bigint, ${name}, ${hash(token)}, ${scope})`;
+	});
 	return token;
 }
 
@@ -395,17 +407,19 @@ function withCors(res: Response) {
 
 // ---- /account/api: the account's tokens
 
-async function tokensView(req: Request, v: Viewer, fresh = "", error = "") {
+async function tokensView(req: Request, v: Viewer, fresh = "", error = "", status = 200) {
 	const tokens = await sql`select id::text, name, scope, created_at, last_used_at from api_tokens where user_id = ${v.id}::bigint order by created_at desc`;
 	const when = (d: Date | null) => (d ? new Date(d).toUTCString().replace(/:\d\d GMT$/, " UTC") : "never");
 	return accountPage({
 		req,
 		viewer: v,
 		title: "API tokens",
+		status,
 		// same-origin, not no-referrer: under no-referrer the form posts with "Origin: null"
 		referrer: "same-origin",
 		body: `<h1>API tokens</h1>
 <p>A token lets a script or bot use your account through the <a href="/api">API</a>. Anyone holding it can act as you, so keep it secret and delete it when you stop using it.</p>
+<p>Changing or resetting your password revokes all API tokens. Your scripts and bots will need new tokens afterward.</p>
 ${fresh ? `<div class="card success"><b>Your new token.</b> Copy it now; it won't be shown again.<p class="code">${esc(fresh)}</p></div>` : ""}
 ${error ? `<p class="error">${esc(error)}</p>` : ""}
 <form method="post"><input type="hidden" name="do" value="create">
@@ -435,9 +449,9 @@ export async function apiTokensRoute(req: Request, v: Viewer): Promise<Response>
 	if (!name || [...name].length > 40) return tokensView(req, v, "", "Name the token (up to 40 characters).");
 	const scope = f.get("scope") === "write" ? "write" : "read";
 	try {
-		return tokensView(req, v, await createToken(v.id, name, scope));
+		return tokensView(req, v, await createToken(v.id, name, scope, v.token));
 	} catch (e) {
-		if (e instanceof ApiError) return tokensView(req, v, "", e.message);
+		if (e instanceof ApiError) return tokensView(req, v, "", e.message, e.status);
 		throw e;
 	}
 }

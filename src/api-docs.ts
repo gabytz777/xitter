@@ -48,6 +48,7 @@ export function apiDocsPage(req: Request): Promise<Response> {
 <h2>Signing in</h2>
 <p>Make a token at <a href="/account/api">/account/api</a>. A <span class="r">read</span> token can only look; a <span class="w">write</span> token can also post, like and follow. Send it with every request:</p>
 <pre>Authorization: Bearer xit_...</pre>
+<p>Changing or resetting your password revokes all API tokens. Make new tokens for your scripts and bots afterward.</p>
 <p>Requests go to <code>${esc(base)}</code>. Bodies are JSON (or a form); answers are JSON with the result in <code>data</code>, or <code>{"error": "..."}</code> with a 4xx or 5xx status.</p>
 
 <h2>Endpoints</h2>

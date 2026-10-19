@@ -43,6 +43,10 @@ jobs:
         with:
           bun-version: 1.4.3
       - run: bun install --frozen-lockfile
+      - name: Install video tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
       - name: Unit tests
         run: bun run test:unit
       - name: Migrate test database
@@ -64,6 +68,19 @@ jobs:
           bun scripts/test-email-issuance.ts
           bun scripts/test-password-reset-issuance.ts
           bun scripts/test-admin-password-reset.ts
+          bun scripts/test-api-token-security.ts
+          bun scripts/test-scheduled-threads.ts
+          bun scripts/test-scheduled-quota.ts
+          bun scripts/test-scheduled-mentions.ts
+          bun scripts/test-scheduled-post-cost.ts
+          bun scripts/test-scheduled-single-connection.ts
+          bun scripts/test-scheduled-media.ts
+      - name: Media privacy and chunked upload regression tests
+        run: |
+          bun scripts/test-poll-media-privacy.ts
+          bun scripts/test-media-finalization.ts
+          bun scripts/test-media-upload-cap.ts
+          bun scripts/test-public-api-chunked-media.ts
       - name: HTTP and encrypted chat regression tests
         run: |
           bun src/server.ts > server.log 2>&1 &
@@ -89,8 +106,11 @@ jobs:
           bun scripts/test-account-settings.ts
           bun scripts/test-two-factor.ts
           bun scripts/test-chat.ts
+          bun scripts/test-protected-media.ts
           bun -e 'import { createUser } from "./src/auth"; import { createPost } from "./src/posts"; import { sql } from "./src/db"; const id = await createUser("ci_api_a", "CI API A", "testpass123"); await createUser("ci_api_b", "CI API B", "testpass123"); await createPost(id, "CI baseline post"); await sql.close();'
           bun scripts/test-api.ts ci_api_a ci_api_b testpass123 public/logo-light.png
+          bun scripts/test-media.ts ci_api_a testpass123 public/logo-light.png
+          bun scripts/test-polls.ts ci_api_a ci_api_b testpass123
           bun scripts/test-scheduled.ts ci_api_a testpass123
       - name: Server log on failure
         if: failure()
