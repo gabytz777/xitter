@@ -619,6 +619,7 @@ create table if not exists poll_votes (
 );
 
 alter table posts add column if not exists poll_id bigint references polls (id) on delete set null;
+create index if not exists posts_poll_idx on posts (poll_id) where poll_id is not null;
 
 -- scheduled posts and drafts, kept as the composer sent them
 create table if not exists scheduled_posts (
@@ -1298,6 +1299,23 @@ do $$ begin
 		insert into federation_outbox (kind, a) select 'post', p.id from posts p join users u on u.id = p.user_id
 			where u.instance is null and not u.protected and p.created_at > now() - interval '30 days' order by p.id;
 		insert into schema_steps (name) values ('federation_backfill');
+	end if;
+end $$;
+
+create or replace function federated_object_gone() returns trigger language plpgsql as $$
+begin
+	delete from federated_objects where kind = tg_argv[0] and local_id = old.id;
+	return old;
+end $$;
+create or replace trigger federated_user_gone after delete on users for each row when (old.instance is not null) execute function federated_object_gone('user');
+create or replace trigger federated_post_gone after delete on posts for each row execute function federated_object_gone('post');
+create or replace trigger federated_media_gone after delete on media for each row when (old.remote_instance is not null) execute function federated_object_gone('media');
+do $$ begin
+	if not exists (select 1 from schema_steps where name = 'federated_objects_prune') then
+		delete from federated_objects f where kind = 'user' and not exists (select 1 from users where id = f.local_id);
+		delete from federated_objects f where kind = 'post' and not exists (select 1 from posts where id = f.local_id);
+		delete from federated_objects f where kind = 'media' and not exists (select 1 from media where id = f.local_id);
+		insert into schema_steps (name) values ('federated_objects_prune');
 	end if;
 end $$;
 

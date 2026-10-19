@@ -54,8 +54,15 @@ try {
 	check("B keeps a copy of alice", !!aliceOnB);
 	const [handle] = aliceOnB ? await B.db`select screen_name from users where id = ${aliceOnB}::bigint` : [];
 	check("named with her instance", handle?.screen_name === `${alice.name}@${idOf(A.origin)}`, handle?.screen_name);
+	const preview = await fetch(`${B.origin}/${alice.name}@${idOf(A.origin)}`, { redirect: "manual" });
+	check("B previews her for link fetchers by her full handle", preview.status === 200 && (await preview.text()).includes("og:title"), preview.status);
 	const mirror = await until(async () => (await B.db`select local_id::text from federated_objects where instance = ${idOf(A.origin)} and kind = 'post' and remote_id = ${postId}::bigint`)[0]?.local_id as string);
 	check("and her post", !!mirror);
+	const syncStatus = await until(async () => {
+		const doc = (await (await fetch(`${B.origin}/.well-known/xitter`)).json()) as any;
+		return doc.federation?.peers?.find((p: any) => p.id === idOf(A.origin) && p.federating && p.last_sync_at);
+	}, 60);
+	check("B's public status shows when it last synced with A", !!syncStatus, syncStatus);
 
 	const found = await bob.get("UserByScreenName", { screen_name: `${alice.name}@${idOf(A.origin)}`, withSafetyModeUserFields: true });
 	check("bob finds alice by her handle", found.data?.user?.result?.rest_id === aliceOnB, found.data?.user?.result?.rest_id);
@@ -98,6 +105,17 @@ try {
 	await A.db`update users set protected = true where id = ${alice.id}::bigint`;
 	check("a protected account's posts go from B", !!(await until(async () => !(await B.db`select 1 from posts where user_id = ${aliceOnB ?? "0"}::bigint`).length)));
 
+	const carol = await account(A, `fc${stamp}`);
+	made.push({ side: A, id: carol.id });
+	const carolOnB = await until(async () => (await B.db`select id::text from users where screen_name = ${`${carol.name}@${idOf(A.origin)}`}`)[0]?.id as string | undefined);
+	await A.db`update users set status = 'suspended' where id = ${carol.id}::bigint`;
+	check("a suspended account goes from B", !!carolOnB && !!(await until(async () => !(await B.db`select 1 from users where id = ${carolOnB ?? "0"}::bigint`).length)));
+	await A.db`update users set status = 'active' where id = ${carol.id}::bigint`;
+	const carolBack = await until(async () => (await B.db`select id::text from users where screen_name = ${`${carol.name}@${idOf(A.origin)}`}`)[0]?.id as string | undefined);
+	check("and comes back when it's lifted", !!carolBack, carolBack);
+	await A.db`delete from users where id = ${carol.id}::bigint`;
+	check("a deleted account goes from B", !!(await until(async () => !(await B.db`select 1 from users where screen_name = ${`${carol.name}@${idOf(A.origin)}`}`).length)));
+
 	const forged = await fetch(`${A.origin}/federation/v1/events?after=0`, {
 		headers: { "x-xitter-from": idOf(B.origin), "x-xitter-to": idOf(A.origin), "x-xitter-timestamp": String(Date.now()), "x-xitter-nonce": "AAAAAAAAAAAAAAAAAAAAAA", "x-xitter-signature": "x".repeat(86) },
 	});
@@ -124,11 +142,21 @@ try {
 	const blocked = await adminApi(A, adminCookies, "federationBlock", { instance: idOf(B.origin), reason: "test" });
 	check("an admin defederates B", blocked.status === 200, blocked.body);
 	check("B's accounts drop out of view on A", (await A.db`select instance_blocked from users where id = ${bobOnA ?? "0"}::bigint`)[0]?.instance_blocked === true);
+	const hiddenPreview = await fetch(`${A.origin}/${bob.name}@${idOf(B.origin)}`, { redirect: "manual" });
+	check("and out of A's link previews", hiddenPreview.status === 302, hiddenPreview.status);
 	await bob.gql("CreateTweet", { tweet_text: `after the block ${stamp}` });
 	await Bun.sleep(20_000);
 	check("nothing new arrives from B", !(await A.db`select 1 from posts where user_id = ${bobOnA ?? "0"}::bigint and text like 'after the block%'`).length);
 	await adminApi(A, adminCookies, "federationUnblock", { instance: idOf(B.origin) });
 	check("lifting it catches up", !!(await until(async () => (await A.db`select 1 from posts where user_id = ${bobOnA ?? "0"}::bigint and text like 'after the block%'`).length > 0)));
+
+	const editCopy = await adminApi(A, adminCookies, "updateUser", { id: bobOnA, name: "renamed here" });
+	check("admins can't edit a copy of another instance's account", editCopy.status === 403 && /lives on/.test(editCopy.body.error ?? ""), editCopy.body);
+	const roleCopy = await adminApi(A, adminCookies, "setRole", { id: bobOnA, role: "admin" });
+	check("or make it staff", roleCopy.status === 403, roleCopy.body);
+	const suspendCopy = await adminApi(A, adminCookies, "setStatus", { id: bobOnA, status: "suspended" });
+	check("but they can suspend it here", suspendCopy.status === 200, suspendCopy.body);
+	await adminApi(A, adminCookies, "setStatus", { id: bobOnA, status: "active" });
 
 	const meowId = newId();
 	const secret = newSecret();

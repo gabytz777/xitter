@@ -22,7 +22,7 @@ type Author = { id: string; screen_name: string; name: string; bio: string; avat
 // an account anyone may see: not protected, suspended, limited or deactivated
 async function publicAuthor(where: ReturnType<typeof sql>): Promise<Author | undefined> {
 	const [u] = await sql`select id::text, screen_name, name, bio, avatar_url from users
-		where ${where} and not protected and status in ('active', 'restricted') and deactivated_at is null`;
+		where ${where} and not protected and not instance_blocked and status in ('active', 'restricted') and deactivated_at is null`;
 	return u as Author | undefined;
 }
 
@@ -107,12 +107,12 @@ function profilePreview(a: Author): Response {
 // a signed-out page request: the preview page, or undefined to carry on as before
 export async function linkPreview(pathname: string): Promise<Response | undefined> {
 	if (!feature("link_previews")) return undefined;
-	const status = /^\/(\w{1,15})\/status\/(\d{1,19})(?:\/(?:photo|video)\/\d)?\/?$/.exec(pathname);
+	const status = /^\/(\w{1,15}(?:@[a-z0-9.:-]{1,260})?)\/status\/(\d{1,19})(?:\/(?:photo|video)\/\d)?\/?$/i.exec(pathname);
 	if (status) {
 		const post = await publicPost(status[2]);
 		return post ? postPreview(post) : undefined;
 	}
-	const profile = /^\/(\w{1,15})\/?$/.exec(pathname);
+	const profile = /^\/(\w{1,15}(?:@[a-z0-9.:-]{1,260})?)\/?$/i.exec(pathname);
 	if (profile) {
 		const author = await publicAuthor(sql`lower(screen_name) = lower(${profile[1]})`);
 		return author ? profilePreview(author) : undefined;
@@ -158,10 +158,10 @@ export async function oembed(url: URL): Promise<Response> {
 		return none;
 	}
 	if (target.origin !== PUBLIC_ORIGIN) return none;
-	const status = /^\/\w{1,15}\/status\/(\d{1,19})/.exec(target.pathname);
+	const status = /^\/\w{1,15}(?:@[a-z0-9.:-]{1,260})?\/status\/(\d{1,19})/i.exec(target.pathname);
 	const author = status
 		? (await publicPost(status[1]))?.author
-		: await publicAuthor(sql`lower(screen_name) = lower(${/^\/(\w{1,15})\/?$/.exec(target.pathname)?.[1] ?? ""})`);
+		: await publicAuthor(sql`lower(screen_name) = lower(${/^\/(\w{1,15}(?:@[a-z0-9.:-]{1,260})?)\/?$/i.exec(target.pathname)?.[1] ?? ""})`);
 	if (!author) return none;
 	return Response.json(
 		{

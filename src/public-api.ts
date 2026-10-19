@@ -5,12 +5,13 @@
 // (blocks, protected accounts, suspensions). The rate limits are the
 // client's. /api is the documentation.
 
+import { BodyTooLarge, boundedBody } from "./api-input";
 import { accountPage, esc } from "./account-page";
 import { type User, type Viewer } from "./auth";
 import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { callOperation } from "./graphql";
-import { newId } from "./ids";
+import { isId, newId } from "./ids";
 import { absolute, mediaUpload, mediaUrl, posterUrl } from "./media";
 import type { PostRow } from "./model";
 import { PostError, feed, getPost, postsByIds, replies, type FeedItem } from "./posts";
@@ -21,7 +22,6 @@ import { followList, setFollow, userByName, usersByIds } from "./users";
 
 const hash = (token: string) => new Bun.CryptoHasher("sha256").update(token).digest("hex");
 const MAX_TOKENS = 10;
-const isId = (x: unknown): x is string => typeof x === "string" && /^\d{1,19}$/.test(x);
 
 class ApiError extends Error {
 	constructor(public status: number, message: string) {
@@ -121,7 +121,7 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 	Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
 const fail = (status: number, message: string) => json({ error: message }, status);
 
-const limitOf = (url: URL, max = 100) => Math.min(Math.max(Number(url.searchParams.get("limit")) || 20, 1), max);
+const limitOf = (url: URL, max = 100) => Math.min(Math.max(Math.floor(Number(url.searchParams.get("limit"))) || 20, 1), max);
 const cursorOf = (url: URL) => {
 	const c = url.searchParams.get("cursor");
 	return isId(c) ? c : undefined;
@@ -129,9 +129,13 @@ const cursorOf = (url: URL) => {
 
 async function body(req: Request): Promise<Record<string, any>> {
 	const type = req.headers.get("content-type") ?? "";
-	if (Number(req.headers.get("content-length") ?? 0) > 2 * 1024 * 1024) throw new ApiError(413, "That request is too large.");
-	if (type.includes("application/json")) return (await req.json().catch(() => ({}))) ?? {};
-	if (type.includes("form")) return Object.fromEntries((await req.formData().catch(() => new FormData())).entries());
+	const bytes = await boundedBody(req, 2 * 1024 * 1024);
+	const parsed = new Response(bytes, { headers: { "content-type": type } });
+	if (type.includes("application/json")) {
+		const value = await parsed.json().catch(() => ({}));
+		return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+	}
+	if (type.includes("form")) return Object.fromEntries((await parsed.formData().catch(() => new FormData())).entries());
 	return {};
 }
 
@@ -152,7 +156,8 @@ async function postOr404(v: Viewer, id: string) {
 async function uploadMedia(req: Request, v: Viewer) {
 	const type = (req.headers.get("content-type") ?? "").split(";")[0].trim();
 	if (!/^(image|video)\//.test(type)) throw new ApiError(415, "Send the file as the body with its image/* or video/* content type.");
-	const data = new Uint8Array(await req.arrayBuffer());
+	const maxBytes = type.startsWith("video/") ? settings().limits.video_mb * 1024 * 1024 : type === "image/gif" ? 15 * 1024 * 1024 : settings().limits.image_mb * 1024 * 1024;
+	const data = await boundedBody(req, maxBytes);
 	if (!data.length) throw new ApiError(400, "The body is empty.");
 	const call = async (query: Record<string, string>, form?: FormData) => {
 		const url = new URL(`${PUBLIC_ORIGIN}/i/media/upload.json?${new URLSearchParams(query)}`);
@@ -320,6 +325,7 @@ export async function publicApi(req: Request, url: URL): Promise<Response> {
 		const { status, ...rest } = out ?? {};
 		return withCors(json(rest, status ?? 200, limitHeaders(last)));
 	} catch (e) {
+		if (e instanceof BodyTooLarge) return withCors(fail(413, "That request is too large."));
 		if (e instanceof ApiError) return withCors(fail(e.status, e.message));
 		console.error(e);
 		return withCors(fail(500, "Something went wrong on our side."));

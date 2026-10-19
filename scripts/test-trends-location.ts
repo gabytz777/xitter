@@ -44,6 +44,11 @@ const trends = async () => {
 	return entries.map((e: any) => e.content.itemContent) as { name: string; trend_metadata: { domain_context: string } }[];
 };
 const names = async () => (await trends()).map((t) => t.name);
+const namesWhen = async (ok: (list: string[]) => boolean) => {
+	let list = await names();
+	for (const until = Date.now() + 70_000; !ok(list) && Date.now() < until; list = await names()) await Bun.sleep(3000);
+	return list;
+};
 
 const restoreTrends = await loosenTrends(origin);
 try {
@@ -58,13 +63,13 @@ try {
 	const found = await viewer.rest("/2/guide/explore_locations_with_auto_complete.json?prefix=germ");
 	check("locations can be searched", found.some((p: any) => p.place_id === "DE" && p.name === "Germany"), found);
 
-	let list = await names();
+	let list = await namesWhen((l) => l.includes(`#${fr}`));
 	check("personalized: trends from the viewer's own country", list.includes(`#${fr}`) && !list.includes(`#${de}`), list);
 	check("labelled with it", (await trends()).every((t) => t.trend_metadata.domain_context === "Trending in France"));
 
 	const saved = await viewer.rest("/2/guide/set_explore_settings.json", { use_personalized_trends: false, use_current_location: false, places: ["DE"] });
 	check("picking Germany", saved.places[0]?.place_id === "DE" && saved.use_personalized_trends === false, saved);
-	list = await names();
+	list = await namesWhen((l) => l.includes(`#${de}`));
 	check("then Germany's trends", list.includes(`#${de}`) && !list.includes(`#${fr}`), list);
 	const side = (await viewer.get("ExploreSidebar", {})).data.explore_sidebar.timeline.instructions[1].entries[0]?.content.items.map((i: any) => i.item.itemContent.name);
 	check("in the side bar too", side?.includes(`#${de}`) && !side.includes(`#${fr}`), side);
@@ -72,7 +77,7 @@ try {
 	await viewer.rest("/2/guide/set_explore_settings.json", { use_current_location: true });
 	check("using the current location goes back to the viewer's country", (await names()).includes(`#${fr}`));
 	await viewer.rest("/2/guide/set_explore_settings.json", { use_current_location: false, places: ["1"] });
-	list = await names();
+	list = await namesWhen((l) => l.includes(`#${de}`) && l.includes(`#${fr}`));
 	check("worldwide has both", list.includes(`#${de}`) && list.includes(`#${fr}`), list);
 	check("an unknown place is ignored", (await viewer.rest("/2/guide/set_explore_settings.json", { places: ["ZZ"] })).places[0].place_id === "1");
 } finally {

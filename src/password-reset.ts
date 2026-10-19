@@ -13,13 +13,20 @@ const hash = (token: string) => createHash("sha256").update(token).digest("hex")
 export async function requestReset(usernameOrEmail: string): Promise<void> {
 	const who = usernameOrEmail.trim().replace(/^@/, "");
 	if (!who || !mailEnabled()) return;
-	const [u] = await sql`select id::text, screen_name, email from users
-		where (lower(screen_name) = lower(${who}) or lower(email) = lower(${who})) and email is not null and status <> 'suspended' and instance is null`;
-	if (!u) return;
-	const [recent] = await sql`select 1 from password_resets where user_id = ${u.id}::bigint and created_at > now() - interval '2 minutes'`;
-	if (recent) return;
 	const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
-	await sql`insert into password_resets (token_hash, user_id) values (${hash(token)}, ${u.id}::bigint)`;
+	const u = await sql.begin(async (tx) => {
+		// Lock before reading the recipient and issuing the token. Changing the
+		// verified email uses the same lock and invalidates previously issued links.
+		const [account] = await tx`select id::text, screen_name, email from users
+			where (lower(screen_name) = lower(${who}) or lower(email) = lower(${who}))
+			and email is not null and status <> 'suspended' and instance is null for update`;
+		if (!account) return undefined;
+		const [recent] = await tx`select 1 from password_resets where user_id = ${account.id}::bigint and created_at > now() - interval '2 minutes'`;
+		if (recent) return undefined;
+		await tx`insert into password_resets (token_hash, user_id) values (${hash(token)}, ${account.id}::bigint)`;
+		return account;
+	});
+	if (!u) return;
 	const name = settings().instance_name;
 	await sendMail(
 		u.email,
@@ -61,9 +68,23 @@ export async function resetRoute(req: Request, url: URL): Promise<Response> {
 	if (password.length < 8) return form(req, token, "Your password needs to be at least 8 characters.");
 	if (password.length > 256) return form(req, token, "Passwords are at most 256 characters.");
 	if (password !== String(f?.get("confirm") ?? "")) return form(req, token, "The two passwords don't match.");
-	await sql`update users set password_hash = ${await Bun.password.hash(password)} where id = ${row.user_id}::bigint`;
-	await sql`update password_resets set used = true where token_hash = ${hash(token)}`;
-	await sql`delete from sessions where user_id = ${row.user_id}::bigint`;
+	const passwordHash = await Bun.password.hash(password);
+	const changed = await sql.begin(async (tx) => {
+		// Serialize resets for this account, including requests using different links.
+		await tx`select id from users where id = ${row.user_id}::bigint for update`;
+		const [claimed] = await tx`update password_resets set used = true
+			where token_hash = ${hash(token)} and not used and created_at > now() - interval '1 hour'
+			returning user_id`;
+		if (!claimed) return false;
+		await tx`update users set password_hash = ${passwordHash} where id = ${row.user_id}::bigint`;
+		// Older links must not be able to replace the newly chosen password either.
+		await tx`update password_resets set used = true where user_id = ${row.user_id}::bigint and not used`;
+		await tx`delete from sessions where user_id = ${row.user_id}::bigint`;
+		await tx`delete from login_challenges where user_id = ${row.user_id}::bigint`;
+		await tx`update email_confirmations set used = true where user_id = ${row.user_id}::bigint and not used`;
+		return true;
+	});
+	if (!changed) return page(req, `<h1>Link expired</h1><p>This reset link is invalid or has been used. <a href="/">Back to sign in</a>, then ask for a new one.</p>`, 410);
 	return page(req, `<h1>Password changed</h1><p>You can now <a href="/">sign in</a> with it. Every device was signed out.</p>`);
 }
 

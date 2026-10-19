@@ -5,6 +5,8 @@ import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { mediaUrl } from "./media";
 import { forbiddenText } from "./names";
+import { blockedFor, protectedFor, suspendedFor } from "./blocks";
+import { staffViewer } from "./staff-access";
 
 const MAX_LABEL = 25;
 const MIN_DURATION = 5;
@@ -80,7 +82,12 @@ export async function pollsByIds(viewerId: string, ids: string[]): Promise<Map<s
 				select g.choice, count(v.user_id)::int as n from generate_series(1, array_length(p.choices, 1)) as g(choice)
 				left join poll_votes v on v.poll_id = p.id and v.choice = g.choice group by g.choice) c), '{}') as counts,
 			(select v.choice from poll_votes v where v.poll_id = p.id and v.user_id = ${viewerId}::bigint) as voted
-		from polls p where p.id = any(${sql.array(ids, "INT8")})`;
+		from polls p where p.id = any(${sql.array(ids, "INT8")})
+			and exists (select 1 from posts post where post.poll_id = p.id
+				and (not post.hidden or ${staffViewer(viewerId)})
+				and post.user_id not in ${protectedFor(viewerId)}
+				and post.user_id not in ${suspendedFor(viewerId)}
+				and post.user_id not in ${blockedFor(viewerId)})`;
 	return new Map(rows.map((r: any) => [r.id as string, r as PollRow]));
 }
 
@@ -145,7 +152,8 @@ export async function vote(viewerId: string, form: FormData): Promise<Record<str
 	if (!Number.isInteger(choice) || choice < 1 || choice > poll.choices.length) throw new PollError("Pick one of the choices.");
 	if (poll.ends_at.getTime() <= Date.now()) throw new PollError("This poll has ended.");
 	await sql`insert into poll_votes (poll_id, user_id, choice) values (${id}::bigint, ${viewerId}::bigint, ${choice}) on conflict do nothing`;
-	const fresh = (await pollsByIds(viewerId, [id])).get(id)!;
+	const fresh = (await pollsByIds(viewerId, [id])).get(id);
+	if (!fresh) throw new PollError("Unknown card.", 404);
 	return {
 		card: {
 			name: cardName(fresh),

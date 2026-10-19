@@ -82,7 +82,9 @@ Every instance has an Ed25519 key in `data/federation-key.json` (or
 `data/`. Losing it means asking every peer to accept a new key.
 
 `GET /.well-known/xitter` returns the instance's address, software, protocol
-and public key.
+and public key. Under `federation.peers` it lists every other instance on the
+list, whether it federates with it and when it last pulled from it
+successfully, so anyone can see that two instances are syncing.
 
 Requests between instances carry these headers:
 
@@ -211,12 +213,17 @@ After the first contact, a list change can't replace the home's key. A
 different key shows up as a key change in the admin panel, and only a
 superadmin can accept it.
 
-The key of `xit.chococat.lol` is pinned in both places. For
-`xitter.opuadm.com`, a new instance trusts HTTPS on its first contact, and a
-forged list alone can't change that key. Once it runs with federation, pin it
-too:
+The keys of `xitter.opuadm.com` and `xit.chococat.lol` are pinned in
+`instances.json` and as `instance_key` in `src/superadmins.ts`, so no list
+change or first contact decides them. Each superadmin's account id is pinned
+as `user_id` too, so a new account that takes the same name on a home
+instance is never a superadmin. If one of them loses
+`data/federation-key.json`, its superadmins can't issue tickets until the new
+key is pinned here and every instance redeploys, so back that file up. A new
+superadmin home gets the same
+treatment once it runs with federation:
 
-1. Put each instance's key from `/.well-known/xitter` in its `public_key` in
+1. Put the instance's key from `/.well-known/xitter` in its `public_key` in
    `instances.json`.
 2. In `src/superadmins.ts`, set `instance_key` to the same key, and `user_id`
    to the superadmin's account id on their home instance. A pinned id stops a

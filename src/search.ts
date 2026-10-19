@@ -16,6 +16,7 @@
 import { blockedFor, outOfView, protectedFor } from "./blocks";
 import { sql } from "./db";
 import { settings } from "./settings";
+import { isId } from "./ids";
 import { staffViewer } from "./staff-access";
 
 type Clause = ReturnType<typeof sql>;
@@ -24,7 +25,15 @@ type Clause = ReturnType<typeof sql>;
 const HASHTAG_RE = "#(\\w+)";
 const like = (s: string) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 // a hashtag as a whole word: "#go" does not match "#gold"
-const tagPattern = (tag: string) => `(^|[^\\w#])#${tag.replace(/[^\w]/g, "")}($|[^\\w])`;
+const tagPattern = (tag: string) => `(^|[^\\w#])#${tag.replace(/[^\p{L}\p{N}_]/gu, "")}($|[^\\w])`;
+
+// Validate before casting: an impossible date otherwise aborts the whole search.
+function validDate(value: string): boolean {
+	const [year, month, day] = value.split("-").map(Number);
+	if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	return day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+}
 
 function tokens(q: string): string[] {
 	return [...q.matchAll(/-?"[^"]*"|\S+/g)].map((m) => m[0]);
@@ -42,8 +51,8 @@ function term(t: string, viewerId: string): Clause | undefined {
 		c = sql`exists (select 1 from posts parent join users pu on pu.id = parent.user_id where parent.id = p.reply_to_id and lower(pu.screen_name) = lower(${m[1]}))`;
 	else if ((m = /^@(\w{1,15})$/.exec(body)))
 		c = sql`exists (select 1 from post_mentions pm join users mu on mu.id = pm.user_id where pm.post_id = p.id and lower(mu.screen_name) = lower(${m[1]}))`;
-	else if ((m = /^quoted_tweet_id:(\d{1,19})$/.exec(body))) c = sql`p.quote_id = ${m[1]}::bigint`;
-	else if ((m = /^#(\w+)$/.exec(body))) c = sql`p.text ~* ${tagPattern(m[1])}`;
+	else if ((m = /^quoted_tweet_id:(\d{1,19})$/.exec(body))) c = isId(m[1]) ? sql`p.quote_id = ${m[1]}::bigint` : sql`false`;
+	else if ((m = /^#([\p{L}\p{N}_]+)$/u.exec(body))) c = sql`p.text ~* ${tagPattern(m[1])}`;
 	else if ((m = /^filter:(\w+)$/i.exec(body))) {
 		const f = m[1].toLowerCase();
 		if (f === "media") c = sql`exists (select 1 from media fm where fm.post_id = p.id)`;
@@ -54,8 +63,8 @@ function term(t: string, viewerId: string): Clause | undefined {
 		else if (f === "quote") c = sql`p.quote_id is not null`;
 		// "People you follow" in the search filters
 		else if (f === "follows") c = sql`p.user_id in (select followee_id from follows where follower_id = ${viewerId}::bigint)`;
-	} else if ((m = /^since:(\d{4}-\d{2}-\d{2})$/.exec(body))) c = sql`p.created_at >= ${m[1]}::date`;
-	else if ((m = /^until:(\d{4}-\d{2}-\d{2})$/.exec(body))) c = sql`p.created_at < ${m[1]}::date`;
+	} else if ((m = /^since:(\d{4}-\d{2}-\d{2})$/.exec(body))) c = validDate(m[1]) ? sql`p.created_at >= ${m[1]}::date` : sql`false`;
+	else if ((m = /^until:(\d{4}-\d{2}-\d{2})$/.exec(body))) c = validDate(m[1]) ? sql`p.created_at < ${m[1]}::date` : sql`false`;
 	else if ((m = /^min_(faves|retweets|replies):(\d{1,9})$/i.exec(body))) {
 		const n = Number(m[2]);
 		const kind = m[1].toLowerCase();
@@ -69,7 +78,8 @@ function term(t: string, viewerId: string): Clause | undefined {
 	// operators this server does not know (lang:, near:, within:, ...) are left out, not searched as text
 	else if (/^(?!https?:)\w+:\S/i.test(body)) return undefined;
 	else c = sql`p.text ilike ${like(body)}`;
-	return c && neg ? sql`not (${c})` : c;
+	// A missing author or quote is a non-match, including under negation.
+	return c && neg ? sql`not coalesce((${c}), false)` : c;
 }
 
 // the whole query as one condition: terms are ANDed, and "OR" binds the terms
@@ -141,7 +151,7 @@ export async function searchUsers(viewerId: string, query: string, limit: number
 
 // hashtags used in recent posts that start with the typed text, for the typeahead
 export async function hashtagsLike(prefix: string, limit: number): Promise<string[]> {
-	const clean = prefix.replace(/^#/, "").replace(/[^\w]/g, "");
+	const clean = prefix.replace(/^#/, "").replace(/[^\p{L}\p{N}_]/gu, "");
 	if (!clean) return [];
 	const rows = await sql`select tag, count(*) as n from (
 			select lower((regexp_matches(p.text, ${HASHTAG_RE}, 'g'))[1]) as tag from posts p where p.text ilike ${like(`#${clean}`)} and not p.hidden and p.user_id not in ${outOfView("0")} and p.user_id not in (select id from users where protected)

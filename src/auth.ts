@@ -92,30 +92,42 @@ export async function login(screenName: string, password: string): Promise<{ tok
 	if (password.length > 1024 || screenName.length > 64) return undefined;
 	await expireSanctions();
 	// accounts with a second factor sign in through the dialog's code step (startSession)
-	const [u] = await sql`select id, password_hash, deactivated_at from users where lower(screen_name) = lower(${screenName}) and not totp_enabled and instance is null
+	const [u] = await sql`select id, password_hash from users where lower(screen_name) = lower(${screenName}) and not totp_enabled and instance is null
 		and (status <> 'suspended' or deactivated_at > now() - interval '30 days')`;
 	// verify against a dummy hash when the user is unknown so timing does not reveal it
 	const ok = await Bun.password.verify(password, u?.password_hash ?? DUMMY_HASH).catch(() => false);
 	if (!u || !ok) return undefined;
-	// signing in within 30 days of deactivating brings the account back
-	if (u.deactivated_at) {
-		const back = await sql`update users set status = 'active', deactivated_at = null where id = ${u.id}::bigint and deactivated_at > now() - interval '30 days' returning id`;
-		if (!back.length) return undefined;
-	} else if ((await sql`select status from users where id = ${u.id}::bigint`)[0]?.status === "suspended") return undefined;
 	const token = randomHex(20);
 	const csrf = randomHex(32);
-	await sql`insert into sessions (token, user_id, csrf) values (${token}, ${u.id}::bigint, ${csrf})`;
-	await sql`update users set last_seen_at = now() where id = ${u.id}::bigint`;
-	return { token, csrf, userId: u.id };
+	const made = await sql.begin(async (tx) => {
+		// Hash verification runs without a lock. Recheck under the same account
+		// lock as password resets, so revoking sessions cannot miss this sign-in.
+		const [current] = await tx`select status, deactivated_at from users
+			where id = ${u.id}::bigint and password_hash = ${u.password_hash} and not totp_enabled and instance is null for update`;
+		if (!current) return false;
+		// Signing in within 30 days of deactivating brings the account back.
+		if (current.deactivated_at) {
+			const back = await tx`update users set status = 'active', deactivated_at = null
+				where id = ${u.id}::bigint and deactivated_at > now() - interval '30 days' returning id`;
+			if (!back.length) return false;
+		} else if (current.status === "suspended") return false;
+		await tx`insert into sessions (token, user_id, csrf) values (${token}, ${u.id}::bigint, ${csrf})`;
+		await tx`update users set last_seen_at = now() where id = ${u.id}::bigint`;
+		return true;
+	});
+	return made ? { token, csrf, userId: u.id } : undefined;
 }
 
-// a session for an account whose password and second factor were both checked
-export async function startSession(userId: string): Promise<{ token: string; csrf: string; userId: string }> {
+export type Session = { token: string; csrf: string; userId: string };
+
+// Pass the existing transaction when consuming a second-factor challenge, so
+// password resets cannot slip between the proof and the session insertion.
+export async function startSession(userId: string, executor: typeof sql = sql): Promise<Session> {
 	const token = randomHex(20);
 	const csrf = randomHex(32);
-	const made = await sql`insert into sessions (token, user_id, csrf) select ${token}, id, ${csrf} from users where id = ${userId}::bigint and status <> 'suspended' returning token`;
+	const made = await executor`insert into sessions (token, user_id, csrf) select ${token}, id, ${csrf} from users where id = ${userId}::bigint and status <> 'suspended' returning token`;
 	if (!made.length) throw new Error("account suspended");
-	await sql`update users set last_seen_at = now() where id = ${userId}::bigint`;
+	await executor`update users set last_seen_at = now() where id = ${userId}::bigint`;
 	return { token, csrf, userId };
 }
 

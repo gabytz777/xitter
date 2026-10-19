@@ -190,7 +190,7 @@ export const toolActions: Record<string, Action> = {
 		role: "moderator",
 		run: async (a, b) => {
 			const id = idOf(b.id);
-			await guard(a, id);
+			await guard(a, id, true);
 			const kind = b.kind ?? "message";
 			if (!["message", "warning", "strike"].includes(kind)) throw new AdminError("Unknown message type.");
 			const message = newId();
@@ -368,7 +368,7 @@ export const toolActions: Record<string, Action> = {
 		role: "admin",
 		run: async (a, b) => {
 			const id = idOf(b.id);
-			await guard(a, id);
+			await guard(a, id, true);
 			const counts = countsOf(b.counts, ["followers", "following"]);
 			await sql`update users set count_overrides = ${counts ? sql`${JSON.stringify(counts)}::text::jsonb` : null} where id = ${id}::bigint`;
 			await audit(a, "set_user_counts", id, { counts });

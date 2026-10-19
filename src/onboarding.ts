@@ -265,8 +265,8 @@ export async function onboarding(req: Request, path: string): Promise<Response |
 		// a second-factor challenge answers here too
 		const answered = await answerChallenge(token, String(f.code ?? ""));
 		if (!answered.unknown) {
-			if (!answered.userId) return respond(fieldError("code", answered.error ?? "That code isn't right."));
-			const session = await startSession(answered.userId);
+			if (!answered.session) return respond(fieldError("code", answered.error ?? "That code isn't right."));
+			const session = answered.session;
 			const [user] = await sql`select screen_name from users where id = ${session.userId}::bigint`;
 			const headers = new Headers();
 			for (const c of await signInCookies(req, session)) headers.append("set-cookie", c);

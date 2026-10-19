@@ -312,10 +312,22 @@ export function signedRawAnswer(incoming: Incoming, status: number, bytes: Uint8
 	});
 }
 
-export function wellKnown(): Response {
+let peerStatus: { at: number; peers: { id: string; federating: boolean; last_sync_at: string | null }[] } = { at: 0, peers: [] };
+
+export async function wellKnown(): Promise<Response> {
+	if (FEDERATION_ON && Date.now() - peerStatus.at > 30_000) {
+		const rows = await sql`select instance, last_ok_at from federation_peers`.catch(() => []);
+		const synced = new Map<string, Date | null>(rows.map((r: { instance: string; last_ok_at: Date | null }) => [r.instance, r.last_ok_at]));
+		peerStatus = {
+			at: Date.now(),
+			peers: listed()
+				.filter((i) => i.id !== INSTANCE_ID)
+				.map((i) => ({ id: i.id, federating: isPeer(i.id), last_sync_at: synced.get(i.id)?.toISOString() ?? null })),
+		};
+	}
 	return Response.json(
-		{ protocol: PROTOCOL, software: "xitter", id: INSTANCE_ID, url: PUBLIC_ORIGIN, public_key: publicKey(), federation: { enabled: FEDERATION_ON } },
-		{ headers: { "cache-control": "public, max-age=300", "access-control-allow-origin": "*" } },
+		{ protocol: PROTOCOL, software: "xitter", id: INSTANCE_ID, url: PUBLIC_ORIGIN, public_key: publicKey(), federation: { enabled: FEDERATION_ON, peers: FEDERATION_ON ? peerStatus.peers : [] } },
+		{ headers: { "cache-control": "public, max-age=60", "access-control-allow-origin": "*" } },
 	);
 }
 

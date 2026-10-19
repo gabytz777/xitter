@@ -27,9 +27,7 @@ export async function emailInfo(userId: string) {
 	return { emails, phone_numbers: [] };
 }
 
-async function sendConfirmation(userId: string, screenName: string, email: string) {
-	const token = randomToken();
-	await sql`insert into email_confirmations (token_hash, user_id, email) values (${hash(token)}, ${userId}::bigint, ${email})`;
+async function sendConfirmation(userId: string, screenName: string, email: string, token: string) {
 	const name = settings().instance_name;
 	await sendMail(
 		email,
@@ -41,13 +39,23 @@ async function sendConfirmation(userId: string, screenName: string, email: strin
 
 // Settings > Email's "Resend confirmation" for an address that isn't confirmed yet
 export async function resendConfirmation(viewer: Viewer): Promise<string | null> {
-	const info = await emailInfo(viewer.id);
-	const unconfirmed = info.emails.find((e) => !e.email_verified);
-	if (!unconfirmed) return "There's no address waiting to be confirmed.";
-	if (!mailEnabled()) return "This instance can't send mail.";
-	const [recent] = await sql`select 1 from email_confirmations where user_id = ${viewer.id}::bigint and created_at > now() - interval '1 minute'`;
-	if (recent) return "A confirmation was just sent. Wait a minute before asking again.";
-	await sendConfirmation(viewer.id, viewer.screen_name, unconfirmed.email);
+	const issued = await sql.begin(async (tx) => {
+		// Read pending addresses only after taking the credential-change lock.
+		// A resend must not revive a link that recovery just invalidated.
+		const [u] = await tx`select email, email_verified from users where id = ${viewer.id}::bigint for update`;
+		const [pending] = await tx`select email from email_confirmations where user_id = ${viewer.id}::bigint
+			and not used and created_at > now() - interval '1 day' order by created_at desc limit 1`;
+		const email = u?.email && !u.email_verified ? u.email : pending?.email;
+		if (!u || !email || (u.email_verified && email === u.email)) return { error: "There's no address waiting to be confirmed." };
+		if (!mailEnabled()) return { error: "This instance can't send mail." };
+		const [recent] = await tx`select 1 from email_confirmations where user_id = ${viewer.id}::bigint and created_at > now() - interval '1 minute'`;
+		if (recent) return { error: "A confirmation was just sent. Wait a minute before asking again." };
+		const token = randomToken();
+		await tx`insert into email_confirmations (token_hash, user_id, email) values (${hash(token)}, ${viewer.id}::bigint, ${email})`;
+		return { email: email as string, token };
+	});
+	if ("error" in issued) return issued.error!;
+	await sendConfirmation(viewer.id, viewer.screen_name, issued.email, issued.token);
 	return null;
 }
 
@@ -74,18 +82,41 @@ function emailPage(req: Request, viewer: Viewer, current: { email: string | null
 export async function emailRoute(req: Request, url: URL, viewer: Viewer | undefined): Promise<Response> {
 	if (url.pathname === "/account/email/confirm") {
 		const token = url.searchParams.get("token") ?? "";
-		const [c] = /^[0-9a-f]{64}$/.test(token)
-			? await sql`update email_confirmations set used = true where token_hash = ${hash(token)} and not used and created_at > now() - interval '1 day' returning user_id::text, email`
-			: [];
-		const done = c && (await sql`update users set email = ${c.email}, email_verified = true where id = ${c.user_id}::bigint
-			and not exists (select 1 from users o where lower(o.email) = lower(${c.email}) and o.id <> ${c.user_id}::bigint) returning id`).length;
+		let c: { email: string } | undefined;
+		if (/^[0-9a-f]{64}$/.test(token)) {
+			try {
+				c = await sql.begin(async (tx) => {
+					// Find the account without locking its token first: account mutations
+					// take the users lock before locking or invalidating recovery tokens.
+					const [candidate] = await tx`select user_id::text from email_confirmations where token_hash = ${hash(token)}`;
+					if (!candidate) return;
+					const [user] = await tx`select id from users where id = ${candidate.user_id}::bigint for update`;
+					if (!user) return;
+					const [confirmation] = await tx`select email from email_confirmations where token_hash = ${hash(token)}
+						and user_id = ${candidate.user_id}::bigint and not used and created_at > now() - interval '1 day' for update`;
+					if (!confirmation) return;
+					const changed = await tx`update users set email = ${confirmation.email}, email_verified = true where id = ${candidate.user_id}::bigint
+						and not exists (select 1 from users o where lower(o.email) = lower(${confirmation.email}) and o.id <> ${candidate.user_id}::bigint) returning id`;
+					if (!changed.length) return;
+					// No earlier link may restore an old recovery address. Consume links
+					// only after the address change succeeds, in the same transaction.
+					await tx`update email_confirmations set used = true where user_id = ${candidate.user_id}::bigint and not used`;
+					await tx`update password_resets set used = true where user_id = ${candidate.user_id}::bigint and not used`;
+					return { email: confirmation.email as string };
+				});
+			} catch (e: any) {
+				// Another account can claim the address after the existence check.
+				// The unique index arbitrates; rollback leaves the link retryable.
+				if (e.errno !== "23505" && e.code !== "23505") throw e;
+			}
+		}
 		return accountPage({
 			req,
 			viewer,
 			title: "Email",
 			referrer: null,
-			status: done ? 200 : 410,
-			body: done
+			status: c ? 200 : 410,
+			body: c
 				? `<form><h1>Email confirmed</h1><p class="dim">${esc(c.email)} is now your account's email.</p><a href="/settings/email">Back to settings</a></form>`
 				: `<form><h1>Link expired</h1><p class="dim">This link is invalid, was used already, or the address belongs to another account now. <a href="/account/email">Try again</a></p></form>`,
 		});
@@ -102,7 +133,18 @@ export async function emailRoute(req: Request, url: URL, viewer: Viewer | undefi
 	if ((await sql`select 1 from users where lower(email) = ${email} and id <> ${viewer.id}::bigint`).length) return emailPage(req, viewer, current, "", "That email is already used by another account.");
 	if (!mailEnabled()) return emailPage(req, viewer, current, "", "This instance can't send mail, so it can't confirm a new address. Ask its staff.");
 	try {
-		await sendConfirmation(viewer.id, viewer.screen_name, email);
+		const token = randomToken();
+		const issued = await sql.begin(async (tx) => {
+			// Password verification can finish after a reset. Recheck its exact
+			// hash while holding the lock that also protects token invalidation.
+			const [current] = await tx`select id from users where id = ${viewer.id}::bigint
+				and password_hash = ${u.password_hash} for update`;
+			if (!current) return false;
+			await tx`insert into email_confirmations (token_hash, user_id, email) values (${hash(token)}, ${viewer.id}::bigint, ${email})`;
+			return true;
+		});
+		if (!issued) return emailPage(req, viewer, current, "", "That password isn't right.");
+		await sendConfirmation(viewer.id, viewer.screen_name, email, token);
 	} catch (e: any) {
 		return emailPage(req, viewer, current, "", `The mail couldn't be sent: ${e.message}`);
 	}

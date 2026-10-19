@@ -3,7 +3,7 @@
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { urlEntities as linkEntities } from "./links";
+import { bioEntities, urlEntities as linkEntities } from "./links";
 import type { User } from "./auth";
 import { CLIENT_DIR } from "./client-cache";
 import { PUBLIC_ORIGIN } from "./config";
@@ -203,7 +203,7 @@ export function userResult(u: User) {
 		pinned_items: u.pinned_post_id ? { tweet_ids_str: [u.pinned_post_id] } : {},
 		possibly_sensitive: false,
 		privacy: { protected: !!u.protected },
-		profile_bio: { description: u.bio, entities: { description: {}, ...urlEntities(u) } },
+		profile_bio: { description: u.bio, entities: { description: { urls: bioEntities(u.bio ?? "") }, ...urlEntities(u) } },
 		profile_image_shape: pictureShape(u),
 		profile_metadata: { profile_interstitial_type: "" },
 		profile_translation: { translator_type: translatorType(u), translator_type_enum: { badged: "Badged", moderator: "Moderator", none: "None" }[translatorType(u)] },
@@ -243,7 +243,7 @@ export function legacyUser(u: User) {
 		notifications: !!u.stats?.notifying,
 		want_retweets: !u.stats?.repostsMuted,
 		possibly_sensitive: false,
-		entities: { description: {}, ...urlEntities(u) },
+		entities: { description: { urls: bioEntities(u.bio ?? "") }, ...urlEntities(u) },
 		profile_image_shape: pictureShape(u),
 		profile_interstitial_type: "",
 		is_translator: translatorType(u) !== "none",

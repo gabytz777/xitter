@@ -68,7 +68,8 @@ function homePage(req: Request, viewer: Viewer, message = "") {
 <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
 <label>Two-factor code <input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
 <button>Send to every instance</button>
-</form>`,
+</form>
+<p><a href="/admin#federation">Back to the admin panel</a></p>`,
 	});
 }
 

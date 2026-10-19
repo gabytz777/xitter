@@ -13,7 +13,7 @@
 	a { color: var(--blue); text-decoration: none; }
 	.icon { font-family: "Material Symbols Outlined"; font-size: 20px; line-height: 1; vertical-align: middle; }
 	.app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
-	nav { border-right: 1px solid var(--line); padding: 16px 12px; position: sticky; top: 0; height: 100vh; }
+	nav { border-right: 1px solid var(--line); padding: 16px 12px; position: sticky; top: 0; height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain; }
 	nav .logo { width: 128px; margin: 4px 8px 20px; display: block; }
 	nav button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px; border: 0; border-radius: 999px; background: none; color: var(--text); font: inherit; font-size: 16px; text-align: left; cursor: pointer; }
 	nav button:hover { background: var(--panel); }
@@ -1200,26 +1200,28 @@ async function renderUser(main, id) {
 	]);
 	const badgeOptions = (selected, none) => '<option value="">' + none + "</option>" + badges.map((b) => '<option value="' + esc(b.id) + '"' + (selected === b.id ? " selected" : "") + ">" + esc(b.name) + "</option>").join("");
 	const self = me && me.id === u.id;
+	const canHere = (what) => !u.instance && can(what);
 	main.innerHTML =
 		'<p><a href="#users">← Users</a></p>' + person(u) +
 		'<p class="dim small">Joined ' + esc(when(u.created_at)) + " · last sign-in " + esc(when(u.last_seen_at)) + " · " + u.posts + " posts · " + u.followers + " followers · " + u.sessions + " active sessions" +
 		(u.invite_code ? " · invite " + '<span class="code">' + esc(u.invite_code) + "</span>" : u.invited_by ? " · invited" : "") + (u.invited_by ? " from @" + esc(u.invited_by) : "") +
 		(u.org ? " · affiliate of @" + esc(u.org) : "") + ' · <a href="/' + esc(u.screen_name) + '" target="_blank">open profile</a></p>' +
+		(u.instance ? '<div class="box" style="margin-bottom:16px">This account lives on <b>' + esc(u.instance) + "</b>, which manages its profile, password and role. Here you can moderate it: suspend it, hide its posts or delete the copy.</div>" : "") +
 		'<div class="grid2">' +
 		// profile
 		'<div class="box"><h2>Profile</h2>' +
 		[["name", "Name", u.name], ["screen_name", "Handle", u.screen_name], ["location", "Location", u.location], ["website", "Website", u.website]]
-			.map(([k, l, v]) => '<div class="field"><label>' + l + '</label><input data-f="' + k + '" value="' + esc(v) + '"' + (can("updateUser") ? "" : " disabled") + "></div>").join("") +
-		'<div class="field"><label>Bio</label><textarea data-f="bio"' + (can("updateUser") ? "" : " disabled") + ">" + esc(u.bio) + "</textarea></div>" +
-		'<div class="field"><label>Account based in (About this account; blank shows the detected region' + (u.country ? ", " + esc(u.country) : "") + ')</label><input data-f="based_in" maxlength="50" value="' + esc(u.based_in_override ?? "") + '"' + (can("updateUser") ? "" : " disabled") + "></div>" +
-		(can("updateUser") ? '<button class="btn primary" id="save">Save profile</button>' : "") +
-		(can("setUserCounts") ? '<h2 style="margin-top:20px">Shown counts</h2><p class="dim small">Blank shows the real number. Only the number on the profile changes, not the lists.</p><div class="row">' +
+			.map(([k, l, v]) => '<div class="field"><label>' + l + '</label><input data-f="' + k + '" value="' + esc(v) + '"' + (canHere("updateUser") ? "" : " disabled") + "></div>").join("") +
+		'<div class="field"><label>Bio</label><textarea data-f="bio"' + (canHere("updateUser") ? "" : " disabled") + ">" + esc(u.bio) + "</textarea></div>" +
+		'<div class="field"><label>Account based in (About this account; blank shows the detected region' + (u.country ? ", " + esc(u.country) : "") + ')</label><input data-f="based_in" maxlength="50" value="' + esc(u.based_in_override ?? "") + '"' + (canHere("updateUser") ? "" : " disabled") + "></div>" +
+		(canHere("updateUser") ? '<button class="btn primary" id="save">Save profile</button>' : "") +
+		(canHere("setUserCounts") ? '<h2 style="margin-top:20px">Shown counts</h2><p class="dim small">Blank shows the real number. Only the number on the profile changes, not the lists.</p><div class="row">' +
 			["followers", "following"].map((k) => '<label class="small" style="flex:1">' + k + '<input data-count="' + k + '" type="number" min="0" value="' + ((u.count_overrides || {})[k] ?? "") + '"></label>').join("") +
 			'</div><button class="btn" id="saveCounts" style="margin-top:8px">Save counts</button>' : "") + "</div>" +
 		// badges
 		'<div class="box"><h2>Badge and flag</h2><div class="field"><label>Verification badge</label><select id="badge"' + (can("setBadge") ? "" : " disabled") + ">" +
 		[["", "none"], ["blue", "blue"], ["business", "gold (organisation)"], ["government", "grey (government organisation)"], ["government_individual", "grey (government official)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.verified_type ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
-		'</select></div><div class="field"><label>Translator badge (a globe after the verification badge)</label><select id="translator"' + (can("setTranslator") ? "" : " disabled") + ">" +
+		'</select></div><div class="field"><label>Translator badge (a globe after the verification badge)</label><select id="translator"' + (canHere("setTranslator") ? "" : " disabled") + ">" +
 		[["", "none"], ["translator", "blue (translator)"], ["moderator", "gold (translator moderator)"], ["approver", "yellow (approver)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.translator ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
 		'</select></div><div class="field"><label>Profile label (under the name, where X shows "Parody account"; <a href="#badges">make one</a>)</label><select id="plabel"' + (can("setProfileLabel") ? "" : " disabled") + ">" +
 		[["None", "none"], ["Parody", "Parody account"], ["Commentary", "Commentary account"], ["Fan", "Fan account"]].concat(labels.map((l) => [l.id, l.text])).map(([v, l]) => '<option value="' + esc(v) + '"' + ((u.label_id || u.parody_label || "None") === v ? " selected" : "") + ">" + esc(l) + "</option>").join("") +
@@ -1245,17 +1247,17 @@ async function renderUser(main, id) {
 			.map(([s, l, t]) => '<button class="btn' + (s === "suspended" ? " danger" : "") + '" data-status="' + s + '" title="' + esc(t) + '"' + (u.status === s || !can("setStatus") || self ? " disabled" : "") + ">" + l + "</button>").join("") +
 		'</div><p class="dim small">Restrict: can read, can\'t post. Limit: only followers see their posts. Suspend: signed out and hidden everywhere.</p></div>' +
 		// access
-		'<div class="box"><h2>Access</h2><div class="row">' + (can("resetPassword") ? '<button class="btn" id="reset">Reset password</button>' : "") + (can("signOut") ? '<button class="btn" id="signout">Sign out everywhere</button>' : "") + '</div><div id="secret"></div>' +
-		'<label class="row" style="margin-top:14px"><input type="checkbox" id="notes-access"' + (u.notes_writer ? " checked" : "") + (can("setNotesAccess") ? "" : " disabled") + '>Community Notes writing access</label>' +
-		(can("admin") ? '<div class="field" style="margin-top:14px"><label>Staff role</label><select id="role"><option value="">none</option>' + ["support", "moderator", "admin"].map((r) => '<option' + (u.role === r ? " selected" : "") + ">" + r + "</option>").join("") + "</select></div>" : "") +
+		'<div class="box"><h2>Access</h2><div class="row">' + (canHere("resetPassword") ? '<button class="btn" id="reset">Reset password</button>' : "") + (canHere("signOut") ? '<button class="btn" id="signout">Sign out everywhere</button>' : "") + '</div><div id="secret"></div>' +
+		'<label class="row" style="margin-top:14px"><input type="checkbox" id="notes-access"' + (u.notes_writer ? " checked" : "") + (canHere("setNotesAccess") ? "" : " disabled") + '>Community Notes writing access</label>' +
+		(canHere("admin") ? '<div class="field" style="margin-top:14px"><label>Staff role</label><select id="role"><option value="">none</option>' + ["support", "moderator", "admin"].map((r) => '<option' + (u.role === r ? " selected" : "") + ">" + r + "</option>").join("") + "</select></div>" : "") +
 		(can("deleteUser") && !self ? '<div class="field" style="margin-top:14px"><label>Delete account (type @' + esc(u.screen_name) + ' to confirm)</label><div class="row"><input id="confirm" placeholder="' + esc(u.screen_name) + '"><button class="btn danger" id="delete">Delete forever</button></div></div>' : "") +
 		"</div>" +
 		// messages, private notes, sessions
-		'<div class="box"><h2>Messages to the account</h2><p class="dim small">They arrive in its notifications. A warning or strike can be appealed.</p>' +
+		'<div class="box"><h2>Messages to the account</h2><p class="dim small">' + (u.instance ? "It can't read messages from here. Its own instance's staff can message it." : "They arrive in its notifications. A warning or strike can be appealed.") + "</p>" +
 		(messages.length ? '<div class="list" style="margin-bottom:12px">' + messages.map((m) => '<p><span class="pill' + (m.kind === "strike" ? " suspended" : m.kind === "warning" ? " restricted" : "") + '">' + esc(m.kind) + "</span> " +
 			(m.revoked_at ? '<s class="dim">' + esc(m.body) + "</s>" : esc(m.body)) + '<br><span class="dim small">' + (m.actor ? "@" + esc(m.actor) + " · " : "") + esc(when(m.created_at)) + (m.read_at ? " · read" : "") + (m.revoked_at ? " · withdrawn" : "") + "</span>" +
 			(m.kind === "strike" && !m.revoked_at && can("revokeStrike") ? ' <button class="btn" data-unstrike="' + esc(m.id) + '">Withdraw</button>' : "") + "</p>").join("") + "</div>" : "") +
-		(can("sendStaffMessage") && !self ? '<div class="field"><select id="msgKind"><option value="message">Message</option><option value="warning">Warning</option><option value="strike">Strike</option></select></div>' +
+		(canHere("sendStaffMessage") && !self ? '<div class="field"><select id="msgKind"><option value="message">Message</option><option value="warning">Warning</option><option value="strike">Strike</option></select></div>' +
 			'<div class="field"><textarea id="msgBody" maxlength="2000" placeholder="What they\'ll read"></textarea></div><label class="row" style="margin:6px 0"><input type="checkbox" id="msgEscalate" checked> A strike counts toward suspension</label><button class="btn primary" id="send">Send</button>' : "") + "</div>" +
 		'<div class="box"><h2>Staff notes</h2><p class="dim small">Only staff see these.</p>' +
 		(notes.length ? '<div class="list" style="margin-bottom:12px">' + notes.map((n) => '<p style="white-space:pre-wrap">' + esc(n.body) + '<br><span class="dim small">@' + esc(n.actor ?? "?") + " · " + esc(when(n.created_at)) + "</span></p>").join("") + "</div>" : "") +
@@ -1269,7 +1271,7 @@ async function renderUser(main, id) {
 			: '<p class="dim small">Not signed in anywhere.</p>') + "</div>" +
 		"</div>" +
 		// organisation
-		(isOrg ? '<h2>Affiliates</h2>' + (can("addAffiliate") ? '<div class="bar"><input id="aff" placeholder="@handle to add"><button class="btn primary" id="addaff">Add affiliate</button></div>' : "") +
+		(isOrg ? '<h2>Affiliates</h2>' + (canHere("addAffiliate") ? '<div class="bar"><input id="aff" placeholder="@handle to add"><button class="btn primary" id="addaff">Add affiliate</button></div>' : "") +
 			(affiliates.length ? '<div class="scroll"><table class="table">' + affiliates.map((a) => '<tr><td>' + person(a) + "</td><td>" + (can("removeAffiliate") ? '<button class="btn danger" data-unaff="' + esc(a.id) + '">Remove</button>' : "") + "</td></tr>").join("") + "</table></div>" : '<div class="empty">No affiliates yet.</div>') : "") +
 		(alts?.length ? '<h2>Seen from the same addresses</h2><p class="dim small">Accounts that signed in from an address this one used in the last 90 days. Shared networks put strangers here too.</p><p>' + alts.map((a) => '<a href="#user/' + esc(a.id) + '">@' + esc(a.screen_name) + "</a>" + (a.status !== "active" ? ' <span class="pill ' + esc(a.status) + '">' + esc(a.status) + "</span>" : "")).join(", ") + "</p>" : "") +
 		(invited.length ? "<h2>Invited</h2><p>" + invited.map((i) => '<a href="#user/' + esc(i.id) + '">@' + esc(i.screen_name) + "</a>").join(", ") + "</p>" : "") +
@@ -1302,7 +1304,7 @@ async function renderUser(main, id) {
 	};
 	if ($("#signout")) $("#signout").onclick = () => act(() => api("signOut", { id }), "Signed out").then(again);
 	if ($("#role")) $("#role").onchange = () => act(() => api("setRole", { id, role: $("#role").value }), "Role set").then(again);
-	if (can("setNotesAccess")) $("#notes-access").onchange = () => act(() => api("setNotesAccess", { id, enabled: $("#notes-access").checked }), "Notes access updated").then(again);
+	if (canHere("setNotesAccess")) $("#notes-access").onchange = () => act(() => api("setNotesAccess", { id, enabled: $("#notes-access").checked }), "Notes access updated").then(again);
 	if ($("#delete")) $("#delete").onclick = () => act(async () => { await api("deleteUser", { id, confirm: $("#confirm").value }); go("users"); }, "Account deleted");
 	if ($("#addaff")) $("#addaff").onclick = () => act(() => api("addAffiliate", { orgId: id, screen_name: $("#aff").value }), "Affiliate added").then(again);
 	const setBadges = (list) => act(() => api("setBadges", { id, badgeIds: list }), "Badges saved").then(again);
@@ -1333,8 +1335,9 @@ async function renderUser(main, id) {
 		return;
 	}
 	$("#nav").insertAdjacentHTML("beforeend", Object.entries(PAGES).filter(([, p]) => !p.needs || can(p.needs)).map(([k, p]) => '<button data-page="' + k + '"><span class="icon">' + p.icon + "</span>" + esc(p.title) + "</button>").join("") +
+		(me.superadmin_home ? '<button onclick="location.href=\'/federation/superadmin\'"><span class="icon">shield_person</span>Superadmin</button>' : "") +
 		'<button onclick="location.href=\'/home\'"><span class="icon">arrow_back</span>Back to {{instance}}</button>' +
-		'<div class="who">@' + esc(me.screen_name) + " · " + esc(me.role) + "</div>");
+		'<div class="who">@' + esc(me.screen_name) + " · " + esc(me.superadmin ? "superadmin" : me.role) + "</div>");
 	document.querySelectorAll("nav [data-page]").forEach((b) => b.onclick = () => go(b.dataset.page));
 	refreshCounts();
 	route();

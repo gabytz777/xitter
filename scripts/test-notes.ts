@@ -80,11 +80,11 @@ try {
 	await b.gql("BirdwatchCreateRating", { note_id: noteId, data_v2: { helpfulness_level: "Helpful" } });
 	await b.gql("BirdwatchCreateBatSignal", { tweet_id: postId });
 	const authorId = (await a.gql("UserByScreenName", { screen_name: "pozo" })).data.user.result.rest_id;
-	await sql`insert into blocks(blocker_id, blocked_id) values(${ids[0]}::bigint, ${authorId}::bigint)`;
+	await sql`insert into blocks(blocker_id, blocked_id) values(${authorId}::bigint, ${ids[0]}::bigint)`;
 	try {
 		check((await voters[1].gql("XitterPostContext", { ids: [postId] })).data.xitter_post_context.length === 0, "blocked post context hidden");
 		check(!!(await voters[1].gql("BirdwatchCreateRating", { note_id: noteId, data_v2: { helpfulness_level: "Helpful" } })).errors, "blocked users cannot rate");
-	} finally { await sql`delete from blocks where blocker_id = ${ids[0]}::bigint and blocked_id = ${authorId}::bigint`; }
+	} finally { await sql`delete from blocks where blocker_id = ${authorId}::bigint and blocked_id = ${ids[0]}::bigint`; }
 	const get = await fetch(origin + "/i/api/graphql/q/BirdwatchCreateBatSignal?variables=" + encodeURIComponent(JSON.stringify({ tweet_id: postId })), { headers: b.headers });
 	check(get.status === 405, "GET cannot mutate notes");
 	await a.admin("revokePlatform", { id: platform.id });

@@ -76,15 +76,29 @@ export async function accountSettingsRoute(method: string, path: string, viewer:
 
 	if (/^\/(?:i|1\.1)\/account\/change_password(?:\.json)?$/.test(path)) {
 		const f = await body(req);
-		if (!(await passwordMatches(viewer.id, f.current_password))) return error(231, "Your current password is incorrect.", 403);
+		const [account] = await sql`select password_hash from users where id = ${viewer.id}::bigint`;
+		if (!account || !f.current_password || !(await Bun.password.verify(f.current_password, account.password_hash).catch(() => false)))
+			return error(231, "Your current password is incorrect.", 403);
 		const next = f.new_password ?? "";
 		if (next.length < 8) return error(214, "Your password needs to be at least 8 characters.");
 		if (next.length > 256) return error(214, "Passwords are at most 256 characters.");
 		if (next !== (f.password_confirmation ?? next)) return error(214, "The two passwords don't match.");
 		if (next === f.current_password) return error(214, "Your new password must be different from your current one.");
-		await sql`update users set password_hash = ${await Bun.password.hash(next)} where id = ${viewer.id}::bigint`;
-		// other devices have to sign in again with the new password
-		await sql`delete from sessions where user_id = ${viewer.id}::bigint and token <> ${viewer.token}`;
+		const passwordHash = await Bun.password.hash(next);
+		const changed = await sql.begin(async (tx) => {
+			// Recheck the hash while taking the account lock: another password change
+			// or reset may have completed since the current password was verified.
+			const rows = await tx`update users set password_hash = ${passwordHash}
+				where id = ${viewer.id}::bigint and password_hash = ${account.password_hash} returning id`;
+			if (!rows.length) return false;
+			await tx`update password_resets set used = true where user_id = ${viewer.id}::bigint and not used`;
+			// Other devices have to sign in again with the new password.
+			await tx`delete from sessions where user_id = ${viewer.id}::bigint and token <> ${viewer.token}`;
+			await tx`delete from login_challenges where user_id = ${viewer.id}::bigint`;
+			await tx`update email_confirmations set used = true where user_id = ${viewer.id}::bigint and not used`;
+			return true;
+		});
+		if (!changed) return error(231, "Your current password is incorrect.", 403);
 		return Response.json({ status: "ok" });
 	}
 
