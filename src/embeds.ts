@@ -29,14 +29,14 @@ async function publicAuthor(where: ReturnType<typeof sql>): Promise<Author | und
 type Post = { id: string; text: string; created_at: Date; author: Author; image?: { id: string; kind: string; mime: string; width: number; height: number } };
 
 async function publicPost(id: string): Promise<Post | undefined> {
-	const [p] = await sql`select id::text, user_id::text, text, created_at, sensitive from posts where id = ${id}::bigint and not hidden`;
+	const [p] = await sql`select p.id::text, p.user_id::text, p.text, p.created_at, p.sensitive and not u.never_sensitive as sensitive from posts p join users u on u.id = p.user_id where p.id = ${id}::bigint and not p.hidden`;
 	if (!p) return undefined;
 	const author = await publicAuthor(sql`id = ${p.user_id}::bigint`);
 	if (!author) return undefined;
 	const [m] = p.sensitive
 		? []
 		: await sql`select id::text, kind, mime, width, height from media
-			where post_id = ${id}::bigint and state = 'ready' and sensitive_warning is null order by position nulls last limit 1`;
+			where post_id = ${id}::bigint and state = 'ready' and (sensitive_warning is null or ${!p.sensitive}) order by position nulls last limit 1`;
 	return { id: p.id, text: p.text, created_at: p.created_at, author, image: m as Post["image"] };
 }
 

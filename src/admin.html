@@ -729,7 +729,7 @@ const RENDER = {
 			'<div class="box" style="margin-bottom:16px"><h2>This instance</h2><p>Address <span class="code">' + esc(f.id) + '</span>, key <span class="code">' + esc(f.public_key) + "</span></p>" +
 			(f.listed_here
 				? '<p class="dim small">Listed as ' + esc(f.listed_here.name) + " (" + esc(f.listed_here.state) + ")" + (f.listed_here.public_key && f.listed_here.public_key !== f.public_key ? '. <b>The list has a different key for this instance, so others refuse it.</b>' : "") + "</p>"
-				: '<p class="dim small">Not on the list yet. Open a pull request that adds this entry to instances.json:</p><pre class="code">' + esc(entry) + "</pre>") +
+				: '<p class="dim small">Not on the list yet. Check the <a href="https://github.com/Xittered/xitter/blob/main/FEDERATION.md#requirements">requirements</a>, write your rules under Settings, then open a pull request that adds this entry to instances.json:</p><pre class="code">' + esc(entry) + "</pre>") +
 			'<p class="dim small">List sequence ' + esc(String(f.registry.sequence)) + ", checked " + esc(f.registry.checked_at ? when(f.registry.checked_at) : "never") + (f.registry.error ? ". Last error: " + esc(f.registry.error) : "") + ". Superadmins: " + esc(f.superadmins.join(", ")) + "</p></div>" +
 			'<div class="scroll">' + (f.instances.length
 				? '<table class="table"><tr><th>Instance</th><th>State</th><th>Accounts</th><th>Posts</th><th>Last sync</th><th></th></tr>' +
@@ -1249,6 +1249,7 @@ async function renderUser(main, id) {
 		// access
 		'<div class="box"><h2>Access</h2><div class="row">' + (canHere("resetPassword") ? '<button class="btn" id="reset">Reset password</button>' : "") + (canHere("signOut") ? '<button class="btn" id="signout">Sign out everywhere</button>' : "") + '</div><div id="secret"></div>' +
 		'<label class="row" style="margin-top:14px"><input type="checkbox" id="notes-access"' + (u.notes_writer ? " checked" : "") + (canHere("setNotesAccess") ? "" : " disabled") + '>Community Notes writing access</label>' +
+		'<label class="row" style="margin-top:8px"><input type="checkbox" id="never-sensitive"' + (u.never_sensitive ? " checked" : "") + (can("setNeverSensitive") ? "" : " disabled") + '>Never mark their posts as sensitive</label>' +
 		(canHere("admin") ? '<div class="field" style="margin-top:14px"><label>Staff role</label><select id="role"><option value="">none</option>' + ["support", "moderator", "admin"].map((r) => '<option' + (u.role === r ? " selected" : "") + ">" + r + "</option>").join("") + "</select></div>" : "") +
 		(can("deleteUser") && !self ? '<div class="field" style="margin-top:14px"><label>Delete account (type @' + esc(u.screen_name) + ' to confirm)</label><div class="row"><input id="confirm" placeholder="' + esc(u.screen_name) + '"><button class="btn danger" id="delete">Delete forever</button></div></div>' : "") +
 		"</div>" +
@@ -1304,6 +1305,7 @@ async function renderUser(main, id) {
 	};
 	if ($("#signout")) $("#signout").onclick = () => act(() => api("signOut", { id }), "Signed out").then(again);
 	if ($("#role")) $("#role").onchange = () => act(() => api("setRole", { id, role: $("#role").value }), "Role set").then(again);
+	if (can("setNeverSensitive")) $("#never-sensitive").onchange = () => act(() => api("setNeverSensitive", { id, enabled: $("#never-sensitive").checked }), "Sensitive marking updated").then(again);
 	if (canHere("setNotesAccess")) $("#notes-access").onchange = () => act(() => api("setNotesAccess", { id, enabled: $("#notes-access").checked }), "Notes access updated").then(again);
 	if ($("#delete")) $("#delete").onclick = () => act(async () => { await api("deleteUser", { id, confirm: $("#confirm").value }); go("users"); }, "Account deleted");
 	if ($("#addaff")) $("#addaff").onclick = () => act(() => api("addAffiliate", { orgId: id, screen_name: $("#aff").value }), "Affiliate added").then(again);

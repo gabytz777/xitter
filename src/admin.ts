@@ -196,6 +196,14 @@ const ACTIONS: Record<string, Action> = {
 		await audit(a, "set_notes_access", id, { enabled: b.enabled });
 		return {};
 	} },
+	setNeverSensitive: { role: "moderator", run: async (a, b) => {
+		const id = idOf(b.id);
+		await guard(a, id);
+		if (typeof b.enabled !== "boolean") throw new AdminError("Provide a boolean setting.");
+		await sql`update users set never_sensitive = ${b.enabled} where id = ${id}::bigint`;
+		await audit(a, "set_never_sensitive", id, { enabled: b.enabled });
+		return {};
+	} },
 	platforms: { role: "admin", run: async () => ({ platforms: await sql`select id::text, label, revoked, created_at from client_platforms order by id desc` }) },
 	createPlatform: { role: "admin", run: async (a, b) => {
 		const label = typeof b.label === "string" ? b.label.trim() : "";
@@ -353,7 +361,7 @@ const ACTIONS: Record<string, Action> = {
 		role: "support",
 		run: async (a, b) => {
 			const id = idOf(b.id);
-			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.count_overrides, u.notes_writer, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
+			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.count_overrides, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
 				(select coalesce(json_agg(ub.badge_id::text order by ub.position), '[]') from user_badges ub where ub.user_id = u.id) as badge_ids,
 				(select count(*)::int from sessions s where s.user_id = u.id) as sessions,
 				(select c.screen_name from invites i join users c on c.id = i.created_by where i.code = u.invite_code) as invited_by

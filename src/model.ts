@@ -8,7 +8,9 @@ import type { User } from "./auth";
 import { CLIENT_DIR } from "./client-cache";
 import { PUBLIC_ORIGIN } from "./config";
 import type { ArticleEntity } from "./articles";
+import { INSTANCE_ID } from "./federation";
 import { FLAGS } from "./flags";
+import { MENTION_HANDLE } from "./mentions";
 import { type MediaRow, absolute, mediaEntity } from "./media";
 import { placeById } from "./places";
 import { webSource } from "./platforms";
@@ -299,6 +301,7 @@ export type PostRow = {
 	source?: string;
 	communityNote?: { id: string; text: string };
 	sensitive?: boolean;
+	never_sensitive?: boolean;
 	reply_user_id: string | null;
 	reply_screen_name: string | null;
 	like_count: number;
@@ -366,11 +369,15 @@ function userMentions(p: PostRow) {
 	if (!p.mentions?.length) return [];
 	const byName = new Map(p.mentions.map((m) => [m.screen_name.toLowerCase(), m]));
 	const out = [];
-	for (const m of p.text.matchAll(/(?<![\w@])@(\w{1,15})/g)) {
-		const user = byName.get(m[1].toLowerCase());
+	for (const m of p.text.matchAll(MENTION_HANDLE)) {
+		const name = m[1].toLowerCase();
+		const host = m[2]?.toLowerCase();
+		const user = host
+			? (byName.get(`${name}@${host}`) ?? (host === INSTANCE_ID ? byName.get(name) : undefined))
+			: (byName.get(name) ?? p.mentions.find((u) => u.screen_name.toLowerCase().startsWith(`${name}@`)));
 		if (!user) continue;
 		const start = [...p.text.slice(0, m.index)].length;
-		out.push({ id_str: user.id, indices: [start, start + 1 + m[1].length], name: user.name, screen_name: user.screen_name });
+		out.push({ id_str: user.id, indices: [start, start + [...m[0]].length], name: user.name, screen_name: user.screen_name });
 	}
 	return out;
 }

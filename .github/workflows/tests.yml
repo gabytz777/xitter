@@ -1,0 +1,97 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: xitter_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d xitter_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/xitter_test
+      PORT: '3137'
+      TEST_ORIGIN: http://localhost:3137
+      RATE_LIMITS: 'off'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - run: bun install --frozen-lockfile
+      - name: Unit tests
+        run: bun run test:unit
+      - name: Migrate test database
+        run: bun -e 'import { migrate, sql } from "./src/db"; await migrate(); await sql.close();'
+      - name: Database regression tests
+        run: |
+          bun scripts/test-password-reset-concurrency.ts
+          bun scripts/test-login-concurrency.ts
+          bun scripts/test-password-change-concurrency.ts
+          bun scripts/test-two-factor-concurrency.ts
+          bun scripts/test-two-factor-credentials.ts
+          bun scripts/test-poll-visibility.ts
+          bun scripts/test-search-operators.ts
+          bun scripts/test-public-api-input.ts
+          bun scripts/test-data-export.ts
+          bun scripts/test-scheduled-validation.ts
+          bun scripts/test-bookmark-pagination.ts
+          bun scripts/test-email-confirmation.ts
+          bun scripts/test-email-issuance.ts
+          bun scripts/test-password-reset-issuance.ts
+          bun scripts/test-admin-password-reset.ts
+      - name: HTTP and encrypted chat regression tests
+        run: |
+          bun src/server.ts > server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in {1..30}; do
+            if curl --fail --silent "$TEST_ORIGIN/account/forgot" > /dev/null; then
+              ready=true
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat server.log
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            cat server.log
+            exit 1
+          fi
+          bun scripts/test-password-reset.ts
+          bun scripts/test-account-settings.ts
+          bun scripts/test-two-factor.ts
+          bun scripts/test-chat.ts
+          bun -e 'import { createUser } from "./src/auth"; import { createPost } from "./src/posts"; import { sql } from "./src/db"; const id = await createUser("ci_api_a", "CI API A", "testpass123"); await createUser("ci_api_b", "CI API B", "testpass123"); await createPost(id, "CI baseline post"); await sql.close();'
+          bun scripts/test-api.ts ci_api_a ci_api_b testpass123 public/logo-light.png
+          bun scripts/test-scheduled.ts ci_api_a testpass123
+      - name: Server log on failure
+        if: failure()
+        run: cat server.log 2>/dev/null || true

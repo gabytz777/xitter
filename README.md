@@ -41,7 +41,8 @@ copy during setup, and it stays on that machine.
   when mail is set up; Settings > Email changes it by a confirmation link), pride flag badges, organisations
   with affiliates, several signed-in accounts
 - Account settings: password change, username change, language, deactivation
-  (reactivates on sign-in within 30 days), data archive, email notification
+  (reactivates on sign-in within 30 days), data archive (including drafts and
+  scheduled posts), email notification
   settings (activity and new-message digests, sent while you're away), sessions
   list with revoke, account access history (each sign-in
   with its app and address), two-factor sign-in with an
@@ -201,8 +202,8 @@ logos) is set in the admin panel.
 ## Federation
 
 Instances listed in `instances.json` share public accounts and posts with each
-other. [FEDERATION.md](FEDERATION.md) covers the list, the protocol,
-defederation and superadmins.
+other. [FEDERATION.md](FEDERATION.md) explains how to set up an instance and
+join the list.
 
 ## Encrypted chat and key backup
 
@@ -297,6 +298,17 @@ expiry, write paths and request limits against one.
 
 - `GET /_debug/unknown` (admins only) lists the client calls no handler answers yet, most
   frequent first. Start there when a screen is empty.
+- `bun run test:unit` discovers and runs the scripts that use `bun:test`, without
+  needing a server. `.github/workflows/tests.yml` runs these on pushes and pull
+  requests, then checks password and two-factor concurrency, poll visibility,
+  search operators, API request limits, email confirmations, data exports,
+  scheduled edits, bookmark pagination, account settings and encrypted chat
+  against a fresh PostgreSQL 18 database and a local server. The pinned client
+  is not downloaded; checks that need it report a skip.
+- The `test-*-concurrency.ts`, `test-poll-visibility.ts` and
+  `test-search-operators.ts` scripts can also run against a dedicated migrated
+  test database without a server. Set `DATABASE_URL` to that database; each
+  script creates and removes its own test accounts.
 - `scripts/test-*.ts` check each feature end to end against a running server,
   for example `bun scripts/test-posts.ts <user A> <user B> <password>`. Each
   script's first lines give its arguments.

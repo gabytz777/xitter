@@ -85,6 +85,22 @@ try {
 	const [threaded] = replyOnA ? await A.db`select reply_to_id::text, reply_to_user_id::text from posts where id = ${replyOnA}::bigint` : [];
 	check("A threads bob's reply under alice's post", threaded?.reply_to_id === postId && threaded?.reply_to_user_id === alice.id, threaded);
 
+	const mentionA = await alice.gql("CreateTweet", { tweet_text: `hey @${bob.name}@${idOf(B.origin)}, I'm @${alice.name} ${stamp}` });
+	const mentionId = mentionA.data?.create_tweet?.tweet_results?.result?.rest_id as string;
+	const mentionsHere = await A.db`select user_id::text from post_mentions where post_id = ${mentionId ?? "0"}::bigint order by user_id`;
+	check("a mention by full handle points at the copy, not a local namesake", mentionsHere.some((m: any) => m.user_id === bobOnA), mentionsHere);
+	const entities = mentionA.data?.create_tweet?.tweet_results?.result?.legacy?.entities?.user_mentions ?? [];
+	const fullEntity = entities.find((m: any) => m.id_str === bobOnA);
+	check("and its entity covers the whole handle", fullEntity?.screen_name === `${bob.name}@${idOf(B.origin)}` && fullEntity.indices[1] - fullEntity.indices[0] === `@${bob.name}@${idOf(B.origin)}`.length, entities);
+	const mentionOnB = await until(async () => (await B.db`select local_id::text from federated_objects where instance = ${idOf(A.origin)} and kind = 'post' and remote_id = ${mentionId ?? "0"}::bigint`)[0]?.local_id as string);
+	const mentionsThere = mentionOnB ? (await B.db`select user_id::text from post_mentions where post_id = ${mentionOnB}::bigint`).map((m: any) => m.user_id) : [];
+	check("on B it mentions bob himself and alice's copy", mentionsThere.includes(bob.id) && mentionsThere.includes(aliceOnB), mentionsThere);
+	const bobNotified = await until(async () => {
+		const n = await bob.get("NotificationsTimeline", { timeline_type: "Mentions", count: 20 });
+		return JSON.stringify(n).includes(mentionOnB ?? "none");
+	}, 10);
+	check("and bob gets the mention", !!bobNotified);
+
 	const mediaId = newId();
 	const picture = Buffer.from(`GIF89a-${stamp}`);
 	const picturePost = newId();

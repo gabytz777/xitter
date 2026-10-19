@@ -47,6 +47,7 @@ function executeAt(vars: Vars): Date {
 	const seconds = Number(vars.execute_at);
 	if (!Number.isFinite(seconds)) throw new PostError("Pick a time to post.", 214);
 	const at = new Date(seconds * 1000);
+	if (!Number.isFinite(at.getTime())) throw new PostError("Pick a valid time to post.", 214);
 	const now = Date.now();
 	if (at.getTime() < now + MIN_LEAD_SECONDS * 1000) throw new PostError("Pick a time in the future.", 214);
 	if (at.getTime() > now + MAX_LEAD_DAYS * 86400_000) throw new PostError("That's too far ahead.", 214);
@@ -54,8 +55,6 @@ function executeAt(vars: Vars): Date {
 }
 
 async function check(userId: string, request: Vars, kind: "scheduled" | "draft") {
-	const [n] = await sql`select count(*)::int as n from scheduled_posts where user_id = ${userId}::bigint and kind = ${kind}`;
-	if (n.n >= MAX_PENDING) throw new PostError(`You can keep up to ${MAX_PENDING} ${kind === "draft" ? "drafts" : "scheduled posts"}.`, 214);
 	if (kind === "scheduled" && !request.status.trim() && !request.media_ids.length) throw new PostError("Your post is empty.", 170);
 	const [author] = await sql`select status from users where id = ${userId}::bigint`;
 	if (author?.status !== "active" && author?.status !== "limited") throw new PostError("Your account can't post right now.", 326);
@@ -67,6 +66,8 @@ async function create(v: Viewer, vars: Vars, kind: "scheduled" | "draft") {
 	const request = cleanRequest(vars.post_tweet_request);
 	const at = kind === "scheduled" ? executeAt(vars) : null;
 	await check(v.id, request, kind);
+	const [n] = await sql`select count(*)::int as n from scheduled_posts where user_id = ${v.id}::bigint and kind = ${kind}`;
+	if (n.n >= MAX_PENDING) throw new PostError(`You can keep up to ${MAX_PENDING} ${kind === "draft" ? "drafts" : "scheduled posts"}.`, 214);
 	const id = newId();
 	await sql`insert into scheduled_posts (id, user_id, kind, execute_at, request) values (${id}::bigint, ${v.id}::bigint, ${kind}, ${at}, ${JSON.stringify(request)}::text::jsonb)`;
 	return { data: { tweet: { rest_id: id } } };
@@ -75,9 +76,11 @@ async function create(v: Viewer, vars: Vars, kind: "scheduled" | "draft") {
 async function edit(v: Viewer, vars: Vars, kind: "scheduled" | "draft") {
 	const id = vars[kind === "draft" ? "draft_tweet_id" : "scheduled_tweet_id"];
 	if (!isId(id)) throw new PostError("Not found.", 144);
+	const [existing] = await sql`select id from scheduled_posts where id = ${id}::bigint and user_id = ${v.id}::bigint and kind = ${kind}`;
+	if (!existing) throw new PostError("Not found.", 144);
 	const request = cleanRequest(vars.post_tweet_request);
 	const at = kind === "scheduled" ? executeAt(vars) : null;
-	await checkLength(v.id, request.status);
+	await check(v.id, request, kind);
 	const rows = await sql`update scheduled_posts set request = ${JSON.stringify(request)}::text::jsonb, execute_at = ${at}
 		where id = ${id}::bigint and user_id = ${v.id}::bigint and kind = ${kind} returning id`;
 	if (!rows.length) throw new PostError("Not found.", 144);

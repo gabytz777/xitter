@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { sql } from "./db";
 import { FederationError, INSTANCE_ID, type Incoming, isBlocked, isPeer, peers, signedAnswer, signedFetch, signedRawAnswer } from "./federation";
 import { newId } from "./ids";
+import { saveMentions } from "./mentions";
 import { posterFile } from "./video";
 
 const MEDIA_DIR = process.env.MEDIA_DIR ?? "media";
@@ -58,7 +59,7 @@ async function renderMedia(id: string | undefined) {
 }
 
 const publicPost = (id: string) =>
-	sql`select p.id::text, p.user_id::text, p.text, p.created_at, p.reply_to_id::text, p.quote_id::text, p.sensitive, p.edited_at from posts p join users u on u.id = p.user_id
+	sql`select p.id::text, p.user_id::text, p.text, p.created_at, p.reply_to_id::text, p.quote_id::text, p.sensitive and not u.never_sensitive as sensitive, p.edited_at from posts p join users u on u.id = p.user_id
 		where p.id = ${id}::bigint and u.instance is null and not u.protected and u.status not in ('suspended', 'limited') and u.deactivated_at is null
 			and not p.hidden and p.community_id is null and p.article_id is null`;
 
@@ -246,6 +247,7 @@ async function applyPost(instance: string, p: any, depth = 0): Promise<string | 
 	const editedAt = typeof p.edited_at === "string" && !Number.isNaN(Date.parse(p.edited_at)) ? new Date(p.edited_at) : null;
 	if (local) {
 		await sql`update posts set text = ${text}, sensitive = ${!!p.sensitive}, edited_at = ${editedAt} where id = ${local}::bigint`;
+		await saveMentions(local, text, instance);
 		await attachMedia(instance, author, local, p.media);
 		return local;
 	}
@@ -259,9 +261,7 @@ async function applyPost(instance: string, p: any, depth = 0): Promise<string | 
 		values (${id}::bigint, ${author}::bigint, ${text}, ${replyTo ?? null}::bigint, ${parent?.user_id ?? null}::bigint, ${parent?.conversation_id ?? id}::bigint,
 			${quote ?? null}::bigint, ${instance}, ${!!p.sensitive}, ${editedAt}, ${created})`;
 	await sql`insert into federated_objects (instance, kind, remote_id, local_id) values (${instance}, 'post', ${p.id}::bigint, ${id}::bigint) on conflict do nothing`;
-	const mentioned = [...text.matchAll(/@(\w{1,15})@([a-z0-9.:-]+)/gi)].filter((m) => m[2].toLowerCase() === INSTANCE_ID).map((m) => m[1].toLowerCase()).slice(0, 20);
-	if (mentioned.length)
-		await sql`insert into post_mentions (post_id, user_id) select ${id}::bigint, id from users where lower(screen_name) = any(${sql.array(mentioned, "TEXT")}) and instance is null on conflict do nothing`.catch(() => {});
+	await saveMentions(id, text, instance);
 	await attachMedia(instance, author, id, p.media);
 	return id;
 }

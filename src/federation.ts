@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
+import { settings } from "./settings";
 import { isSuperadminHome, pinnedHomeKey } from "./superadmins";
 
 export const PROTOCOL = 1;
@@ -326,7 +327,7 @@ export async function wellKnown(): Promise<Response> {
 		};
 	}
 	return Response.json(
-		{ protocol: PROTOCOL, software: "xitter", id: INSTANCE_ID, url: PUBLIC_ORIGIN, public_key: publicKey(), federation: { enabled: FEDERATION_ON, peers: FEDERATION_ON ? peerStatus.peers : [] } },
+		{ protocol: PROTOCOL, software: "xitter", id: INSTANCE_ID, url: PUBLIC_ORIGIN, public_key: publicKey(), rules: !!settings().rules.trim(), rules_url: `${PUBLIC_ORIGIN}/rules`, federation: { enabled: FEDERATION_ON, peers: FEDERATION_ON ? peerStatus.peers : [] } },
 		{ headers: { "cache-control": "public, max-age=60", "access-control-allow-origin": "*" } },
 	);
 }

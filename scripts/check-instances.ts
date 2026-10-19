@@ -68,6 +68,7 @@ for (const [n, i] of instances.entries()) {
 const sorted = [...seen].sort();
 if ([...seen].some((id, n) => id !== sorted[n])) errors.push("instances must be sorted by id");
 
+const added = new Set<string>();
 if (baseFile && data) {
 	const base = load(baseFile).data;
 	if (base) {
@@ -78,7 +79,10 @@ if (baseFile && data) {
 		for (const i of instances) {
 			const old = before.get(i.id);
 			if (JSON.stringify(old) !== JSON.stringify(i)) touched.add(i.id);
-			if (!old) notes.push(`added ${i.id} (${i.state})`);
+			if (!old) {
+				added.add(i.id);
+				notes.push(`added ${i.id} (${i.state})`);
+			}
 			else {
 				if (old.public_key && old.public_key !== i.public_key) notes.push(`KEY CHANGE for ${i.id}: confirm it with its admins somewhere other than this pull request`);
 				if (old.state !== i.state) notes.push(`${i.id} went from ${old.state} to ${i.state}`);
@@ -97,7 +101,8 @@ if (online && !errors.length) {
 			const w = (await res.json()) as any;
 			if (w?.software !== "xitter" || w?.id !== i.id) errors.push(`${i.id} serves a /.well-known/xitter for ${w?.id ?? "nothing"}`);
 			else if (i.public_key && w.public_key !== i.public_key) errors.push(`${i.id} serves the key ${w.public_key}, not the one listed`);
-			else if (!w.federation?.enabled) notes.push(`${i.id} has federation turned off`);
+			else if (!w.federation?.enabled) errors.push(`${i.id} has federation turned off`);
+			else if (added.has(i.id) && w.rules !== true) errors.push(`${i.id} has no rules at /rules yet. FEDERATION.md lists what they must ban`);
 		} catch (e) {
 			errors.push(`${i.id}/.well-known/xitter could not be read: ${(e as Error).message}`);
 		}

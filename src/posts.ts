@@ -15,9 +15,9 @@ import { communityObjects } from "./community-model";
 import { webSource } from "./platforms";
 import { pollCard, pollsByIds } from "./polls";
 import { toUser, userCols, usersByIds } from "./users";
+import { lookupRemoteUser } from "./federation-sync";
+import { saveMentions } from "./mentions";
 
-// @name, not preceded by a word character (so e-mail addresses do not count)
-export const MENTION = /(?<![\w@])@(\w{1,15})/g;
 const NO_LIMIT = "9223372036854775807";
 
 // accounts whose likes, reposts and replies no longer count for anyone
@@ -25,7 +25,7 @@ const SUSPENDED = sql`(select id from users where status = 'suspended')`;
 
 // every post query starts from this; callers append where/order/limit
 const select = (viewerId: string) => sql`
-	select p.id, p.text, p.reply_to_id, p.conversation_id, p.quote_id, p.article_id, p.created_at, p.source, p.sensitive, p.community_id::text as community_id, p.poll_id::text as poll_id, p.place_id, p.edit_count, p.edited_at, p.reply_policy,
+	select p.id, p.text, p.reply_to_id, p.conversation_id, p.quote_id, p.article_id, p.created_at, p.source, p.sensitive and not u.never_sensitive as sensitive, u.never_sensitive, p.community_id::text as community_id, p.poll_id::text as poll_id, p.place_id, p.edit_count, p.edited_at, p.reply_policy,
 		exists (select 1 from posts r where r.id = p.conversation_id and r.reply_policy is not null and r.user_id <> ${viewerId}::bigint and not (
 			(r.reply_policy = 'Community' and exists (select 1 from follows f where f.follower_id = r.user_id and f.followee_id = ${viewerId}::bigint))
 			or (r.reply_policy = 'ByInvitation' and exists (select 1 from post_mentions m where m.post_id = r.id and m.user_id = ${viewerId}::bigint))
@@ -59,6 +59,7 @@ function toRow(r: any): PostRow {
 		text: r.text,
 		source: r.source,
 		sensitive: r.sensitive,
+		never_sensitive: r.never_sensitive,
 		reply_to_id: r.reply_to_id,
 		conversation_id: r.conversation_id,
 		quote_id: r.quote_id,
@@ -92,7 +93,7 @@ function toRow(r: any): PostRow {
 // media, articles, and the post each one quotes (one level: a quote inside a quote is not expanded)
 async function hydrate(viewerId: string, posts: PostRow[], quotes = true): Promise<PostRow[]> {
 	const media = await mediaForPosts(posts.map((p) => p.id));
-	for (const p of posts) p.media = media.get(p.id) ?? [];
+	for (const p of posts) p.media = (media.get(p.id) ?? []).map((m) => (p.never_sensitive ? { ...m, sensitive_warning: null } : m));
 	if (posts.length) {
 		const notes = await sql`select n.id::text, n.post_id::text, n.text from community_notes n join users author on author.id = n.author_id and author.status <> 'suspended'
 			join community_note_ratings r on r.note_id = n.id join users voter on voter.id = r.user_id and voter.status = 'active'
@@ -196,11 +197,7 @@ export async function editPost(userId: string, postId: string, text: string): Pr
 	await sql`insert into post_versions (version_id, post_id, seq, text, created_at)
 		values (${newId()}::bigint, ${postId}::bigint, ${post.edit_count}, ${post.text}, ${post.edited_at ?? post.created_at})`;
 	await sql`update posts set text = ${text}, edit_count = edit_count + 1, edited_at = now() where id = ${postId}::bigint`;
-	await sql`delete from post_mentions where post_id = ${postId}::bigint`;
-	const names = [...new Set([...text.matchAll(MENTION)].map((m) => m[1].toLowerCase()))].slice(0, 20);
-	if (names.length)
-		await sql`insert into post_mentions (post_id, user_id)
-			select ${postId}::bigint, u.id from users u where lower(u.screen_name) = any(${sql.array(names, "TEXT")}) on conflict do nothing`;
+	await saveMentions(postId, text, undefined, lookupRemoteUser);
 }
 
 export async function getPost(viewerId: string, id: string): Promise<PostRow | undefined> {
@@ -391,12 +388,19 @@ export async function setHighlight(userId: string, postId: string, on: boolean):
 	return true;
 }
 
-export async function folderPosts(viewerId: string, folderId: string, limit = 100): Promise<PostRow[]> {
-	const rows = await sql`${select(viewerId)}
+export async function folderPosts(viewerId: string, folderId: string, limit = 100, before?: { at: string; id: string }): Promise<{ posts: PostRow[]; next?: { at: string; id: string } }> {
+	const rows = await sql`with page as (${select(viewerId)}
 		join bookmark_folder_posts f on f.post_id = p.id and f.folder_id = ${folderId}::bigint
 		join bookmark_folders bf on bf.id = f.folder_id and bf.user_id = ${viewerId}::bigint
-		order by f.created_at desc limit ${limit}`;
-	return hydrate(viewerId, rows.map(toRow));
+		${before ? sql`where (f.created_at, f.post_id) < (${before.at}::timestamptz, ${before.id}::bigint)` : sql``}
+		order by f.created_at desc, f.post_id desc limit ${limit + 1})
+		select page.*, f.created_at::text as folder_created_at from page
+		join bookmark_folder_posts f on f.post_id = page.id and f.folder_id = ${folderId}::bigint
+		order by f.created_at desc, f.post_id desc`;
+	const more = rows.length > limit;
+	const page = rows.slice(0, limit);
+	const last = page.at(-1);
+	return { posts: await hydrate(viewerId, page.map(toRow)), ...(more && last ? { next: { at: last.folder_created_at, id: String(last.id) } } : {}) };
 }
 
 export async function likedPosts(viewerId: string, userId: string, limit = 100): Promise<PostRow[]> {
@@ -450,10 +454,7 @@ export async function createPost(userId: string, text: string, opts: { replyToId
 	}
 	await sql`insert into posts (id, user_id, text, reply_to_id, reply_to_user_id, conversation_id, quote_id, article_id, source, community_id, place_id, reply_policy)
 		values (${id}::bigint, ${userId}::bigint, ${text}, ${opts.replyToId ?? null}::bigint, ${replyToUserId}::bigint, ${conversationId}::bigint, ${opts.quoteId ?? null}::bigint, ${opts.articleId ?? null}::bigint, ${opts.source ?? webSource()}, ${opts.communityId ?? null}::bigint, ${opts.placeId ?? null}, ${opts.replyToId ? null : opts.replyPolicy ?? null})`;
-	const names = [...new Set([...text.matchAll(MENTION)].map((m) => m[1].toLowerCase()))].slice(0, 20);
-	if (names.length)
-		await sql`insert into post_mentions (post_id, user_id)
-			select ${id}::bigint, u.id from users u where lower(u.screen_name) = any(${sql.array(names, "TEXT")}) on conflict do nothing`;
+	await saveMentions(id, text, undefined, lookupRemoteUser);
 	const link = opts.quoteId || opts.articleId ? undefined : linksIn(text).filter((l) => previewable(l.url)).at(-1);
 	if (link && !(await sql`select 1 from link_previews where url = ${link.url}`).length) await Promise.race([fetchPreview(link.url), Bun.sleep(4000)]);
 	return id;

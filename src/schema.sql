@@ -105,6 +105,7 @@ create unique index if not exists users_email_idx on users (lower(email));
 alter table users add column if not exists status_restore text;
 alter table posts add column if not exists hidden boolean not null default false;
 alter table posts add column if not exists sensitive boolean not null default false;
+alter table users add column if not exists never_sensitive boolean not null default false;
 alter table sessions add column if not exists id uuid not null default gen_random_uuid();
 create unique index if not exists sessions_id_key on sessions(id);
 alter table sessions add column if not exists last_seen_at timestamptz not null default now();
@@ -675,6 +676,7 @@ create table if not exists bookmark_folder_posts (
 	created_at timestamptz not null default now(),
 	primary key (folder_id, post_id)
 );
+create index if not exists bookmark_folder_posts_page_idx on bookmark_folder_posts (folder_id, created_at desc, post_id desc);
 
 -- the reply the conversation's author pinned under their post
 alter table posts add column if not exists pinned_reply_id bigint references posts (id) on delete set null;

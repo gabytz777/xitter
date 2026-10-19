@@ -12,6 +12,23 @@ import { PostError, folderPosts, originalPostId, setMark } from "./posts";
 type Vars = Record<string, any>;
 const MAX_FOLDERS = 25;
 
+function readCursor(value: unknown): { at: string; id: string; sort: string } | undefined {
+	if (value === undefined || value === null || value === "") return undefined;
+	if (typeof value !== "string" || value.length > 300) throw new PostError("Invalid folder cursor.", 214);
+	try {
+		const cursor = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+		// Preserve Postgres microseconds: converting to Date would skip entries
+		// when several bookmarks were added within the same millisecond.
+		if (typeof cursor.at !== "string" || !/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?[+-](?:0\d|1[0-5])(?::[0-5]\d)?$/.test(cursor.at)
+			|| !Number.isFinite(Date.parse(cursor.at)) || !isId(cursor.id) || !isId(cursor.sort) || BigInt(cursor.sort) < 102n) throw new Error("cursor");
+		const [year, month, day] = cursor.at.slice(0, 10).split("-").map(Number);
+		if (new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10) !== cursor.at.slice(0, 10)) throw new Error("cursor");
+		return cursor;
+	} catch {
+		throw new PostError("Invalid folder cursor.", 214);
+	}
+}
+
 const folderId = (vars: Vars) => {
 	const id = String(vars.bookmark_collection_id ?? "");
 	if (!isId(id)) throw new PostError("That folder doesn't exist.", 144);
@@ -89,11 +106,14 @@ export const bookmarkFolderHandlers = {
 	},
 	BookmarkFolderTimeline: async (v: Viewer, vars: Vars) => {
 		const f = await mine(v.id, folderId(vars));
-		const posts = vars.cursor ? [] : await folderPosts(v.id, f.id);
-		const base = BigInt(newId());
+		const before = readCursor(vars.cursor);
+		const { posts, next } = await folderPosts(v.id, f.id, 100, before);
+		const base = BigInt(before?.sort ?? newId());
 		const entries: unknown[] = posts.map((p, i) => tweetEntry(p, (base - BigInt(i) - 1n).toString()));
-		entries.push(cursorEntry("Top", "t0", base.toString()));
-		entries.push(cursorEntry("Bottom", "b0", (base - BigInt(posts.length) - 2n).toString()));
+		if (next) {
+			const sort = (base - BigInt(posts.length) - 2n).toString();
+			entries.push(cursorEntry("Bottom", Buffer.from(JSON.stringify({ ...next, sort })).toString("base64url"), sort));
+		}
 		return { data: { bookmark_collection_timeline: { timeline: { instructions: [{ type: "TimelineAddEntries", entries }], responseObjects: {} } } } };
 	},
 };
