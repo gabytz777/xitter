@@ -245,7 +245,7 @@ export async function onboarding(req: Request, path: string): Promise<Response |
 	if (path === "/onboarding/web/actions/begin_login") {
 		const f = await form(req);
 		const name = String(f.username_or_email ?? "").trim().replace(/^@/, "");
-		const [user] = name ? await sql`select screen_name from users where lower(screen_name) = lower(${name}) and status <> 'suspended'` : [];
+		const [user] = name ? await sql`select screen_name from users where lower(screen_name) = lower(${name}) and instance is null and status <> 'suspended'` : [];
 		if (user) return respond(signInScreen(user.screen_name));
 		const mode = settings().signup_mode;
 		if (mode === "closed") return respond(fieldError("username_or_email", "No account goes by that name."));

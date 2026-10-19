@@ -1,11 +1,11 @@
 {
 	"version": 1,
-	"sequence": 5,
+	"sequence": 6,
 	"instances": [
 		{
 			"id": "social.opsex.best",
 			"name": "Xitter",
-			"source_url": null,
+			"source_url": "https://github.com/gabytz777/xitter",
 			"public_key": "aE7RikVEmC2lKQPAkfVtNk1GpJtx87H7PYaLxHxbZTM",
 			"state": "active"
 		},
@@ -21,6 +21,13 @@
 			"name": "Xitter",
 			"source_url": "https://github.com/Xittered/xitter",
 			"public_key": "FDWBt_uXkSyKKyM2J_9bYLfryG5N0bHFseMprag-Qv8",
+			"state": "active"
+		},
+		{
+			"id": "xt.iambrdn.com",
+			"name": "xt.brdn",
+			"source_url": "https://github.com/braidenhxyz/xitter-compose",
+			"public_key": "eiI4EMp0bupFbJ7EKy5A_MIo_yvhRMbljYSnzozwXIY",
 			"state": "active"
 		}
 	]

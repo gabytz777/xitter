@@ -59,9 +59,12 @@ jobs:
           bun scripts/test-two-factor-concurrency.ts
           bun scripts/test-two-factor-credentials.ts
           bun scripts/test-poll-visibility.ts
+          bun scripts/test-list-visibility-races.ts
           bun scripts/test-search-operators.ts
+          bun scripts/test-federated-search.ts
           bun scripts/test-public-api-input.ts
           bun scripts/test-data-export.ts
+          DB_POOL_MAX=1 bun scripts/test-data-export-chat.ts
           bun scripts/test-scheduled-validation.ts
           bun scripts/test-bookmark-pagination.ts
           bun scripts/test-email-confirmation.ts
@@ -77,6 +80,7 @@ jobs:
           bun scripts/test-scheduled-media.ts
       - name: Media privacy and chunked upload regression tests
         run: |
+          bun scripts/test-embed-privacy.ts
           bun scripts/test-poll-media-privacy.ts
           bun scripts/test-media-finalization.ts
           bun scripts/test-media-upload-cap.ts

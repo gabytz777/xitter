@@ -11,9 +11,11 @@
 		"client:fetch": "bun scripts/fetch-client.ts"
 	},
 	"devDependencies": {
-		"@types/bun": "latest"
+		"@types/bun": "latest",
+		"@types/nodemailer": "6.4.17"
 	},
 	"dependencies": {
-		"emusks": "^2.3.19"
+		"emusks": "^2.3.19",
+		"nodemailer": "6.9.16"
 	}
 }

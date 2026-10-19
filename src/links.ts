@@ -1,5 +1,6 @@
 import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
+import { isPeer } from "./federation";
 
 const PROXY = (process.env.EMBED_PROXY ?? "https://cors.estrogen.delivery/").replace(/\/?$/, "/");
 export const proxied = (url: string) => `${PROXY}?url=${encodeURIComponent(url)}`;
@@ -137,7 +138,8 @@ export async function fetchPreview(url: string): Promise<void> {
 	inFlight.add(url);
 	try {
 		const html = await fetchPage(url);
-		const p = html ? parsePreview(url, html) : undefined;
+		const shell = html && isPeer(new URL(url).host) && !/<meta\b[^>]*og:title/i.test(html.slice(0, 300_000));
+		const p = html && !shell ? parsePreview(url, html) : undefined;
 		await sql`insert into link_previews (url, ok, title, description, site, image, width, height, fetched_at)
 			values (${url}, ${!!p}, ${p?.title ?? ""}, ${p?.description ?? ""}, ${p?.site ?? ""}, ${p?.image ?? null}, ${p?.width ?? 0}, ${p?.height ?? 0}, now())
 			on conflict (url) do update set ok = excluded.ok, title = excluded.title, description = excluded.description, site = excluded.site,

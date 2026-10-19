@@ -11,7 +11,7 @@
 import { isSuperadminViewer } from "./superadmin";
 import { SUPERADMINS, isSuperadminHome, superadminNameHere, superadminOf } from "./superadmins";
 import { FEDERATION_ON, ID_RE, INSTANCE_ID, acceptKeyChange, isBlocked as isFederationBlocked, isPeer, liftBlock, listBlocks, listed, listedInstance, pendingKeyChange, publicKey, registryCheckedAt, registryError, registrySequence, setBlock as setFederationBlock } from "./federation";
-import { pullFrom } from "./federation-sync";
+import { dropRemoteMedia, pullFrom, savedRemoteMedia, storesRemoteMedia } from "./federation-sync";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
 import { isFlag } from "./flags";
@@ -123,6 +123,7 @@ const ACTIONS: Record<string, Action> = {
 			public_key: publicKey(),
 			entry: { id: INSTANCE_ID, name: settings().instance_name, source_url: settings().source_url || null, public_key: publicKey(), state: "active" },
 			listed_here: listedInstance(INSTANCE_ID) ?? null,
+			media: { stored: storesRemoteMedia(), ...(await savedRemoteMedia()) },
 			registry: { sequence: registrySequence(), checked_at: registryCheckedAt ? new Date(registryCheckedAt).toISOString() : null, error: registryError },
 			outbox_head: head,
 			superadmins: SUPERADMINS.map((x) => `${x.screen_name}@${x.instance}`),
@@ -182,6 +183,11 @@ const ACTIONS: Record<string, Action> = {
 		});
 		await audit(a, "federation_accept_key", id);
 		return {};
+	} },
+	federationDropMedia: { role: "admin", run: async (a) => {
+		const dropped = await dropRemoteMedia();
+		await audit(a, "federation_drop_media", INSTANCE_ID, dropped);
+		return dropped;
 	} },
 	federationPull: { role: "admin", run: async (a, b) => {
 		const id = instanceOf(b.instance);
@@ -431,12 +437,7 @@ const ACTIONS: Record<string, Action> = {
 			const id = idOf(b.id);
 			const badge = b.badge || null;
 			if (badge !== null && !["blue", "business", "government", "government_individual"].includes(badge)) throw new AdminError("Unknown badge.");
-			await guard(a, id);
-			// an account stops being an organisation when it loses the gold or grey (government) badge
-			if (badge !== "business" && badge !== "government") {
-				await sql`delete from affiliations where org_id = ${id}::bigint`;
-				await sql`delete from affiliation_requests where org_id = ${id}::bigint`;
-			}
+			await guard(a, id, true);
 			// verified_at: "Verified since" on the About page; a new badge type starts it again
 			await sql`update users set verified_at = case when ${badge}::text is null then null when verified_type is distinct from ${badge}::text then now() else verified_at end,
 				verified_type = ${badge} where id = ${id}::bigint`;
@@ -451,7 +452,7 @@ const ACTIONS: Record<string, Action> = {
 			const id = idOf(b.id);
 			const flag = b.flag || null;
 			if (flag !== null && !isFlag(flag)) throw new AdminError("Unknown flag.");
-			await guard(a, id);
+			await guard(a, id, true);
 			await sql`update users set flag = ${flag} where id = ${id}::bigint`;
 			await audit(a, "set_flag", id, { flag });
 			return {};
@@ -546,7 +547,7 @@ const ACTIONS: Record<string, Action> = {
 	orgs: {
 		role: "support",
 		run: async () => ({
-			orgs: await sql`select ${userListCols} from users u where u.verified_type in ('business', 'government') order by u.name`,
+			orgs: await sql`select ${userListCols} from users u where u.verified_type in ('business', 'government') or exists (select 1 from affiliations af where af.org_id = u.id) order by u.name`,
 		}),
 	},
 
@@ -580,11 +581,9 @@ const ACTIONS: Record<string, Action> = {
 		role: "admin",
 		run: async (a, b) => {
 			const orgId = idOf(b.orgId, "organisation");
-			const [org] = await sql`select verified_type from users where id = ${orgId}::bigint`;
-			if (org?.verified_type !== "business" && org?.verified_type !== "government") throw new AdminError("Only accounts with the gold or grey organisation badge are organisations.");
+			if (!(await sql`select 1 from users where id = ${orgId}::bigint`).length) throw new AdminError("No such account.", 404);
 			const [u] = await sql`select id::text as id from users where lower(screen_name) = lower(${String(b.screen_name ?? "").replace(/^@/, "")})`;
 			if (!u) throw new AdminError("No account with that handle.");
-			if (u.id === orgId) throw new AdminError("An organisation can't be its own affiliate.");
 			await guard(a, u.id, true);
 			// one organisation per person; adding moves them
 			await sql`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${u.id}::bigint)
@@ -612,7 +611,7 @@ const ACTIONS: Record<string, Action> = {
 			const q = String(b.q ?? "").trim();
 			const author = String(b.author ?? "").trim().replace(/^@/, "");
 			const match = sql`(${q} = '' or p.text ilike ${like(q)}) and (${author} = '' or lower(u.screen_name) = lower(${author}))`;
-			const rows = await sql`select p.id::text as id, p.text, p.created_at, p.hidden, p.sensitive, p.notice, p.count_overrides, p.reply_to_id::text as reply_to_id, u.screen_name, u.name,
+			const rows = await sql`select p.id::text as id, p.text, p.created_at, p.hidden, p.sensitive, p.notice, p.count_overrides, p.reply_to_id::text as reply_to_id, u.id::text as user_id, u.screen_name, u.name,
 				(select count(*)::int from likes l where l.post_id = p.id) as likes,
 				(select count(*)::int from media m where m.post_id = p.id) as media
 				from posts p join users u on u.id = p.user_id
@@ -823,7 +822,7 @@ const ACTIONS: Record<string, Action> = {
 		role: "support",
 		run: async (_a, b) => {
 			const action = typeof b.action === "string" && /^[a-z_]{1,40}$/.test(b.action) ? b.action : null;
-			const who = typeof b.target === "string" ? b.target.trim().replace(/^@/, "").slice(0, 15) : "";
+			const who = typeof b.target === "string" ? b.target.trim().replace(/^@/, "").slice(0, 300).replace(new RegExp(`@${INSTANCE_ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"), "") : "";
 			const offset = Math.max(0, Math.min(Number(b.offset) || 0, 100_000));
 			return {
 				entries: await sql`select l.id::text as id, l.action, l.target, l.detail, l.created_at, a.screen_name as actor, l.actor_id is null as automatic,

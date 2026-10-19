@@ -1,8 +1,13 @@
-import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
+import { isFlag } from "./flags";
+import { badgesOf } from "./users";
 import { FederationError, INSTANCE_ID, type Incoming, isBlocked, isPeer, peers, signedAnswer, signedFetch, signedRawAnswer } from "./federation";
 import { newId } from "./ids";
+import { replyLimited } from "./blocks";
+import { STAFF_HANDLE } from "./invites";
 import { saveMentions } from "./mentions";
 import { posterFile } from "./video";
 
@@ -12,6 +17,8 @@ const EVENTS_PER_HOUR = Number(process.env.FEDERATION_EVENTS_PER_HOUR) || 20_000
 const MAX_ACCOUNTS = Number(process.env.FEDERATION_MAX_ACCOUNTS) || 100_000;
 const budgets = new Map<string, { start: number; used: number }>();
 const MAX_MEDIA = 64 * 1024 * 1024;
+const STORE_MEDIA = process.env.FEDERATION_MEDIA === "store";
+const MEMORY_CACHE = (Number(process.env.FEDERATION_MEDIA_CACHE_MB) || 64) * 1024 * 1024;
 const REF_RE = /^(\d{1,19})@([a-z0-9.:-]{1,260})$/;
 
 const ref = (id: string | number | bigint, instance = INSTANCE_ID) => `${id}@${instance}`;
@@ -34,8 +41,38 @@ async function canonicalOf(kind: "user" | "post", localId: string): Promise<stri
 	return row.remote_id ? ref(row.remote_id, row.instance) : undefined;
 }
 
+const userCounts = async (id: string) => {
+	const [c] = await sql`select coalesce((u.count_overrides->>'followers')::int, s.followers, 0) as followers, coalesce((u.count_overrides->>'following')::int, s.following, 0) as following,
+		coalesce(s.posts, 0) as posts, coalesce(s.likes, 0) as likes from users u left join user_stats s on s.user_id = u.id where u.id = ${id}::bigint`;
+	return c ? { followers: c.followers, following: c.following, posts: c.posts, likes: c.likes } : undefined;
+};
+
+const postCounts = async (id: string) => {
+	const [c] = await sql`select
+		coalesce((p.count_overrides->>'likes')::int, (select count(*)::int from likes x where x.post_id = p.id)) as likes,
+		coalesce((p.count_overrides->>'reposts')::int, (select count(*)::int from reposts x where x.post_id = p.id)) as reposts,
+		coalesce((p.count_overrides->>'replies')::int, (select count(*)::int from posts x where x.reply_to_id = p.id)) as replies,
+		coalesce((p.count_overrides->>'quotes')::int, (select count(*)::int from posts x where x.quote_id = p.id)) as quotes,
+		coalesce((p.count_overrides->>'bookmarks')::int, (select count(*)::int from bookmarks x where x.post_id = p.id)) as bookmarks,
+		coalesce((p.count_overrides->>'views')::int, (select count(*)::int from post_views x where x.post_id = p.id)) as views
+		from posts p where p.id = ${id}::bigint`;
+	return c ? { likes: c.likes, reposts: c.reposts, replies: c.replies, quotes: c.quotes, bookmarks: c.bookmarks, views: c.views } : undefined;
+};
+
+const countsOf = (value: unknown, keys: string[]) => {
+	if (!value || typeof value !== "object") return null;
+	const out: Record<string, number> = {};
+	for (const k of keys) {
+		const n = (value as Record<string, unknown>)[k];
+		if (Number.isInteger(n) && (n as number) >= 0 && (n as number) <= 1_000_000_000) out[k] = n as number;
+	}
+	return JSON.stringify(out);
+};
+const USER_COUNTS = ["followers", "following", "posts", "likes"];
+const POST_COUNTS = ["likes", "reposts", "replies", "quotes", "bookmarks", "views"];
+
 async function renderUser(id: string) {
-	const [u] = await sql`select id::text, screen_name, name, bio, location, avatar_url, banner_url, protected, created_at from users
+	const [u] = await sql`select id::text, screen_name, name, bio, location, website, avatar_url, banner_url, protected, created_at, verified_type, translator, flag, parody_label, ${badgesOf(sql`users.id`)} as badges from users
 		where id = ${id}::bigint and instance is null and status <> 'suspended' and deactivated_at is null`;
 	if (!u) return { kind: "user", id, gone: true };
 	return {
@@ -45,6 +82,13 @@ async function renderUser(id: string) {
 		name: u.name,
 		bio: u.bio,
 		location: u.location,
+		website: u.website ?? null,
+		counts: await userCounts(id),
+		verified_type: u.verified_type ?? null,
+		translator: u.translator ?? null,
+		flag: u.flag ?? null,
+		parody_label: u.parody_label ?? "None",
+		badges: (u.badges ?? []).map((b: { id: string; name: string }) => ({ name: b.name, url: `${PUBLIC_ORIGIN}/public/badge-${b.id}.png` })),
 		protected: u.protected,
 		created_at: new Date(u.created_at).toISOString(),
 		avatar: await renderMedia(isLocalMediaPath(u.avatar_url)),
@@ -61,7 +105,19 @@ async function renderMedia(id: string | undefined) {
 const publicPost = (id: string) =>
 	sql`select p.id::text, p.user_id::text, p.text, p.created_at, p.reply_to_id::text, p.quote_id::text, p.sensitive and not u.never_sensitive as sensitive, p.edited_at from posts p join users u on u.id = p.user_id
 		where p.id = ${id}::bigint and u.instance is null and not u.protected and u.status not in ('suspended', 'limited') and u.deactivated_at is null
-			and not p.hidden and p.community_id is null and p.article_id is null`;
+			and not p.hidden and p.community_id is null and p.article_id is null
+			and not exists (select 1 from posts pp join users pu on pu.id = pp.user_id where pp.id = p.reply_to_id and pu.instance is null
+				and (pu.protected or pu.status in ('suspended', 'limited') or pu.deactivated_at is not null or pp.hidden or pp.community_id is not null or pp.article_id is not null))`;
+
+const quotable = async (id: string) => {
+	const [q] = await sql`select u.instance from posts p join users u on u.id = p.user_id where p.id = ${id}::bigint`;
+	return !!q && (q.instance !== null || (await publicPost(id)).length > 0);
+};
+
+const quoteUrl = async (id: string) => {
+	const [q] = await sql`select u.screen_name from posts p join users u on u.id = p.user_id where p.id = ${id}::bigint and u.instance is null`;
+	return q ? `${PUBLIC_ORIGIN}/${q.screen_name}/status/${id}` : undefined;
+};
 
 async function renderPost(id: string) {
 	const [p] = await publicPost(id);
@@ -75,8 +131,11 @@ async function renderPost(id: string) {
 		created_at: new Date(p.created_at).toISOString(),
 		edited_at: p.edited_at ? new Date(p.edited_at).toISOString() : null,
 		sensitive: p.sensitive,
+		counts: await postCounts(id),
+		is_reply: !!p.reply_to_id,
 		reply_to: p.reply_to_id ? ((await canonicalOf("post", p.reply_to_id)) ?? null) : null,
-		quote: p.quote_id ? ((await canonicalOf("post", p.quote_id)) ?? null) : null,
+		quote: p.quote_id && (await quotable(p.quote_id)) ? ((await canonicalOf("post", p.quote_id)) ?? null) : null,
+		quote_url: p.quote_id ? ((await quoteUrl(p.quote_id)) ?? null) : null,
 		media: media.map((m: any) => ({ id: m.id, kind: m.kind, mime: m.mime, width: m.width, height: m.height, alt_text: m.alt_text ?? null, duration_ms: m.duration_ms ?? null })),
 	};
 }
@@ -85,12 +144,12 @@ async function renderPair(kind: "like" | "repost" | "follow", a: string, b: stri
 	if (kind === "follow") {
 		const [on] = await sql`select 1 from follows f join users u on u.id = f.followee_id where f.follower_id = ${a}::bigint and f.followee_id = ${b}::bigint and not u.protected`;
 		const target = await canonicalOf("user", b);
-		return target ? { kind, actor: a, target, on: !!on } : undefined;
+		return target ? { kind, actor: a, target, on: !!on, counts: target === ref(b) ? await userCounts(b) : null } : undefined;
 	}
 	const table = kind === "like" ? sql`likes` : sql`reposts`;
 	const [on] = await sql`select 1 from ${table} where user_id = ${a}::bigint and post_id = ${b}::bigint`;
 	const target = await canonicalOf("post", b);
-	return target ? { kind, actor: a, target, on: !!on } : undefined;
+	return target ? { kind, actor: a, target, on: !!on, counts: target === ref(b) ? await postCounts(b) : null } : undefined;
 }
 
 async function eventsAfter(after: string, limit: number) {
@@ -121,9 +180,17 @@ export async function federationApi(incoming: Incoming, method: string, path: st
 	}
 	const object = /^\/federation\/v1\/objects\/(user|post)\/(\d{1,19})$/.exec(path);
 	if (method === "GET" && object) return signedAnswer(incoming, 200, object[1] === "user" ? await renderUser(object[2]) : await renderPost(object[2]));
-	const byName = /^\/federation\/v1\/users\/by-name\/(\w{1,50})$/.exec(path);
+	const byName = /^\/federation\/v1\/users\/by-name\/([^/]{1,200})$/.exec(path);
 	if (method === "GET" && byName) {
-		const [u] = await sql`select id::text from users where lower(screen_name) = lower(${byName[1]}) and instance is null`;
+		const name = (() => {
+			try {
+				return decodeURIComponent(byName[1]);
+			} catch {
+				return "";
+			}
+		})();
+		if (!STAFF_HANDLE.test(name)) return signedAnswer(incoming, 404, { error: "No such account." });
+		const [u] = await sql`select id::text from users where lower(screen_name) = lower(${name}) and instance is null`;
 		return u ? signedAnswer(incoming, 200, await renderUser(u.id)) : signedAnswer(incoming, 404, { error: "No such account." });
 	}
 	const media = /^\/federation\/v1\/media\/(\d{1,19})(\/poster)?$/.exec(path);
@@ -208,19 +275,33 @@ export async function applyUser(instance: string, u: any): Promise<string | unde
 		if (local) await sql`delete from users where id = ${local}::bigint and instance = ${instance}`;
 		return undefined;
 	}
-	if (typeof u.screen_name !== "string" || !/^\w{1,50}$/.test(u.screen_name)) return undefined;
+	if (typeof u.screen_name !== "string" || !STAFF_HANDLE.test(u.screen_name) || /^\.+$/.test(u.screen_name)) return undefined;
+	const pick = (value: unknown, allowed: string[]) => (typeof value === "string" && allowed.includes(value) ? value : null);
+	const badgeUrl = new RegExp(`^https?://${instance.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/public/badge-\\d{1,19}\\.png$`);
+	const badges = (Array.isArray(u.badges) ? u.badges : [])
+		.filter((b: any) => typeof b?.name === "string" && typeof b?.url === "string" && badgeUrl.test(b.url))
+		.slice(0, 10)
+		.map((b: any) => ({ name: b.name.slice(0, 60), url: b.url }));
+	const looks = {
+		verified_type: pick(u.verified_type, ["blue", "business", "government", "government_individual"]),
+		translator: pick(u.translator, ["translator", "moderator", "approver"]),
+		flag: isFlag(u.flag) ? u.flag : null,
+		parody_label: pick(u.parody_label, ["Parody", "Commentary", "Fan"]) ?? "None",
+		remote_badges: JSON.stringify(badges),
+	};
+	const website = typeof u.website === "string" && /^https?:\/\/[^\s<>"]{1,200}$/.test(u.website) ? u.website : "";
 	const handle = `${u.screen_name}@${instance}`;
 	await sql`update users set screen_name = screen_name || '~' || remote_id::text where lower(screen_name) = lower(${handle}) and instance = ${instance} and remote_id <> ${u.id}::bigint`;
 	const created = typeof u.created_at === "string" && !Number.isNaN(Date.parse(u.created_at)) ? new Date(u.created_at) : new Date();
 	const id = local ?? newId();
 	if (local)
-		await sql`update users set screen_name = ${handle}, name = ${clip(u.name, 50)}, bio = ${clip(u.bio, 300)}, location = ${clip(u.location, 60)}, protected = ${!!u.protected}
+		await sql`update users set screen_name = ${handle}, name = ${clip(u.name, 50)}, bio = ${clip(u.bio, 300)}, location = ${clip(u.location, 60)}, website = ${website}, protected = ${!!u.protected}
 			where id = ${local}::bigint`;
 	else {
 		const [{ n }] = await sql`select count(*)::int as n from users where instance = ${instance}`;
 		if (n >= MAX_ACCOUNTS) throw new FederationError(`${instance} already has ${MAX_ACCOUNTS} accounts here`);
-		await sql`insert into users (id, screen_name, name, password_hash, bio, location, protected, instance, remote_id, created_at)
-			values (${id}::bigint, ${handle}, ${clip(u.name, 50)}, '!', ${clip(u.bio, 300)}, ${clip(u.location, 60)}, ${!!u.protected}, ${instance}, ${u.id}::bigint, ${created})
+		await sql`insert into users (id, screen_name, name, password_hash, bio, location, website, protected, instance, remote_id, created_at)
+			values (${id}::bigint, ${handle}, ${clip(u.name, 50)}, '!', ${clip(u.bio, 300)}, ${clip(u.location, 60)}, ${website}, ${!!u.protected}, ${instance}, ${u.id}::bigint, ${created})
 			on conflict (instance, remote_id) where instance is not null do nothing`;
 		const again = await mapped(instance, "user", u.id);
 		if (again) return again;
@@ -228,7 +309,9 @@ export async function applyUser(instance: string, u: any): Promise<string | unde
 	}
 	const avatar = await remoteMedia(instance, id, u.avatar, null, null);
 	const banner = await remoteMedia(instance, id, u.banner, null, null);
-	await sql`update users set avatar_url = ${avatar ? `/media/${avatar}` : null}, banner_url = ${banner ? `/media/banner/${banner}` : null} where id = ${id}::bigint`;
+	await sql`update users set avatar_url = ${avatar ? `/media/${avatar}` : null}, banner_url = ${banner ? `/media/banner/${banner}` : null},
+		remote_counts = ${countsOf(u.counts, USER_COUNTS)}::text::jsonb, verified_type = ${looks.verified_type}, translator = ${looks.translator}, flag = ${looks.flag}, parody_label = ${looks.parody_label}, remote_badges = ${looks.remote_badges}::text::jsonb
+		where id = ${id}::bigint`;
 	if (u.protected) await sql`delete from posts where user_id = ${id}::bigint`;
 	return id;
 }
@@ -243,25 +326,41 @@ async function applyPost(instance: string, p: any, depth = 0): Promise<string | 
 	}
 	const author = await resolveUser(ref(String(p.author ?? ""), instance), depth);
 	if (!author) return undefined;
-	const text = clip(p.text, 25_000);
+	const quote = p.quote ? await resolvePost(p.quote, depth) : undefined;
+	const homeLink = typeof p.quote_url === "string" && p.quote_url.length <= 300 && /^https?:\/\/[^\s<>"]+$/.test(p.quote_url) && new URL(p.quote_url).host === instance ? p.quote_url : undefined;
+	const raw = clip(p.text, 25_000);
+	const text = !quote && homeLink && !raw.includes(homeLink) ? `${raw} ${homeLink}` : raw;
 	const editedAt = typeof p.edited_at === "string" && !Number.isNaN(Date.parse(p.edited_at)) ? new Date(p.edited_at) : null;
 	if (local) {
-		await sql`update posts set text = ${text}, sensitive = ${!!p.sensitive}, edited_at = ${editedAt} where id = ${local}::bigint`;
-		await saveMentions(local, text, instance);
+		const [old] = await sql`select text, created_at, edited_at, edit_count, reply_to_id from posts where id = ${local}::bigint`;
+		if (old && old.text !== text)
+			await sql`insert into post_versions (version_id, post_id, seq, text, created_at)
+				values (${newId()}::bigint, ${local}::bigint, ${old.edit_count}, ${old.text}, ${old.edited_at ?? old.created_at})`;
+		await sql`update posts set remote_counts = ${countsOf(p.counts, POST_COUNTS)}::text::jsonb where id = ${local}::bigint`;
+		await sql`update posts set text = ${text}, sensitive = ${!!p.sensitive}, edited_at = ${old && old.text !== text ? (editedAt ?? new Date()) : editedAt},
+			edit_count = edit_count + ${old && old.text !== text ? 1 : 0} where id = ${local}::bigint`;
+		const orphaned = old?.reply_to_id && !(await sql`select 1 from posts where id = ${old.reply_to_id}::bigint`).length;
+		if (old && (!old.reply_to_id || orphaned) && p.reply_to) {
+			const replyTo = await resolvePost(p.reply_to, depth);
+			const [parent] = replyTo ? await sql`select conversation_id::text, user_id::text from posts where id = ${replyTo}::bigint` : [];
+			if (parent && !(await blockedBetween(author, parent.user_id)))
+				await sql`update posts set reply_to_id = ${replyTo}::bigint, reply_to_user_id = ${parent.user_id}::bigint, conversation_id = ${parent.conversation_id}::bigint where id = ${local}::bigint`;
+		}
+		await saveMentions(local, text, instance, lookupRemoteUser);
 		await attachMedia(instance, author, local, p.media);
 		return local;
 	}
-	const replyTo = p.reply_to ? await resolvePost(p.reply_to, depth) : undefined;
-	const quote = p.quote ? await resolvePost(p.quote, depth) : undefined;
+	const replyTo = (p.reply_to ? await resolvePost(p.reply_to, depth) : undefined) ?? (p.reply_to || p.is_reply === true ? newId() : undefined);
 	const [parent] = replyTo ? await sql`select conversation_id::text, user_id::text from posts where id = ${replyTo}::bigint` : [];
-	if (parent && (await blockedBetween(author, parent.user_id))) return undefined;
+	if (parent && ((await blockedBetween(author, parent.user_id)) || (await replyLimited(parent.conversation_id, author)))) return undefined;
 	const id = newId();
 	const created = typeof p.created_at === "string" && !Number.isNaN(Date.parse(p.created_at)) ? new Date(Math.min(Date.parse(p.created_at), Date.now())) : new Date();
 	await sql`insert into posts (id, user_id, text, reply_to_id, reply_to_user_id, conversation_id, quote_id, source, sensitive, edited_at, created_at)
 		values (${id}::bigint, ${author}::bigint, ${text}, ${replyTo ?? null}::bigint, ${parent?.user_id ?? null}::bigint, ${parent?.conversation_id ?? id}::bigint,
 			${quote ?? null}::bigint, ${instance}, ${!!p.sensitive}, ${editedAt}, ${created})`;
 	await sql`insert into federated_objects (instance, kind, remote_id, local_id) values (${instance}, 'post', ${p.id}::bigint, ${id}::bigint) on conflict do nothing`;
-	await saveMentions(id, text, instance);
+	await sql`update posts set remote_counts = ${countsOf(p.counts, POST_COUNTS)}::text::jsonb where id = ${id}::bigint`;
+	await saveMentions(id, text, instance, lookupRemoteUser);
 	await attachMedia(instance, author, id, p.media);
 	return id;
 }
@@ -282,23 +381,39 @@ const blockedBetween = async (a: string, b: string) =>
 async function applyPair(instance: string, e: any) {
 	const actor = await resolveUser(ref(String(e.actor ?? ""), instance));
 	if (!actor) return;
+	const home = parseRef(e.target);
+	if (home?.instance === instance && e.counts) {
+		const target = await mapped(instance, e.kind === "follow" ? "user" : "post", home.id);
+		if (target)
+			await (e.kind === "follow"
+				? sql`update users set remote_counts = ${countsOf(e.counts, USER_COUNTS)}::text::jsonb where id = ${target}::bigint`
+				: sql`update posts set remote_counts = ${countsOf(e.counts, POST_COUNTS)}::text::jsonb where id = ${target}::bigint`);
+	}
 	if (e.kind === "follow") {
 		const target = await resolveUser(e.target);
 		if (!target || target === actor) return;
-		if (!e.on) return void (await sql`delete from follows where follower_id = ${actor}::bigint and followee_id = ${target}::bigint`);
+		if (!e.on) {
+			await sql`delete from follows where follower_id = ${actor}::bigint and followee_id = ${target}::bigint`;
+			return void (await sql`insert into federation_outbox (kind, a) select 'user', id from users where id = ${target}::bigint and instance is null`);
+		}
 		const [t] = await sql`select protected from users where id = ${target}::bigint`;
 		if (t?.protected || (await blockedBetween(actor, target))) return;
 		await sql`insert into follows (follower_id, followee_id) values (${actor}::bigint, ${target}::bigint) on conflict do nothing`;
+		await sql`insert into federation_outbox (kind, a) select 'user', id from users where id = ${target}::bigint and instance is null`;
 		return;
 	}
 	const post = await resolvePost(e.target);
 	if (!post) return;
 	const table = e.kind === "like" ? sql`likes` : sql`reposts`;
-	if (!e.on) return void (await sql`delete from ${table} where user_id = ${actor}::bigint and post_id = ${post}::bigint`);
+	if (!e.on) {
+		await sql`delete from ${table} where user_id = ${actor}::bigint and post_id = ${post}::bigint`;
+		return void (await sql`insert into federation_outbox (kind, a) select 'post', p.id from posts p join users u on u.id = p.user_id where p.id = ${post}::bigint and u.instance is null`);
+	}
 	const [owner] = await sql`select user_id::text from posts where id = ${post}::bigint`;
 	if (owner && (await blockedBetween(actor, owner.user_id))) return;
 	if (e.kind === "like") await sql`insert into likes (user_id, post_id) values (${actor}::bigint, ${post}::bigint) on conflict do nothing`;
 	else await sql`insert into reposts (id, user_id, post_id) values (${newId()}::bigint, ${actor}::bigint, ${post}::bigint) on conflict do nothing`;
+	await sql`insert into federation_outbox (kind, a) select 'post', p.id from posts p join users u on u.id = p.user_id where p.id = ${post}::bigint and u.instance is null`;
 }
 
 async function applyEvent(instance: string, e: any) {
@@ -375,14 +490,51 @@ async function pokePeers() {
 	await Promise.all(peers().map((p) => signedFetch(p.id, "POST", "/federation/v1/poke", {}).catch(() => undefined)));
 }
 
-const fetching = new Map<string, Promise<boolean>>();
-export function fetchRemoteMedia(localId: string, poster = false): Promise<boolean> {
+const fetching = new Map<string, Promise<Uint8Array | undefined>>();
+function pullOnce(localId: string, poster: boolean): Promise<Uint8Array | undefined> {
 	const key = `${localId}${poster ? "p" : ""}`;
 	const running = fetching.get(key);
 	if (running) return running;
-	const job = downloadRemoteMedia(localId, poster).finally(() => fetching.delete(key));
+	const job = pullRemoteMedia(localId, poster).finally(() => fetching.delete(key));
 	fetching.set(key, job);
 	return job;
+}
+
+const memory = new Map<string, Uint8Array>();
+let memoryBytes = 0;
+function remember(key: string, body: Uint8Array) {
+	if (body.length > MEMORY_CACHE / 4) return;
+	memory.set(key, body);
+	memoryBytes += body.length;
+	for (const [k, v] of memory) {
+		if (memoryBytes <= MEMORY_CACHE) break;
+		memory.delete(k);
+		memoryBytes -= v.length;
+	}
+}
+
+export async function remoteMediaFile(localId: string, poster = false): Promise<Blob | undefined> {
+	const file = poster ? posterFile(MEDIA_DIR, localId) : join(MEDIA_DIR, localId);
+	if (existsSync(file)) return Bun.file(file);
+	const key = `${localId}${poster ? "p" : ""}`;
+	const cached = memory.get(key);
+	if (cached) {
+		memory.delete(key);
+		memory.set(key, cached);
+		return new Blob([cached as Uint8Array<ArrayBuffer>]);
+	}
+	const body = await pullOnce(localId, poster);
+	if (!body) return undefined;
+	if (!STORE_MEDIA) {
+		remember(key, body);
+		return new Blob([body as Uint8Array<ArrayBuffer>]);
+	}
+	mkdirSync(MEDIA_DIR, { recursive: true });
+	const temp = `${file}.part${newId()}`;
+	writeFileSync(temp, body);
+	renameSync(temp, file);
+	if (!poster) await sql`update media set size = ${body.length} where id = ${localId}::bigint`;
+	return Bun.file(file);
 }
 
 // Files are fetched when their post or profile syncs, not when someone first
@@ -390,7 +542,7 @@ export function fetchRemoteMedia(localId: string, poster = false): Promise<boole
 // other instance was down. A failing instance is left alone for a while and
 // the backfill below picks its files up again.
 const QUEUE_PARALLEL = 3;
-const BACKOFF_MS = 5 * 60_000;
+const BACKOFF_MS = STORE_MEDIA ? 5 * 60_000 : 30_000;
 const queue: { id: string; poster: boolean }[] = [];
 const queued = new Set<string>();
 const failingUntil = new Map<string, number>();
@@ -399,6 +551,7 @@ const gone = new Set<string>();
 let draining = 0;
 
 function prefetch(localId: string, poster = false) {
+	if (!STORE_MEDIA) return;
 	for (const p of poster ? [false, true] : [false]) {
 		const key = `${localId}${p ? "p" : ""}`;
 		if (queued.has(key) || queue.length >= 10_000) continue;
@@ -412,8 +565,8 @@ function drain() {
 	while (draining < QUEUE_PARALLEL && queue.length) {
 		const job = queue.shift()!;
 		draining++;
-		void fetchRemoteMedia(job.id, job.poster)
-			.catch(() => false)
+		void remoteMediaFile(job.id, job.poster)
+			.catch(() => undefined)
 			.finally(() => {
 				queued.delete(`${job.id}${job.poster ? "p" : ""}`);
 				draining--;
@@ -424,6 +577,7 @@ function drain() {
 
 // files still missing (an instance that was down, a server restart mid-queue)
 async function backfillMedia() {
+	if (!STORE_MEDIA) return;
 	const rows = await sql`select id::text, kind from media where remote_instance is not null and size = 0
 		and remote_instance <> all(${sql.array([...failingUntil].filter(([, until]) => until > Date.now()).map(([i]) => i), "TEXT")})
 		and id <> all(${sql.array([...gone], "INT8")})
@@ -431,10 +585,10 @@ async function backfillMedia() {
 	for (const r of rows as any[]) prefetch(r.id, r.kind === "video");
 }
 
-async function downloadRemoteMedia(localId: string, poster: boolean): Promise<boolean> {
+async function pullRemoteMedia(localId: string, poster: boolean): Promise<Uint8Array | undefined> {
 	const [m] = await sql`select remote_instance, remote_id::text from media where id = ${localId}::bigint and remote_instance is not null`;
-	if (!m || !isPeer(m.remote_instance)) return false;
-	if ((failingUntil.get(m.remote_instance) ?? 0) > Date.now()) return false;
+	if (!m || !isPeer(m.remote_instance)) return undefined;
+	if ((failingUntil.get(m.remote_instance) ?? 0) > Date.now()) return undefined;
 	let failure = "";
 	const r = await signedFetch(m.remote_instance, "GET", `/federation/v1/media/${m.remote_id}${poster ? "/poster" : ""}`, undefined, MAX_MEDIA).catch((e) => {
 		failure = e instanceof Error ? e.message : String(e);
@@ -448,26 +602,20 @@ async function downloadRemoteMedia(localId: string, poster: boolean): Promise<bo
 				console.error(`federation: media from ${m.remote_instance} failing (${failure || `status ${r?.status}`}), retrying in ${BACKOFF_MS / 60_000} minutes`);
 			failingUntil.set(m.remote_instance, Date.now() + BACKOFF_MS);
 		}
-		return false;
+		return undefined;
 	}
 	failingUntil.delete(m.remote_instance);
-	const file = poster ? posterFile(MEDIA_DIR, localId) : join(MEDIA_DIR, localId);
-	mkdirSync(MEDIA_DIR, { recursive: true });
-	const temp = `${file}.part${newId()}`;
-	writeFileSync(temp, r.body);
-	renameSync(temp, file);
-	if (!poster) await sql`update media set size = ${r.body.length} where id = ${localId}::bigint`;
-	return true;
+	return r.body;
 }
 
 export async function lookupRemoteUser(handle: string): Promise<string | undefined> {
-	const m = /^(\w{1,50})@([a-z0-9.:-]{1,260})$/i.exec(handle);
+	const m = /^([^\s\p{C}/\\?#@%,:]{1,50})@([a-z0-9.:-]{1,260})$/iu.exec(handle);
 	if (!m) return undefined;
 	const instance = m[2].toLowerCase();
 	const [known] = await sql`select id::text from users where lower(screen_name) = lower(${`${m[1]}@${instance}`}) and instance = ${instance}`;
 	if (known) return known.id;
 	if (!isPeer(instance)) return undefined;
-	const r = await signedFetch(instance, "GET", `/federation/v1/users/by-name/${m[1]}`).catch(() => undefined);
+	const r = await signedFetch(instance, "GET", `/federation/v1/users/by-name/${encodeURIComponent(m[1])}`).catch(() => undefined);
 	return r?.status === 200 ? applyUser(instance, r.json()) : undefined;
 }
 
@@ -483,4 +631,28 @@ export function startFederationSync() {
 		if (tick % 200 === 10) void backfillMedia().catch((e) => console.error("federation: media backfill:", e instanceof Error ? e.message : e));
 		if (tick % 3600 === 0) void sql`delete from federation_outbox where created_at < now() - interval '60 days'`.catch(() => {});
 	}, 3000).unref();
+}
+
+export const storesRemoteMedia = () => STORE_MEDIA;
+
+export async function savedRemoteMedia(): Promise<{ files: number; bytes: number }> {
+	const [r] = await sql`select count(*) filter (where size > 0)::int as files, coalesce(sum(size), 0)::float8 as bytes from media where remote_instance is not null`;
+	return { files: r.files, bytes: r.bytes };
+}
+
+export async function dropRemoteMedia(): Promise<{ files: number; bytes: number }> {
+	let files = 0;
+	let bytes = 0;
+	for (const { id } of await sql`select id::text from media where remote_instance is not null`) {
+		for (const file of [join(MEDIA_DIR, id), posterFile(MEDIA_DIR, id)]) {
+			if (!existsSync(file)) continue;
+			bytes += statSync(file).size;
+			rmSync(file, { force: true });
+			files++;
+		}
+	}
+	await sql`update media set size = 0 where remote_instance is not null and size <> 0`;
+	memory.clear();
+	memoryBytes = 0;
+	return { files, bytes };
 }

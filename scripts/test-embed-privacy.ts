@@ -1,0 +1,40 @@
+// Signed-out HTTP previews must recheck current privacy and content warnings.
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const database = new URL(process.env.DATABASE_URL ?? "postgres://localhost/xitter");
+assert(["localhost", "127.0.0.1"].includes(database.hostname) && /test|codex/.test(database.pathname), "Use a disposable local test database.");
+const dir = mkdtempSync(join(tmpdir(), "xitter-embed-")); process.env.MEDIA_DIR = dir;
+const { sql } = await import("../src/db");
+const { newId } = await import("../src/ids");
+const { embedImage, oembed } = await import("../src/embeds");
+const { PUBLIC_ORIGIN } = await import("../src/config");
+const owner = newId(), post = newId(), media = newId();
+const server = Bun.serve({ port: 0, fetch(req) { const u = new URL(req.url); return u.pathname === "/oembed" ? oembed(u) : embedImage(u.pathname); } });
+const get = (path: string) => fetch(`http://localhost:${server.port}${path}`);
+const image = () => get(`/embed/post/${post}`);
+try {
+ await sql`insert into users(id,screen_name,name,password_hash) values (${owner}::bigint,${`embed_${owner}`},'Embed fixture','!')`;
+ await sql`insert into posts(id,user_id,text,conversation_id) values (${post}::bigint,${owner}::bigint,'Public photo',${post}::bigint)`;
+ await sql`insert into media(id,user_id,post_id,kind,mime,size,width,height,sensitive_warning) values (${media}::bigint,${owner}::bigint,${post}::bigint,'photo','image/png',4,1,1,ARRAY['other'])`;
+ writeFileSync(join(dir,media),"data");
+ assert.equal((await image()).status,404,"per-upload warnings suppress signed-out previews even when the post flag is false");
+ await sql`update media set sensitive_warning=null where id=${media}::bigint`;
+ let r = await image(); assert.equal(r.status,200); assert.equal(await r.text(),"data"); assert.equal(r.headers.get('cache-control'),'no-store');
+ await sql`update posts set sensitive=true where id=${post}::bigint`;
+ assert.equal((await image()).status,404);
+ await sql`update users set never_sensitive=true where id=${owner}::bigint`;
+ await sql`update media set sensitive_warning=ARRAY['other'] where id=${media}::bigint`;
+ assert.equal((await image()).status,200,"staff override suppresses post and per-media warnings consistently");
+ await sql`update users set protected=true where id=${owner}::bigint`;
+ r=await image(); assert.equal(r.status,404,"protection revokes access immediately"); assert.equal(r.headers.get("cache-control"),"no-store");
+ await sql`update users set protected=false where id=${owner}::bigint`;
+ await sql`update posts set hidden=true where id=${post}::bigint`;
+ assert.equal((await image()).status,404);
+ await sql`update posts set hidden=false where id=${post}::bigint`;
+ r=await get(`/oembed?url=${encodeURIComponent(`${PUBLIC_ORIGIN}/fixture/status/${post}`)}`);assert.equal(r.status,200);assert.equal(r.headers.get('cache-control'),'no-store');
+ for(const path of ['/embed/post/9999999999999999999','/embed/avatar/9999999999999999999',`/oembed?url=${encodeURIComponent(`${PUBLIC_ORIGIN}/fixture/status/9999999999999999999`)}`])assert.equal((await get(path)).status,404);
+ await sql`delete from posts where id=${post}::bigint`;assert.equal((await image()).status,404);
+ console.log('Signed-out embed HTTP privacy passed: per-media warnings, staff override, immediate protection/hiding/deletion, noncacheable responses, bigint bounds');
+} finally { server.stop(true);await sql`delete from users where id=${owner}::bigint`;await sql.close();rmSync(dir,{recursive:true,force:true}); }

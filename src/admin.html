@@ -744,6 +744,10 @@ const RENDER = {
 								(i.key_change ? ' <button class="btn" data-key="' + esc(i.id) + '">Accept the new key</button>' : "")
 							: "") + "</td></tr>").join("") + "</table>"
 				: '<div class="empty">No other instances yet.</div>') + "</div>" +
+			'<div class="box" style="margin-top:16px"><h2>Media from other instances</h2><p class="dim small">' +
+				(f.media.stored ? "Saved on this server (FEDERATION_MEDIA=store)." : "Shown straight from their home instance and not saved here.") +
+				" Saved now: " + esc(String(f.media.files)) + " files, " + esc((f.media.bytes / 1048576).toFixed(1)) + " MB.</p>" +
+				(can("admin") && f.media.bytes > 0 ? '<button class="btn danger" id="dropmedia">Delete saved media</button>' : "") + "</div>" +
 			(can("admin") ? '<div class="box" style="margin-top:16px"><h2>Defederate an instance</h2><div class="row"><input id="fbi" placeholder="xit.example.org" style="flex:1;min-width:180px"><input id="fbr" placeholder="Reason" maxlength="500" style="flex:2;min-width:200px"><button class="btn danger" id="fbgo">Defederate</button></div></div>' : "");
 		const block = async (instance, reason) => {
 			if (!(await ask("Defederate " + instance + "? Its accounts and posts disappear here and nothing more comes from it until you federate again."))) return;
@@ -757,6 +761,10 @@ const RENDER = {
 			if (!(await ask("Trust the new key of " + b.dataset.key + "? Only do this if its admins told you they changed it."))) return;
 			act(() => api("federationAcceptKey", { instance: b.dataset.key }), "Key accepted").then(route);
 		});
+		if ($("#dropmedia")) $("#dropmedia").onclick = async () => {
+			if (!(await ask("Delete every picture and video saved from other instances? They are fetched from their home instance again when someone views them."))) return;
+			act(() => api("federationDropMedia"), "Deleted").then(route);
+		};
 		main.querySelectorAll("[data-purge]").forEach((b) => b.onclick = async () => {
 			if (!(await ask("Delete every account, post and file that came from " + b.dataset.purge + "? This can't be undone. Federating again later brings back only what it sends from then on."))) return;
 			act(() => api("federationPurge", { instance: b.dataset.purge }), "Deleted").then(route);
@@ -846,7 +854,7 @@ const RENDER = {
 	async orgs(main) {
 		const { orgs } = await api("orgs");
 		main.innerHTML = "<h1>Organisations</h1>" +
-			'<p class="dim">Organisations are accounts with the gold badge or the grey government badge. Their affiliates show the organisation\'s picture as a badge after their name and are listed on its Affiliates tab.</p>' +
+			'<p class="dim">Organisations are accounts with the gold badge or the grey government badge, and any other account an admin has given affiliates on its page. Their affiliates show the organisation\'s picture as a badge after their name and are listed on its Affiliates tab.</p>' +
 			(can("createOrg") ? '<div class="box" style="margin-bottom:16px"><h2>New organisation</h2><div class="row"><input id="oh" placeholder="handle"><input id="on" placeholder="Name"><button class="btn primary" id="oc">Create</button></div><div id="osecret"></div></div>' : "") +
 			'<div class="scroll">' + (orgs.length ? userTable(orgs, true) : '<div class="empty">No organisations yet. Give an account the gold or grey government badge, or create one above.</div>') + "</div>";
 		if ($("#oc")) $("#oc").onclick = () => act(async () => {
@@ -887,7 +895,7 @@ const RENDER = {
 					posts.map((p) => "<tr><td>" + (p.reply_to_id ? '<span class="dim small">reply · </span>' : "") + esc(p.text || "(no text)") + (p.media ? ' <span class="dim small">· ' + p.media + " media</span>" : "") +
 						(p.hidden ? ' <span class="pill suspended">hidden</span>' : "") + (p.sensitive ? ' <span class="pill restricted">sensitive</span>' : "") +
 						(p.notice ? ' <span class="pill restricted">' + esc(NOTICE_LABELS[p.notice.type] || p.notice.type) + "</span>" : "") + (p.count_overrides ? ' <span class="pill">counts set</span>' : "") +
-						'<div class="dim small">' + p.likes + ' likes · <a href="/' + esc(p.screen_name) + "/status/" + esc(p.id) + '" target="_blank">open</a></div></td><td><a href="#user/' + "" + '" data-handle="' + esc(p.screen_name) + '">@' + esc(p.screen_name) + '</a></td><td class="small dim">' + esc(when(p.created_at)) + "</td><td>" +
+						'<div class="dim small">' + p.likes + ' likes · <a href="/' + esc(p.screen_name) + "/status/" + esc(p.id) + '" target="_blank">open</a></div></td><td><a href="#user/' + esc(p.user_id) + '">@' + esc(p.screen_name) + '</a></td><td class="small dim">' + esc(when(p.created_at)) + "</td><td>" +
 						'<div class="row" style="flex-wrap:nowrap">' +
 							(can("setPostVisibility") ? '<button class="btn" data-vis="' + esc(p.id) + '" data-hidden="' + !p.hidden + '" data-sensitive="' + !!p.sensitive + '" title="Hidden posts are seen by staff only">' + (p.hidden ? "Show" : "Hide") + "</button>" +
 								'<button class="btn" data-vis="' + esc(p.id) + '" data-hidden="' + !!p.hidden + '" data-sensitive="' + !p.sensitive + '" title="Media behind a content warning">' + (p.sensitive ? "Not sensitive" : "Sensitive") + "</button>" : "") +
@@ -912,12 +920,6 @@ const RENDER = {
 			$("#list").querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
 				if (!(await ask("Delete this post for everyone?"))) return;
 				act(() => api("deletePost", { id: b.dataset.del }), "Post deleted").then(load);
-			});
-			$("#list").querySelectorAll("[data-handle]").forEach((a) => a.onclick = async (e) => {
-				e.preventDefault();
-				const { users } = await api("users", { q: a.dataset.handle });
-				const u = users.find((x) => x.screen_name.toLowerCase() === a.dataset.handle.toLowerCase());
-				if (u) go("user/" + u.id);
 			});
 		};
 		let t;
@@ -1091,7 +1093,7 @@ const RENDER = {
 			promoted_trends: listOf("#promotedTrends"),
 			trend_min_people: Number($("#trendPeople").value),
 			trend_min_account_days: Number($("#trendDays").value),
-			global_pin: ((v) => (/\/status\/(\d{1,19})/.exec(v) || [])[1] || v || null)($("#pin").value.trim()),
+			global_pin: $("#pin").value.trim() || null,
 		}), "Saved").then(route));
 		main.querySelectorAll("[data-slot]").forEach((input) => input.onchange = () => {
 			const file = input.files[0];
@@ -1187,9 +1189,8 @@ function userTable(users, orgs = false, pick = false) {
 
 async function renderUser(main, id) {
 	const { user: u, invited, log, alts, strikes, next_step } = await api("user", { id });
-	const isOrg = u.verified_type === "business" || u.verified_type === "government";
 	const [affiliates, { badges }, { labels }, { notes }, { messages }, sessions, handles] = await Promise.all([
-		isOrg ? api("affiliates", { orgId: id }).then((r) => r.affiliates) : [],
+		api("affiliates", { orgId: id }).then((r) => r.affiliates),
 		api("badges"),
 		api("labels"),
 		api("staffNotes", { id }),
@@ -1236,7 +1237,7 @@ async function renderUser(main, id) {
 		}).join("") + "</div>" : '<p class="dim small" style="margin:0">None.</p>') +
 		(can("setBadges") && badges.some((b) => !u.badge_ids.includes(b.id)) ? '<select id="addBadge"><option value="">Add a badge…</option>' + badges.filter((b) => !u.badge_ids.includes(b.id)).map((b) => '<option value="' + esc(b.id) + '">' + esc(b.name) + "</option>").join("") + "</select>" : "") +
 		'<p class="dim small" style="margin:4px 0 0">The first one fills X\'s badge slot (after an organisation\'s badge, if any); the rest and the flag follow it.</p></div>' +
-		(isOrg ? '<div class="field"><label>Badge its affiliates wear</label><select id="orgBadge"' + (can("setOrgBadge") ? "" : " disabled") + ">" + badgeOptions(u.org_badge_id, "its profile picture") + "</select></div>" : "") +
+		('<div class="field"><label>Badge its affiliates wear</label><select id="orgBadge"' + (can("setOrgBadge") ? "" : " disabled") + ">" + badgeOptions(u.org_badge_id, "its profile picture") + "</select></div>") +
 		"</div>" +
 		// standing
 		'<div class="box"><h2>Standing</h2><p class="dim small">Now: <b>' + esc(u.status) + "</b>" + (u.status_until ? " until " + esc(when(u.status_until)) : "") + "</p>" +
@@ -1272,8 +1273,8 @@ async function renderUser(main, id) {
 			: '<p class="dim small">Not signed in anywhere.</p>') + "</div>" +
 		"</div>" +
 		// organisation
-		(isOrg ? '<h2>Affiliates</h2>' + (canHere("addAffiliate") ? '<div class="bar"><input id="aff" placeholder="@handle to add"><button class="btn primary" id="addaff">Add affiliate</button></div>' : "") +
-			(affiliates.length ? '<div class="scroll"><table class="table">' + affiliates.map((a) => '<tr><td>' + person(a) + "</td><td>" + (can("removeAffiliate") ? '<button class="btn danger" data-unaff="' + esc(a.id) + '">Remove</button>' : "") + "</td></tr>").join("") + "</table></div>" : '<div class="empty">No affiliates yet.</div>') : "") +
+		('<h2>Affiliates</h2>' + (canHere("addAffiliate") ? '<div class="bar"><input id="aff" placeholder="@handle to add"><button class="btn primary" id="addaff">Add affiliate</button></div>' : "") +
+			(affiliates.length ? '<div class="scroll"><table class="table">' + affiliates.map((a) => '<tr><td>' + person(a) + "</td><td>" + (can("removeAffiliate") ? '<button class="btn danger" data-unaff="' + esc(a.id) + '">Remove</button>' : "") + "</td></tr>").join("") + "</table></div>" : '<div class="empty">No affiliates yet.</div>')) +
 		(alts?.length ? '<h2>Seen from the same addresses</h2><p class="dim small">Accounts that signed in from an address this one used in the last 90 days. Shared networks put strangers here too.</p><p>' + alts.map((a) => '<a href="#user/' + esc(a.id) + '">@' + esc(a.screen_name) + "</a>" + (a.status !== "active" ? ' <span class="pill ' + esc(a.status) + '">' + esc(a.status) + "</span>" : "")).join(", ") + "</p>" : "") +
 		(invited.length ? "<h2>Invited</h2><p>" + invited.map((i) => '<a href="#user/' + esc(i.id) + '">@' + esc(i.screen_name) + "</a>").join(", ") + "</p>" : "") +
 		"<h2>History</h2>" + (log.length ? '<table class="table">' + log.map((e) => '<tr><td class="small dim">' + esc(when(e.created_at)) + "</td><td>" + (e.automatic ? "automod" : "@" + esc(e.actor ?? "?")) + " " + esc(e.action.replace(/_/g, " ")) + '</td><td class="small dim code">' + esc(e.detail ? JSON.stringify(e.detail) : "") + "</td></tr>").join("") + "</table>" : '<div class="empty">No staff actions yet.</div>');

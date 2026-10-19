@@ -60,7 +60,7 @@ import {
 } from "./posts";
 import { lookupRemoteUser } from "./federation-sync";
 import { TopicError, setTopicState, suggestedTopics, topicById, topicContext, topicFeedbackActions, topicFeedbackKeys, topicResult, topicsForPosts } from "./topics";
-import { affiliatesOf, followList, suggestedUsers, userById, userByName, usersByIds } from "./users";
+import { affiliatesOf, followList, localName, suggestedUsers, userById, userByName, usersByIds } from "./users";
 
 type Vars = Record<string, any>;
 type Handler = (viewer: Viewer, vars: Vars) => Promise<unknown> | unknown;
@@ -658,7 +658,7 @@ const handlers: Record<string, Handler> = {
 	},
 
 	UserByScreenName: async (v, vars) => {
-		const name = typeof vars.screen_name === "string" ? vars.screen_name.replace(/^@/, "") : "";
+		const name = typeof vars.screen_name === "string" ? localName(vars.screen_name.replace(/^@/, "")) : "";
 		const user = name ? ((await userByName(v.id, name)) ?? (name.includes("@") && (await lookupRemoteUser(name).catch(() => undefined)) ? await userByName(v.id, name) : undefined)) : undefined;
 		// an empty answer makes the client show "this account doesn't exist"
 		if (!user) return { data: {} };

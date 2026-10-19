@@ -9,7 +9,7 @@ import { open } from "node:fs/promises";
 import { join } from "node:path";
 import type { SQL } from "bun";
 import type { Viewer } from "./auth";
-import { fetchRemoteMedia } from "./federation-sync";
+import { remoteMediaFile } from "./federation-sync";
 import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
 import { blockedFor, protectedFor, suspendedFor } from "./blocks";
 import { staffViewer } from "./staff-access";
@@ -404,31 +404,32 @@ async function cacheFor(viewer: Viewer, served: Served): Promise<string | undefi
 export async function serveMedia(req: Request, pathname: string, viewer: Viewer): Promise<Response> {
 	const poster = /^\/media\/poster\/(\d{1,19})\.jpg$/.exec(pathname);
 	if (poster && isId(poster[1])) {
-		const file = posterFile(MEDIA_DIR, poster[1]);
-		const served = existsSync(file) || (await fetchRemoteMedia(poster[1], true)) ? await servedOf(poster[1]) : undefined;
+		const body = await remoteMediaFile(poster[1], true);
+		const served = body && (await servedOf(poster[1]));
 		const cache = served && (await cacheFor(viewer, served));
-		if (!cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-		return new Response(Bun.file(file), { headers: { "content-type": "image/jpeg", "cache-control": cache, "x-content-type-options": "nosniff" } });
+		if (!body || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
+		return new Response(body, { headers: { "content-type": "image/jpeg", "cache-control": cache, "x-content-type-options": "nosniff" } });
 	}
 	const m = /^\/media\/(?:banner\/)?(\d{1,19})(?:\.[a-z0-9]+)?(?:\/[\w-]+)?$/.exec(pathname);
-	if (!m || !isId(m[1]) || !(existsSync(fileOf(m[1])) || (await fetchRemoteMedia(m[1])))) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
+	const body = m && isId(m[1]) && (await remoteMediaFile(m[1]));
+	if (!m || !body) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
 	const served = await servedOf(m[1]);
 	const cache = served && (await cacheFor(viewer, served));
 	if (!served || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
 	const headers: Record<string, string> = { "content-type": served.mime, "cache-control": cache, "x-content-type-options": "nosniff", "accept-ranges": "bytes" };
-	const size = statSync(fileOf(m[1])).size;
+	const size = body.size;
 	const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get("range") ?? "");
 	if (range && (range[1] || range[2])) {
 		// "bytes=-N" means the last N bytes
 		const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
 		const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
 		if (start > end || start >= size) return new Response(null, { status: 416, headers: { "content-range": `bytes */${size}` } });
-		return new Response(Bun.file(fileOf(m[1])).slice(start, end + 1), {
+		return new Response(body.slice(start, end + 1), {
 			status: 206,
 			headers: { ...headers, "content-range": `bytes ${start}-${end}/${size}`, "content-length": String(end - start + 1) },
 		});
 	}
-	return new Response(Bun.file(fileOf(m[1])), { headers });
+	return new Response(body, { headers });
 }
 
 // attaches uploads to a new post; only the poster's own unused, finished

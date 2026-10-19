@@ -17,12 +17,17 @@ import { blockedFor, outOfView, protectedFor } from "./blocks";
 import { sql } from "./db";
 import { settings } from "./settings";
 import { isId } from "./ids";
+import { localName } from "./users";
 import { staffViewer } from "./staff-access";
 
 type Clause = ReturnType<typeof sql>;
 
 // passed as a parameter: a backslash inside the SQL template would be lost
 const HASHTAG_RE = "#(\\w+)";
+const HANDLE = "\\w{1,50}(?:@(?:[a-z0-9-]+\\.)*[a-z0-9-]+(?::\\d{1,5})?)?";
+const FROM_RE = new RegExp(`^from:@?(${HANDLE})$`, "i");
+const TO_RE = new RegExp(`^to:@?(${HANDLE})$`, "i");
+const AT_RE = new RegExp(`^@(${HANDLE})$`, "i");
 const like = (s: string) => `%${s.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 // a hashtag as a whole word: "#go" does not match "#gold"
 const tagPattern = (tag: string) => `(^|[^\\w#])#${tag.replace(/[^\p{L}\p{N}_]/gu, "")}($|[^\\w])`;
@@ -46,11 +51,12 @@ function term(t: string, viewerId: string): Clause | undefined {
 	let c: Clause | undefined;
 	let m: RegExpExecArray | null;
 	if ((m = /^"(.*)"$/.exec(body))) c = m[1] ? sql`p.text ilike ${like(m[1])}` : undefined;
-	else if ((m = /^from:@?(\w{1,15})$/i.exec(body))) c = sql`p.user_id = (select id from users where lower(screen_name) = lower(${m[1]}))`;
-	else if ((m = /^to:@?(\w{1,15})$/i.exec(body)))
-		c = sql`exists (select 1 from posts parent join users pu on pu.id = parent.user_id where parent.id = p.reply_to_id and lower(pu.screen_name) = lower(${m[1]}))`;
-	else if ((m = /^@(\w{1,15})$/.exec(body)))
-		c = sql`exists (select 1 from post_mentions pm join users mu on mu.id = pm.user_id where pm.post_id = p.id and lower(mu.screen_name) = lower(${m[1]}))`;
+	else if ((m = FROM_RE.exec(body)))
+		c = sql`p.user_id = (select id from users where lower(screen_name) = ${localName(m[1]).toLowerCase()})`;
+	else if ((m = TO_RE.exec(body)))
+		c = sql`exists (select 1 from posts parent join users pu on pu.id = parent.user_id where parent.id = p.reply_to_id and lower(pu.screen_name) = ${localName(m[1]).toLowerCase()})`;
+	else if ((m = AT_RE.exec(body)))
+		c = sql`exists (select 1 from post_mentions pm join users mu on mu.id = pm.user_id where pm.post_id = p.id and lower(mu.screen_name) = ${localName(m[1]).toLowerCase()})`;
 	else if ((m = /^quoted_tweet_id:(\d{1,19})$/.exec(body))) c = isId(m[1]) ? sql`p.quote_id = ${m[1]}::bigint` : sql`false`;
 	else if ((m = /^#([\p{L}\p{N}_]+)$/u.exec(body))) c = sql`p.text ~* ${tagPattern(m[1])}`;
 	else if ((m = /^filter:(\w+)$/i.exec(body))) {
@@ -136,7 +142,7 @@ export async function searchPosts(
 export async function searchUsers(viewerId: string, query: string, limit: number, offset = 0) {
 	const words = tokens(query.replace(/^@/, "").trim())
 		.filter((t) => !t.startsWith("-") && !t.includes(":"))
-		.map((t) => t.replace(/^"|"$/g, "").replace(/^@/, ""));
+		.map((t) => localName(t.replace(/^"|"$/g, "").replace(/^@/, "")));
 	if (!words.length) return [];
 	const each = words.map((w) => sql`(u.screen_name ilike ${like(w)} or u.name ilike ${like(w)} or u.bio ilike ${like(w)})`);
 	const cond = each.reduce((acc, c) => sql`${acc} and ${c}`);

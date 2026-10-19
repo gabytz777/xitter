@@ -78,6 +78,12 @@ try {
 	await bob.gql("FavoriteTweet", { tweet_id: mirror });
 	check("A sees bob's like", !!(await until(async () => (await A.db`select 1 from likes where user_id = ${bobOnA ?? "0"}::bigint and post_id = ${postId}::bigint`).length > 0)));
 
+	await A.db`update posts set count_overrides = '{"likes": 4242}'::jsonb where id = ${postId}::bigint`;
+	const shown = await until(async () => (await B.db`select remote_counts from posts where id = ${mirror ?? "0"}::bigint and (remote_counts->>'likes')::int = 4242`)[0]);
+	check("counts set at home show on the copy", !!shown);
+	await A.db`update users set count_overrides = '{"followers": 777}'::jsonb where id = ${alice.id}::bigint`;
+	check("and so do an account's", !!(await until(async () => (await B.db`select 1 from users where id = ${aliceOnB ?? "0"}::bigint and (remote_counts->>'followers')::int = 777`).length > 0)));
+
 	const reply = await bob.gql("CreateTweet", { tweet_text: `hi alice ${stamp}`, reply: { in_reply_to_tweet_id: mirror } });
 	const replyId = reply.data?.create_tweet?.tweet_results?.result?.rest_id as string;
 	check("bob replies on B", !!replyId, reply.errors);
@@ -100,6 +106,42 @@ try {
 		return JSON.stringify(n).includes(mentionOnB ?? "none");
 	}, 10);
 	check("and bob gets the mention", !!bobNotified);
+
+	await A.db`update users set bio = ${`me: @${alice.name}, pal: @${bob.name}@${idOf(B.origin)}, see https://example.org/@${bob.name}`}, website = 'https://example.org' where id = ${alice.id}::bigint`;
+	const bioOnB = await until(async () => {
+		const r = await bob.get("UserByScreenName", { screen_name: `${alice.name}@${idOf(A.origin)}`, withSafetyModeUserFields: true });
+		const result = r.data?.user?.result;
+		return result?.profile_bio?.description?.startsWith("me:") ? result.profile_bio : undefined;
+	});
+	const bioMentions = bioOnB?.entities?.description?.user_mentions?.map((m: any) => m.screen_name) ?? [];
+	check("a bare @name in a copied bio points at its home account", bioMentions.includes(`${alice.name}@${idOf(A.origin)}`), bioMentions);
+	check("and @name@<this instance> points at the local account", bioMentions.includes(bob.name), bioMentions);
+	check("and @names inside links are left alone", bioMentions.length === 2, bioMentions);
+	const badgeId = newId();
+	await A.db`insert into custom_badges (id, name, image, mime) values (${badgeId}::bigint, ${`fed badge ${stamp}`}, ${Buffer.from("png")}, 'image/png')`;
+	await A.db`insert into user_badges (user_id, badge_id, position) values (${alice.id}::bigint, ${badgeId}::bigint, 0)`;
+	await A.db`update users set verified_type = 'blue' where id = ${alice.id}::bigint`;
+	const looks = await until(async () => (await B.db`select verified_type, remote_badges from users where id = ${aliceOnB ?? "0"}::bigint and verified_type is not null and remote_badges <> '[]'::jsonb`)[0]);
+	check("her checkmark and custom badges travel", looks?.verified_type === "blue" && looks.remote_badges?.[0]?.url === `${A.origin}/public/badge-${badgeId}.png`, looks);
+	await A.db`delete from custom_badges where id = ${badgeId}::bigint`;
+	check("the website travels too", (await B.db`select website from users where id = ${aliceOnB ?? "0"}::bigint`)[0]?.website === "https://example.org");
+	const ownHost = await bob.get("UserByScreenName", { screen_name: `${bob.name}@${idOf(B.origin)}`, withSafetyModeUserFields: true });
+	check("a handle naming this instance finds the local account", ownHost.data?.user?.result?.rest_id === bob.id, ownHost.data?.user?.result?.rest_id);
+
+	await A.db`update posts set text = text || ' (edited)', edited_at = now() where id = ${mentionId ?? "0"}::bigint`;
+	const versions = await until(async () => (await B.db`select count(*)::int as n from post_versions where post_id = ${mentionOnB ?? "0"}::bigint`)[0]?.n);
+	const [edited] = await B.db`select edit_count, text from posts where id = ${mentionOnB ?? "0"}::bigint`;
+	check("an edit at home keeps the old text in the copy's history", versions === 1 && edited?.edit_count === 1 && edited.text.endsWith("(edited)"), { versions, edited });
+
+	const limited = await alice.gql("CreateTweet", { tweet_text: `only people I mention ${stamp}` });
+	const limitedId = limited.data?.create_tweet?.tweet_results?.result?.rest_id as string;
+	await A.db`update posts set reply_policy = 'ByInvitation' where id = ${limitedId ?? "0"}::bigint`;
+	const limitedOnB = await until(async () => (await B.db`select local_id::text from federated_objects where instance = ${idOf(A.origin)} and kind = 'post' and remote_id = ${limitedId ?? "0"}::bigint`)[0]?.local_id as string);
+	await bob.gql("CreateTweet", { tweet_text: `sneaking in ${stamp}`, reply: { in_reply_to_tweet_id: limitedOnB } });
+	const marker = await bob.gql("CreateTweet", { tweet_text: `marker ${stamp}` });
+	const markerId = marker.data?.create_tweet?.tweet_results?.result?.rest_id as string;
+	await until(async () => (await A.db`select 1 from federated_objects where instance = ${idOf(B.origin)} and kind = 'post' and remote_id = ${markerId ?? "0"}::bigint`).length > 0);
+	check("a reply the home's reply limit forbids is dropped there", !(await A.db`select 1 from posts where reply_to_id = ${limitedId ?? "0"}::bigint`).length);
 
 	const mediaId = newId();
 	const picture = Buffer.from(`GIF89a-${stamp}`);

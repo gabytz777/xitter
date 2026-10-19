@@ -8,9 +8,8 @@ import type { User } from "./auth";
 import { CLIENT_DIR } from "./client-cache";
 import { PUBLIC_ORIGIN } from "./config";
 import type { ArticleEntity } from "./articles";
-import { INSTANCE_ID } from "./federation";
 import { FLAGS } from "./flags";
-import { MENTION_HANDLE } from "./mentions";
+import { homeOf, mentionsIn } from "./mentions";
 import { type MediaRow, absolute, mediaEntity } from "./media";
 import { placeById } from "./places";
 import { webSource } from "./platforms";
@@ -109,6 +108,7 @@ export function badgeList(u: User): Badge[] {
 	const out: Badge[] = [];
 	if (u.org) out.push({ url: absolute(u.org.avatar_url) ?? DEFAULT_AVATAR, description: u.org.name, org: u.org.screen_name });
 	for (const b of u.badges ?? []) out.push({ url: `${PUBLIC_ORIGIN}/public/badge-${b.id}.png`, description: b.name });
+	for (const b of u.remote_badges ?? []) out.push({ url: b.url, description: b.name });
 	if (u.flag && FLAGS[u.flag]) out.push({ url: `${PUBLIC_ORIGIN}/public/flag-${u.flag}.svg`, description: `${FLAGS[u.flag].name} flag` });
 	return out;
 }
@@ -188,7 +188,7 @@ export function userResult(u: User) {
 		__typename: "User",
 		action_counts: { favorites_count: u.stats?.likes ?? 0 },
 		affiliates_highlighted_label: badgeLabel(u),
-		...(u.verified_type === "business" || u.verified_type === "government" ? { business_account: { affiliates_count: u.affiliates ?? 0 } } : {}),
+		...(u.verified_type === "business" || u.verified_type === "government" || u.affiliates ? { business_account: { affiliates_count: u.affiliates ?? 0 } } : {}),
 		avatar: { image_url: absolute(u.avatar_url) ?? DEFAULT_AVATAR },
 		...(u.banner_url ? { banner: { image_url: absolute(u.banner_url) } } : {}),
 		core: { created_at: apiDate(u.created_at), name: u.name, screen_name: u.screen_name },
@@ -205,7 +205,7 @@ export function userResult(u: User) {
 		pinned_items: u.pinned_post_id ? { tweet_ids_str: [u.pinned_post_id] } : {},
 		possibly_sensitive: false,
 		privacy: { protected: !!u.protected },
-		profile_bio: { description: u.bio, entities: { description: { urls: bioEntities(u.bio ?? "") }, ...urlEntities(u) } },
+		profile_bio: { description: u.bio, entities: { description: { urls: bioEntities(u.bio ?? ""), user_mentions: bioMentions(u) }, ...urlEntities(u) } },
 		profile_image_shape: pictureShape(u),
 		profile_metadata: { profile_interstitial_type: "" },
 		profile_translation: { translator_type: translatorType(u), translator_type_enum: { badged: "Badged", moderator: "Moderator", none: "None" }[translatorType(u)] },
@@ -245,7 +245,7 @@ export function legacyUser(u: User) {
 		notifications: !!u.stats?.notifying,
 		want_retweets: !u.stats?.repostsMuted,
 		possibly_sensitive: false,
-		entities: { description: { urls: bioEntities(u.bio ?? "") }, ...urlEntities(u) },
+		entities: { description: { urls: bioEntities(u.bio ?? ""), user_mentions: bioMentions(u) }, ...urlEntities(u) },
 		profile_image_shape: pictureShape(u),
 		profile_interstitial_type: "",
 		is_translator: translatorType(u) !== "none",
@@ -368,19 +368,14 @@ const permalink = (p: PostRow) => `${PUBLIC_ORIGIN}/${p.author.screen_name}/stat
 function userMentions(p: PostRow) {
 	if (!p.mentions?.length) return [];
 	const byName = new Map(p.mentions.map((m) => [m.screen_name.toLowerCase(), m]));
-	const out = [];
-	for (const m of p.text.matchAll(MENTION_HANDLE)) {
-		const name = m[1].toLowerCase();
-		const host = m[2]?.toLowerCase();
-		const user = host
-			? (byName.get(`${name}@${host}`) ?? (host === INSTANCE_ID ? byName.get(name) : undefined))
-			: (byName.get(name) ?? p.mentions.find((u) => u.screen_name.toLowerCase().startsWith(`${name}@`)));
-		if (!user) continue;
-		const start = [...p.text.slice(0, m.index)].length;
-		out.push({ id_str: user.id, indices: [start, start + [...m[0]].length], name: user.name, screen_name: user.screen_name });
-	}
-	return out;
+	return mentionsIn(p.text, homeOf(p.author.screen_name)).flatMap(({ key, start, end }) => {
+		const user = byName.get(key);
+		return user ? [{ id_str: user.id, indices: [start, end], name: user.name, screen_name: user.screen_name }] : [];
+	});
 }
+
+const bioMentions = (u: User) =>
+	mentionsIn(u.bio ?? "", homeOf(u.screen_name)).map(({ key, start, end }) => ({ id_str: "", indices: [start, end], screen_name: key }));
 
 // #tags in the text; the client links each to a search for it
 function hashtags(text: string) {

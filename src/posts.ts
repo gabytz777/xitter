@@ -7,7 +7,7 @@ import { hasBlockedPhrase } from "./settings";
 import { postLimitFor, weightedLength } from "./textlen";
 import type { PostRow } from "./model";
 import { articlesByIds } from "./articles";
-import { blockedFor, hasMutedWord, isBlockedEitherWay, mutedFor, outOfView, protectedFor, suspendedFor } from "./blocks";
+import { blockedFor, hasMutedWord, isBlockedEitherWay, mutedFor, outOfView, protectedFor, replyLimited, suspendedFor } from "./blocks";
 import { staffViewer } from "./staff-access";
 import { fetchPreview, linkCard, linksIn, previewable, previewsFor } from "./links";
 import { mediaForPosts } from "./media";
@@ -36,12 +36,12 @@ const select = (viewerId: string) => sql`
 		ru.id as reply_user_id, ru.screen_name as reply_screen_name,
 		${userCols(viewerId)},
 		-- staff can set the shown counts (admin panel); the lists behind them stay real
-		coalesce((p.count_overrides->>'likes')::int, (select count(*)::int from likes x where x.post_id = p.id and x.user_id not in ${SUSPENDED})) as like_count,
-		coalesce((p.count_overrides->>'reposts')::int, (select count(*)::int from reposts x where x.post_id = p.id and x.user_id not in ${SUSPENDED})) as repost_count,
-		coalesce((p.count_overrides->>'bookmarks')::int, (select count(*)::int from bookmarks x where x.post_id = p.id)) as bookmark_count,
-		coalesce((p.count_overrides->>'replies')::int, (select count(*)::int from posts x where x.reply_to_id = p.id and x.user_id not in ${SUSPENDED})) as reply_count,
-		coalesce((p.count_overrides->>'quotes')::int, (select count(*)::int from posts x where x.quote_id = p.id and x.user_id not in ${SUSPENDED})) as quote_count,
-		coalesce((p.count_overrides->>'views')::int, (select count(*)::int from post_views x where x.post_id = p.id)) as view_count,
+		coalesce((p.count_overrides->>'likes')::int, greatest((p.remote_counts->>'likes')::int, (select count(*)::int from likes x where x.post_id = p.id and x.user_id not in ${SUSPENDED}))) as like_count,
+		coalesce((p.count_overrides->>'reposts')::int, greatest((p.remote_counts->>'reposts')::int, (select count(*)::int from reposts x where x.post_id = p.id and x.user_id not in ${SUSPENDED}))) as repost_count,
+		coalesce((p.count_overrides->>'bookmarks')::int, greatest((p.remote_counts->>'bookmarks')::int, (select count(*)::int from bookmarks x where x.post_id = p.id))) as bookmark_count,
+		coalesce((p.count_overrides->>'replies')::int, greatest((p.remote_counts->>'replies')::int, (select count(*)::int from posts x where x.reply_to_id = p.id and x.user_id not in ${SUSPENDED}))) as reply_count,
+		coalesce((p.count_overrides->>'quotes')::int, greatest((p.remote_counts->>'quotes')::int, (select count(*)::int from posts x where x.quote_id = p.id and x.user_id not in ${SUSPENDED}))) as quote_count,
+		coalesce((p.count_overrides->>'views')::int, greatest((p.remote_counts->>'views')::int, (select count(*)::int from post_views x where x.post_id = p.id))) as view_count,
 		p.notice,
 		exists (select 1 from likes x where x.post_id = p.id and x.user_id = ${viewerId}::bigint) as liked,
 		exists (select 1 from reposts x where x.post_id = p.id and x.user_id = ${viewerId}::bigint) as reposted,
@@ -436,11 +436,7 @@ export async function createPost(userId: string, text: string, opts: { replyToId
 		const [unseenRoot] = await db`select 1 from posts p join users u on u.id = p.user_id
 			where p.id = ${conversationId}::bigint and not ${seenBy(userId)}`;
 		if (unseenRoot) throw new PostError("The post you are replying to no longer exists.", 385);
-		const [limited] = await db`select exists (select 1 from posts r where r.id = ${conversationId}::bigint and r.reply_policy is not null and r.user_id <> ${userId}::bigint and not (
-				(r.reply_policy = 'Community' and exists (select 1 from follows f where f.follower_id = r.user_id and f.followee_id = ${userId}::bigint))
-				or (r.reply_policy = 'ByInvitation' and exists (select 1 from post_mentions m where m.post_id = r.id and m.user_id = ${userId}::bigint))
-				or (r.reply_policy = 'Verified' and exists (select 1 from users x where x.id = ${userId}::bigint and (x.verified_type is not null or exists (select 1 from affiliations af where af.user_id = x.id)))))) as no`;
-		if (limited.no) throw new PostError("The author of the original post limited who can reply to it.", 433);
+		if (await replyLimited(String(conversationId), userId, db)) throw new PostError("The author of the original post limited who can reply to it.", 433);
 	}
 	if (opts.quoteId) {
 		const [quoted] = await db`select p.id, p.user_id from posts p join users u on u.id = p.user_id where p.id = ${opts.quoteId}::bigint and ${seenBy(userId)}`;

@@ -65,6 +65,21 @@ Once it is merged, every instance picks up the new list within 5 minutes and
 starts syncing with yours. The Federation page shows when each instance last
 synced.
 
+## Media from other instances
+
+Pictures and videos from other instances aren't saved on your server. Your
+instance fetches them from their home instance when someone views them, and
+keeps the most recent ones in memory (64 MB by default, set with
+`FEDERATION_MEDIA_CACHE_MB`). They don't show while their home instance is
+down.
+
+To keep copies on disk, set `FEDERATION_MEDIA=store`. To delete copies saved
+by an older version, run:
+
+```bash
+bun scripts/drop-remote-media.ts
+```
+
 ## Moderating
 
 Each instance moderates its own people, and what you remove from your instance

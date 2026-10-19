@@ -241,16 +241,23 @@ async function create(v: Viewer, vars: Vars) {
 
 async function update(v: Viewer, vars: Vars) {
 	const id = listId(vars);
-	const row = await requireOwn(v.id, id);
-	const name = vars.name === undefined ? row.name : String(vars.name).trim();
-	if (!name || name.length > MAX_NAME) throw new PostError(`List names are 1 to ${MAX_NAME} characters.`, 214);
-	const description = vars.description === undefined ? row.description : String(vars.description).trim();
-	if (description.length > MAX_DESCRIPTION) throw new PostError(`Descriptions can be up to ${MAX_DESCRIPTION} characters.`, 214);
-	if (forbiddenText(name, description)) throw new PostError("The list contains a word this instance doesn't allow.", 186);
-	const isPrivate = vars.isPrivate === undefined ? row.is_private : !!vars.isPrivate;
-	await sql`update lists set name = ${name}, description = ${description}, is_private = ${isPrivate} where id = ${id}::bigint`;
-	// a list turning private loses the subscribers who aren't its owner
-	if (isPrivate) await sql`delete from list_subscribers where list_id = ${id}::bigint and user_id <> ${v.id}::bigint`;
+	if (id === ALL_ID) throw fixed();
+	await sql.begin(async (tx) => {
+		// Subscription checks use this same row lock: turning a list private
+		// and removing subscribers must finish before another one can join.
+		const [row] = await tx`select l.owner_id::text, l.name, l.description, l.is_private from lists l
+			where l.id = ${id}::bigint and ${visible(v.id)} for update`;
+		if (!row) throw missing();
+		if (row.owner_id !== v.id) throw new PostError("You can only change your own lists.", 150);
+		const name = vars.name === undefined ? row.name : String(vars.name).trim();
+		if (!name || name.length > MAX_NAME) throw new PostError(`List names are 1 to ${MAX_NAME} characters.`, 214);
+		const description = vars.description === undefined ? row.description : String(vars.description).trim();
+		if (description.length > MAX_DESCRIPTION) throw new PostError(`Descriptions can be up to ${MAX_DESCRIPTION} characters.`, 214);
+		if (forbiddenText(name, description)) throw new PostError("The list contains a word this instance doesn't allow.", 186);
+		const isPrivate = vars.isPrivate === undefined ? row.is_private : !!vars.isPrivate;
+		await tx`update lists set name = ${name}, description = ${description}, is_private = ${isPrivate} where id = ${id}::bigint`;
+		if (isPrivate) await tx`delete from list_subscribers where list_id = ${id}::bigint and user_id <> ${v.id}::bigint`;
+	});
 	return { data: { list: await one(v.id, id) } };
 }
 
@@ -275,13 +282,12 @@ async function member(v: Viewer, vars: Vars, on: boolean) {
 async function subscribe(v: Viewer, vars: Vars, on: boolean) {
 	const id = listId(vars);
 	if (id === ALL_ID) throw fixed();
-	const row = await requireList(v.id, id);
-	if (on) {
-		if (row.is_private && row.owner_id !== v.id) throw missing();
-		await sql`insert into list_subscribers (list_id, user_id) values (${id}::bigint, ${v.id}::bigint) on conflict do nothing`;
-	} else {
-		await sql`delete from list_subscribers where list_id = ${id}::bigint and user_id = ${v.id}::bigint`;
-	}
+	await sql.begin(async (tx) => {
+		const [row] = await tx`select l.id from lists l where l.id = ${id}::bigint and ${visible(v.id)} for update`;
+		if (!row) throw missing();
+		if (on) await tx`insert into list_subscribers (list_id, user_id) values (${id}::bigint, ${v.id}::bigint) on conflict do nothing`;
+		else await tx`delete from list_subscribers where list_id = ${id}::bigint and user_id = ${v.id}::bigint`;
+	});
 	const list = await one(v.id, id);
 	return { data: on ? { list_subscribe_v3: list } : { list } };
 }
@@ -299,7 +305,8 @@ async function mute(v: Viewer, vars: Vars, on: boolean) {
 async function managementRows(viewerId: string): Promise<ListRow[]> {
 	return (await sql`${listSelect(viewerId)}
 		left join pinned_lists p on p.list_id = l.id and p.user_id = ${viewerId}::bigint
-		where l.owner_id = ${viewerId}::bigint or exists (select 1 from list_subscribers s where s.list_id = l.id and s.user_id = ${viewerId}::bigint)
+		where (l.owner_id = ${viewerId}::bigint or exists (select 1 from list_subscribers s where s.list_id = l.id and s.user_id = ${viewerId}::bigint))
+			and ${visible(viewerId)}
 		order by (p.list_id is null), p.position, (l.owner_id <> ${viewerId}::bigint), l.created_at desc`) as ListRow[];
 }
 
@@ -354,7 +361,8 @@ async function pinnedItems(viewerId: string) {
 
 async function pinnableItems(viewerId: string) {
 	const rows = (await sql`${listSelect(viewerId)}
-		where l.owner_id = ${viewerId}::bigint or exists (select 1 from list_subscribers s where s.list_id = l.id and s.user_id = ${viewerId}::bigint)
+		where (l.owner_id = ${viewerId}::bigint or exists (select 1 from list_subscribers s where s.list_id = l.id and s.user_id = ${viewerId}::bigint))
+			and ${visible(viewerId)}
 		order by l.created_at desc`) as ListRow[];
 	const all = await allRow(viewerId);
 	if (all) rows.unshift(all);

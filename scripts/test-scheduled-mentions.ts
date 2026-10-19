@@ -20,14 +20,24 @@ try {
  const second=(await h.CreateScheduledTweet(v,{execute_at:at,post_tweet_request:{status:Array.from({length:20},(_,i)=>`@u${i}@unknown.invalid`).join(" "),thread_tweets:[{status:Array.from({length:10},(_,i)=>`@u${i+20}@unknown.invalid`).join(" ")}]}})).data.tweet.rest_id;
  await sql`update scheduled_posts set execute_at=now()-interval '1 second' where id in (${first}::bigint,${second}::bigint)`;
  const lookups:string[]=[];
+ let probeClaimed=false,probePassed=false,learnedInserted=false;
  const count=await runDue(async(handle)=>{
   lookups.push(handle);
-  // NOWAIT would fail if resolution were called after either queue claim.
-  await sql.begin(async(tx)=>{await tx`select id from scheduled_posts where user_id=${author}::bigint for update nowait`;});
-  assert.equal((await sql`select count(*)::int n from posts where user_id=${author}::bigint`)[0].n,0,"preflight completes before any publication");
-  if(handle===learnedHandle){await sql`insert into users(id,screen_name,name,password_hash,instance) values (${learned}::bigint,${learnedHandle},'Resolved remote','!','peer.invalid')`;created.push(learned);return learned;}
+  // Claim this probe synchronously: concurrent NOWAIT probes would contend
+  // with each other even though publication has not locked anything yet.
+  if(!probeClaimed){
+   probeClaimed=true;
+   await sql.begin(async(tx)=>{await tx`select id from scheduled_posts where user_id=${author}::bigint for update nowait`;});
+   assert.equal((await sql`select count(*)::int n from posts where user_id=${author}::bigint`)[0].n,0,"preflight completes before any publication");
+   probePassed=true;
+  }
+  if(handle===learnedHandle){await sql`insert into users(id,screen_name,name,password_hash,instance) values (${learned}::bigint,${learnedHandle},'Resolved remote','!','peer.invalid')`;created.push(learned);learnedInserted=true;return learned;}
   throw new Error("unreachable remote fixture");
  });
+ // Production deliberately swallows failed best-effort lookups, so check the
+ // fixture's successes explicitly instead of losing assertions in that catch.
+ assert(probePassed,"the preflight queue-lock probe must complete successfully");
+ assert(learnedInserted,"the learned-handle fixture must be inserted before publication");
  assert.equal(count,2);assert.equal(lookups.length,20,"unknown remote work is bounded once per batch");assert.equal(new Set(lookups).size,20);
  assert(!lookups.includes(knownHandle),"known fullhandles need no network lookup");assert(lookups.includes(learnedHandle));
  const rows=await sql`select p.id::text,p.text,count(m.user_id)::int mentions from posts p left join post_mentions m on m.post_id=p.id where p.user_id=${author}::bigint group by p.id order by p.id`;

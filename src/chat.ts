@@ -704,7 +704,12 @@ export const chatHandlers: Record<string, (viewer: Viewer, vars: Vars) => Promis
 	GetUsersByScreenNameForXChat: async (v, vars) => {
 		const names: string[] = Array.isArray(vars.screen_names) ? vars.screen_names.filter((x: unknown) => typeof x === "string").slice(0, 50) : [];
 		const found = (await Promise.all(names.map((n) => userByName(v.id, n)))).filter((u): u is User => !!u);
-		const results = await userResults(v.id, found.map((u) => u.id), { keys: !!vars.include_user_public_keys, tokens: !!vars.include_juicebox_tokens });
+		const local = new Set(
+			found.length
+				? (await sql`select id::text from users where id = any(${sql.array(found.map((u) => u.id), "BIGINT")}) and instance is null and deactivated_at is null`).map((r: { id: string }) => r.id)
+				: [],
+		);
+		const results = await userResults(v.id, found.filter((u) => local.has(u.id)).map((u) => u.id), { keys: !!vars.include_user_public_keys, tokens: !!vars.include_juicebox_tokens });
 		return {
 			data: {
 				get_member_results_by_screen_name: {
@@ -718,8 +723,8 @@ export const chatHandlers: Record<string, (viewer: Viewer, vars: Vars) => Promis
 		const q = String(vars.query ?? "").trim().replace(/^@/, "");
 		// with nothing typed: the accounts the viewer follows
 		const rows = q
-			? await sql`select id::text from users where status <> 'suspended' and (screen_name ilike ${`${q}%`} or name ilike ${`%${q}%`}) order by (lower(screen_name) = lower(${q})) desc, screen_name limit 10`
-			: await sql`select u.id::text from follows f join users u on u.id = f.followee_id where f.follower_id = ${v.id}::bigint and u.status <> 'suspended' order by f.created_at desc limit 10`;
+			? await sql`select id::text from users where status <> 'suspended' and instance is null and deactivated_at is null and (screen_name ilike ${`${q}%`} or name ilike ${`%${q}%`}) order by (lower(screen_name) = lower(${q})) desc, screen_name limit 10`
+			: await sql`select u.id::text from follows f join users u on u.id = f.followee_id where f.follower_id = ${v.id}::bigint and u.status <> 'suspended' and u.instance is null and u.deactivated_at is null order by f.created_at desc limit 10`;
 		const results = await userResults(v.id, rows.map((r: { id: string }) => r.id), { keys: !!vars.include_user_public_keys, tokens: !!vars.include_juicebox_tokens });
 		return {
 			data: {

@@ -28,8 +28,9 @@ copy during setup, and it stays on that machine.
 - Notifications with unread counts, browser push (with the instance's own VAPID
   key, made on first start in `data/push-vapid.json`); the profile bell (new posts from that
   account arrive as notifications) and turning an account's reposts off
-- Search with X's operators, trends, Explore; trends by location (Explore
-  settings: worldwide, a country, or yours with "Trends for you")
+- Search with X's operators, including full federated handles, trends, Explore;
+  trends by location (Explore settings: worldwide, a country, or yours with
+  "Trends for you")
 - News and sports cards at the top of Explore, written by staff (Admin >
   Explore cards); sports cards are scoreboards you update as the game goes
 - Topics: staff define them with keywords; people follow them from "Topics to
@@ -44,8 +45,9 @@ copy during setup, and it stays on that machine.
   when mail is set up; Settings > Email changes it by a confirmation link), pride flag badges, organisations
   with affiliates, several signed-in accounts
 - Account settings: password change, username change, language, deactivation
-  (reactivates on sign-in within 30 days), data archive (including drafts and
-  scheduled posts), email notification
+  (reactivates on sign-in within 30 days), data archive (including drafts,
+  scheduled posts, polls, media metadata, bookmark folders and visible encrypted
+  chat history without decryption keys), email notification
   settings (activity and new-message digests, sent while you're away), sessions
   list with revoke, account access history (each sign-in
   with its app and address), two-factor sign-in with an
@@ -84,10 +86,11 @@ copy during setup, and it stays on that machine.
   (`src/staff-permissions.ts`; `bun scripts/test-staff-permissions.ts` checks it)
 
 Not built yet: Spaces and live video, Moments, signing in other apps (Connected
-apps stays empty). Email is sent through
-[Resend](https://resend.com) when `RESEND_API_KEY` is set; Admin > Email sends
-a test mail (it shows Resend's answer, e.g. an unverified domain) and lists
-every mail tried.
+apps stays empty). Email is sent over SMTP to your own mail server when
+`SMTP_URL` is set, or through [Resend](https://resend.com) when
+`RESEND_API_KEY` is (with both, Resend catches what SMTP refused); Admin >
+Email sends a test mail (it shows the server's answer) and lists every mail
+tried.
 
 ## Running it locally
 
@@ -197,8 +200,9 @@ cache and autovacuum settings; adjust them for the host's memory and workload.
 | `CHAT_TOKEN_SECRET` | saved in `data/chat-secrets.json` | Signing secret for chat socket tokens |
 | `JUICEBOX_REALM_ID`, `JUICEBOX_TENANT_SECRET` | saved in `data/chat-secrets.json` | Stable realm identity and tenant signing secret |
 | `MAX_CHAT_MEDIA_MB` | `200` | Maximum encrypted chat attachment size |
-| `RESEND_API_KEY` | unset | Resend key for password-reset and notification mail; without it nothing is sent |
-| `MAIL_FROM` | `Xitter <noreply@xit.chococat.lol>` | Sender of that mail (the domain must be verified in Resend) |
+| `SMTP_URL` | unset | Own mail server for sign-up codes, password resets and notifications: `smtp://user:pass@host:587` (STARTTLS) or `smtps://user:pass@host:465`; percent-encode `@` in the user; the host must be the name on the server's certificate |
+| `RESEND_API_KEY` | unset | Resend key, used when `SMTP_URL` isn't set or refused a mail; without either nothing is sent |
+| `MAIL_FROM` | `Xitter <noreply@xit.chococat.lol>` | Sender of that mail (its domain must be the mail server's, or verified in Resend) |
 | `KLIPY_API_KEY` | unset | GIF search through [Klipy](https://klipy.com) (see `src/gifs.ts`); without it or `TENOR_API_KEY` the GIF button is hidden |
 | `TENOR_API_KEY` | unset | GIF search through Tenor's v2 API instead, used when `KLIPY_API_KEY` isn't set |
 

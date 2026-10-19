@@ -152,7 +152,14 @@ async function body(req: Request): Promise<Record<string, any>> {
 }
 
 async function userOr404(v: Viewer, name: string) {
-	const u = await userByName(v.id, decodeURIComponent(name));
+	const decoded = (() => {
+		try {
+			return decodeURIComponent(name);
+		} catch {
+			return "";
+		}
+	})();
+	const u = decoded ? await userByName(v.id, decoded) : undefined;
 	if (!u || u.status === "suspended") throw new ApiError(404, "No account goes by that name.");
 	return u;
 }

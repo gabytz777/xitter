@@ -106,6 +106,17 @@ alter table users add column if not exists status_restore text;
 alter table posts add column if not exists hidden boolean not null default false;
 alter table posts add column if not exists sensitive boolean not null default false;
 alter table users add column if not exists never_sensitive boolean not null default false;
+alter table users add column if not exists remote_badges jsonb;
+alter table users add column if not exists remote_counts jsonb;
+alter table posts add column if not exists remote_counts jsonb;
+do $$ begin
+	if not exists (select 1 from information_schema.columns where table_name = 'posts' and column_name = 'received_at') then
+		alter table posts add column received_at timestamptz;
+		update posts set received_at = created_at;
+		alter table posts alter column received_at set default now();
+		alter table posts alter column received_at set not null;
+	end if;
+end $$;
 alter table sessions add column if not exists id uuid not null default gen_random_uuid();
 create unique index if not exists sessions_id_key on sessions(id);
 alter table sessions add column if not exists last_seen_at timestamptz not null default now();
@@ -247,6 +258,7 @@ create table if not exists media (
 	created_at timestamptz not null default now()
 );
 create index if not exists media_post_idx on media (post_id, position);
+create index if not exists media_user_idx on media (user_id, id);
 alter table media add column if not exists detached boolean not null default false;
 create or replace function media_detached() returns trigger language plpgsql as $$
 begin
@@ -610,6 +622,7 @@ create table if not exists polls (
 );
 -- an image poll: one uploaded photo per choice, in choice order
 alter table polls add column if not exists choice_media bigint[];
+create index if not exists polls_user_idx on polls (user_id, id);
 create index if not exists polls_choice_media_idx on polls using gin (choice_media) where choice_media is not null;
 
 create table if not exists poll_votes (
@@ -621,6 +634,7 @@ create table if not exists poll_votes (
 );
 
 alter table posts add column if not exists poll_id bigint references polls (id) on delete set null;
+create index if not exists poll_votes_user_idx on poll_votes (user_id, created_at, poll_id);
 create index if not exists posts_poll_idx on posts (poll_id) where poll_id is not null;
 
 -- scheduled posts and drafts, kept as the composer sent them
@@ -1254,8 +1268,9 @@ begin
 	return new;
 end $$;
 create or replace trigger federation_post_insert after insert on posts for each row execute function federation_post_changed();
-create or replace trigger federation_post_update after update of text, hidden, edited_at, sensitive on posts for each row
-	when (old.text is distinct from new.text or old.hidden is distinct from new.hidden or old.edited_at is distinct from new.edited_at or old.sensitive is distinct from new.sensitive)
+create or replace trigger federation_post_update after update of text, hidden, edited_at, sensitive, count_overrides on posts for each row
+	when (old.text is distinct from new.text or old.hidden is distinct from new.hidden or old.edited_at is distinct from new.edited_at or old.sensitive is distinct from new.sensitive
+		or old.count_overrides is distinct from new.count_overrides)
 	execute function federation_post_changed();
 create or replace trigger federation_post_delete before delete on posts for each row execute function federation_post_changed();
 
@@ -1290,11 +1305,19 @@ begin
 	return new;
 end $$;
 create or replace trigger federation_user_insert after insert on users for each row execute function federation_user_changed();
-create or replace trigger federation_user_update after update of screen_name, name, bio, location, avatar_url, banner_url, protected, status, deactivated_at on users for each row
-	when (old.screen_name is distinct from new.screen_name or old.name is distinct from new.name or old.bio is distinct from new.bio or old.location is distinct from new.location
+create or replace trigger federation_user_update after update of screen_name, name, bio, location, website, avatar_url, banner_url, protected, status, deactivated_at, verified_type, translator, flag, parody_label, count_overrides on users for each row
+	when (old.screen_name is distinct from new.screen_name or old.name is distinct from new.name or old.bio is distinct from new.bio or old.location is distinct from new.location or old.website is distinct from new.website
 		or old.avatar_url is distinct from new.avatar_url or old.banner_url is distinct from new.banner_url or old.protected is distinct from new.protected
-		or old.status is distinct from new.status or old.deactivated_at is distinct from new.deactivated_at)
+		or old.status is distinct from new.status or old.deactivated_at is distinct from new.deactivated_at or old.verified_type is distinct from new.verified_type
+		or old.translator is distinct from new.translator or old.flag is distinct from new.flag or old.parody_label is distinct from new.parody_label
+		or old.count_overrides is distinct from new.count_overrides)
 	execute function federation_user_changed();
+create or replace function federation_badges_changed() returns trigger language plpgsql as $$
+begin
+	insert into federation_outbox (kind, a) select 'user', u.id from users u where u.id = coalesce(new.user_id, old.user_id) and u.instance is null;
+	return null;
+end $$;
+create or replace trigger federation_user_badges after insert or delete on user_badges for each row execute function federation_badges_changed();
 create or replace trigger federation_user_delete before delete on users for each row execute function federation_user_changed();
 
 do $$ begin

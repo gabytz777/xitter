@@ -90,16 +90,16 @@ async function items(viewerId: string, opts: { before?: number; after?: number; 
 
 	const posts = await sql`
 		select x.id, x.created_at as at, x.reason from (
-			select p.id, p.created_at, 'reply' as reason from posts p join posts parent on parent.id = p.reply_to_id
+			select p.id, greatest(p.created_at, least(p.received_at, p.created_at + interval '1 day')) as created_at, 'reply' as reason from posts p join posts parent on parent.id = p.reply_to_id
 				where p.reply_to_user_id = ${viewerId}::bigint and parent.user_id = ${viewerId}::bigint and p.user_id <> ${viewerId}::bigint and p.user_id not in ${hidden} and not ${hasMutedWord(viewerId, "notifications", sql`p.id`)}
 			union all
-			select p.id, p.created_at, 'mention' from posts p join post_mentions m on m.post_id = p.id
+			select p.id, greatest(p.created_at, least(p.received_at, p.created_at + interval '1 day')) as created_at, 'mention' from posts p join post_mentions m on m.post_id = p.id
 				where m.user_id = ${viewerId}::bigint and p.user_id <> ${viewerId}::bigint and p.user_id not in ${hidden} and not ${hasMutedWord(viewerId, "notifications", sql`p.id`)}
 			${
 				opts.mentionsOnly
 					? sql``
 					: sql`union all
-			select p.id, p.created_at, 'quote' from posts p join posts quoted on quoted.id = p.quote_id
+			select p.id, greatest(p.created_at, least(p.received_at, p.created_at + interval '1 day')) as created_at, 'quote' from posts p join posts quoted on quoted.id = p.quote_id
 				where quoted.user_id = ${viewerId}::bigint and p.user_id <> ${viewerId}::bigint and p.user_id not in ${hidden} and not ${hasMutedWord(viewerId, "notifications", sql`p.id`)}`
 			}
 		) x where x.created_at >= ${lo} and x.created_at < ${hi}
