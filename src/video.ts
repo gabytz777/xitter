@@ -5,6 +5,7 @@
 
 import { settings } from "./settings";
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { setPriority } from "node:os";
 import { join } from "node:path";
 import { sql } from "./db";
 
@@ -14,10 +15,16 @@ const maxSeconds = () => settings().limits.video_seconds;
 const MAX_SIDE = 1280;
 const FFMPEG = process.env.FFMPEG ?? "ffmpeg";
 const FFPROBE = process.env.FFPROBE ?? "ffprobe";
+// ffmpeg shares the machine with the server: a few threads at a lower
+// priority, and killed when a job runs far longer than its file needs
+const THREADS = process.env.FFMPEG_THREADS ?? "2";
+const PROBE_MS = 60_000;
+const STEP_MS = 120_000;
 
 // progress of running jobs, in percent
 export const progress = new Map<string, number>();
 const errors = new Map<string, string>();
+const MAX_VIDEO_ERRORS = 256;
 export const videoError = (id: string) => errors.get(id) ?? "The video could not be processed.";
 
 export const sourceFile = (dir: string, id: string) => join(dir, `${id}.upload`);
@@ -39,8 +46,18 @@ export async function videoSupported(): Promise<boolean> {
 
 type Probe = { width: number; height: number; seconds: number; vcodec: string; pix: string; acodec?: string; format: string };
 
+function spawnLimited(cmd: string[], ms: number, stderr: "pipe" | "ignore") {
+	const p = Bun.spawn(cmd, { stdout: "pipe", stderr });
+	try {
+		setPriority(p.pid, 10);
+	} catch {}
+	const timer = setTimeout(() => p.kill("SIGKILL"), ms);
+	void p.exited.finally(() => clearTimeout(timer));
+	return p;
+}
+
 async function probe(file: string): Promise<Probe | undefined> {
-	const p = Bun.spawn([FFPROBE, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", file], { stdout: "pipe", stderr: "ignore" });
+	const p = spawnLimited([FFPROBE, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", file], PROBE_MS, "ignore");
 	const out = await new Response(p.stdout).text();
 	if ((await p.exited) !== 0) return undefined;
 	const info = JSON.parse(out);
@@ -60,15 +77,17 @@ async function probe(file: string): Promise<Probe | undefined> {
 	};
 }
 
+// `args` end with the output file; the thread limit goes on the input and the output
 async function run(args: string[], id: string, seconds: number): Promise<boolean> {
-	const p = Bun.spawn([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-progress", "pipe:1", "-nostats", ...args], { stdout: "pipe", stderr: "pipe" });
+	const output = ["-threads", THREADS, ...args.slice(0, -1), "-threads", THREADS, ...args.slice(-1)];
+	const p = spawnLimited([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-progress", "pipe:1", "-nostats", ...output], STEP_MS + seconds * 6000, "pipe");
 	const decoder = new TextDecoder();
 	for await (const chunk of p.stdout) {
 		const m = /out_time_us=(\d+)/.exec(decoder.decode(chunk));
 		if (m && seconds > 0) progress.set(id, Math.min(99, Math.floor(Number(m[1]) / 1e4 / seconds)));
 	}
 	const code = await p.exited;
-	if (code !== 0) console.log(`ffmpeg failed for ${id}: ${(await new Response(p.stderr).text()).slice(0, 500)}`);
+	if (code !== 0) console.log(`ffmpeg failed for ${id}${p.signalCode === "SIGKILL" ? " (took too long)" : ""}: ${(await new Response(p.stderr).text()).slice(0, 500)}`);
 	return code === 0;
 }
 
@@ -76,6 +95,7 @@ async function convert(dir: string, id: string) {
 	const src = sourceFile(dir, id);
 	const tmp = join(dir, `${id}.tmp.mp4`);
 	const fail = async (message: string) => {
+		if (errors.size >= MAX_VIDEO_ERRORS) errors.delete(errors.keys().next().value!);
 		errors.set(id, message);
 		await sql`update media set state = 'failed' where id = ${id}::bigint`;
 	};
@@ -113,19 +133,30 @@ async function convert(dir: string, id: string) {
 	}
 }
 
-// a cropped GIF avatar or banner (see media.ts); one palette for all frames
-export async function cropGif(dir: string, id: string, gif: Buffer, box: { x: number; y: number; w: number; h: number }): Promise<Buffer | undefined> {
-	if (!(await videoSupported())) return undefined;
-	const src = join(dir, `${id}.crop-in.gif`);
-	const out = join(dir, `${id}.crop.gif`);
-	try {
-		writeFileSync(src, gif);
-		const filter = `crop=${box.w}:${box.h}:${box.x}:${box.y},split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse`;
-		return (await run(["-i", src, "-filter_complex", filter, "-f", "gif", out], id, 0)) ? readFileSync(out) : undefined;
-	} finally {
-		rmSync(src, { force: true });
-		rmSync(out, { force: true });
-	}
+// a cropped GIF avatar or banner (see media.ts); one palette for all frames,
+// made in a pass of its own: split into palettegen and paletteuse kept every
+// decoded frame in memory until the palette was done, gigabytes for a long GIF.
+// One crop runs at a time, beside the video queue.
+let crops: Promise<unknown> = Promise.resolve();
+export function cropGif(dir: string, id: string, gif: Buffer, box: { x: number; y: number; w: number; h: number }): Promise<Buffer | undefined> {
+	const job = crops.then(async () => {
+		if (!(await videoSupported())) return undefined;
+		const src = join(dir, `${id}.crop-in.gif`);
+		const palette = join(dir, `${id}.crop-palette.png`);
+		const out = join(dir, `${id}.crop.gif`);
+		const crop = `crop=${box.w}:${box.h}:${box.x}:${box.y}`;
+		try {
+			writeFileSync(src, gif);
+			if (!(await run(["-i", src, "-vf", `${crop},palettegen=reserve_transparent=1`, palette], id, 0))) return undefined;
+			return (await run(["-i", src, "-i", palette, "-lavfi", `[0:v]${crop}[c];[c][1:v]paletteuse`, "-f", "gif", out], id, 0)) ? readFileSync(out) : undefined;
+		} finally {
+			rmSync(src, { force: true });
+			rmSync(palette, { force: true });
+			rmSync(out, { force: true });
+		}
+	});
+	crops = job.catch(() => {});
+	return job;
 }
 
 let queue: Promise<void> = Promise.resolve();

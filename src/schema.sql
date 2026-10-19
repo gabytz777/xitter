@@ -28,10 +28,15 @@ create table if not exists posts (
 	conversation_id bigint not null,
 	created_at timestamptz not null default now()
 );
-create index if not exists posts_reply_to_idx on posts (reply_to_id);
+-- replies with their authors, for the counts (posts.ts); replaces two copies
+-- of the same index on reply_to_id
+create index if not exists posts_replies_idx on posts (reply_to_id, user_id);
+drop index if exists posts_reply_to_idx;
 alter table posts drop constraint if exists posts_reply_to_id_fkey;
 alter table posts add column if not exists reply_to_user_id bigint;
 create index if not exists posts_user_idx on posts (user_id, id desc);
+-- replies to an account's posts, newest first (notifications.ts)
+create index if not exists posts_reply_user_idx on posts (reply_to_user_id, created_at) where reply_to_user_id is not null;
 
 create table if not exists custom_badges (
 	id bigint primary key, name text not null check(char_length(name) between 1 and 60),
@@ -180,7 +185,11 @@ create table if not exists likes (
 	created_at timestamptz not null default now(),
 	primary key (user_id, post_id)
 );
-create index if not exists likes_post_idx on likes (post_id);
+-- with the liker, so a post's count skips suspended accounts from the index alone
+create index if not exists likes_post_user_idx on likes (post_id, user_id);
+drop index if exists likes_post_idx;
+-- what came in since a mark (notifications.ts: push, unread counts)
+create index if not exists likes_created_idx on likes (created_at);
 
 create table if not exists reposts (
 	id bigint not null,
@@ -189,7 +198,9 @@ create table if not exists reposts (
 	created_at timestamptz not null default now(),
 	primary key (user_id, post_id)
 );
-create index if not exists reposts_post_idx on reposts (post_id);
+create index if not exists reposts_post_user_idx on reposts (post_id, user_id);
+drop index if exists reposts_post_idx;
+create index if not exists reposts_created_idx on reposts (created_at);
 -- a repost's own id, which the client acts on (posts.ts originalPostId)
 create index if not exists reposts_id_idx on reposts (id);
 
@@ -216,7 +227,8 @@ create table if not exists follows (
 	primary key (follower_id, followee_id),
 	check (follower_id <> followee_id)
 );
-create index if not exists follows_followee_idx on follows (followee_id);
+create index if not exists follows_followee_created_idx on follows (followee_id, created_at);
+drop index if exists follows_followee_idx;
 
 create table if not exists media (
 	id bigint primary key,
@@ -247,6 +259,7 @@ create or replace view feed_items as
 	union all
 	select r.id, r.post_id, r.user_id, r.user_id, false, r.created_at
 	from reposts r;
+create index if not exists posts_top_level_idx on posts (id) where reply_to_id is null;
 
 -- videos: converted after upload; 'processing' until ffmpeg is done
 alter table media add column if not exists duration_ms integer;
@@ -280,8 +293,9 @@ create table if not exists post_mentions (
 	primary key (post_id, user_id)
 );
 create index if not exists post_mentions_user_idx on post_mentions (user_id);
-create index if not exists posts_quote_idx on posts (quote_id) where quote_id is not null;
-create index if not exists posts_reply_idx on posts (reply_to_id) where reply_to_id is not null;
+create index if not exists posts_quotes_idx on posts (quote_id, user_id) where quote_id is not null;
+drop index if exists posts_quote_idx;
+drop index if exists posts_reply_idx;
 -- notifications newer than this are unread
 alter table users add column if not exists notifications_seen_at timestamptz not null default now();
 
@@ -332,6 +346,8 @@ alter table users add column if not exists role text check (role in ('admin', 'm
 -- posts); suspended (can't sign in, hidden everywhere)
 alter table users add column if not exists status text not null default 'active'
 	check (status in ('active', 'restricted', 'limited', 'suspended'));
+-- the few suspended accounts every post query leaves out (posts.ts SUSPENDED)
+create index if not exists users_suspended_idx on users (id) where status = 'suspended';
 alter table users add column if not exists last_seen_at timestamptz;
 create table if not exists audit_log (
 	id bigint primary key,
@@ -378,7 +394,18 @@ create index if not exists reports_status_idx on reports (status, created_at des
 
 -- for "About this account": when the badge was given, and past handles
 alter table users add column if not exists verified_at timestamptz;
-update users set verified_at = created_at where verified_type is not null and verified_at is null;
+-- One-off data fixes run once, the first time a server that has them starts;
+-- run on every start, the larger ones scanned whole tables each time.
+create table if not exists schema_steps (
+	name text primary key,
+	done_at timestamptz not null default now()
+);
+do $$ begin
+	if not exists (select 1 from schema_steps where name = 'verified_at') then
+		update users set verified_at = created_at where verified_type is not null and verified_at is null;
+		insert into schema_steps (name) values ('verified_at');
+	end if;
+end $$;
 create table if not exists username_changes (
 	user_id bigint not null references users (id) on delete cascade,
 	old_name text not null,
@@ -425,7 +452,13 @@ create table if not exists chat_events (
 	created_at timestamptz not null default now()
 );
 create index if not exists chat_events_conversation_idx on chat_events (conversation_id, kind, seq desc);
+-- a conversation's newest event of any kind (the inbox's order, chat.ts), and
+-- each member's newest read marker
+create index if not exists chat_events_conversation_seq_idx on chat_events (conversation_id, seq desc);
+create index if not exists chat_events_sender_kind_idx on chat_events (conversation_id, kind, sender_id, seq desc);
 create index if not exists chat_events_sender_idx on chat_events (sender_id);
+-- messages since a mark (push.ts, mail-digest.ts)
+create index if not exists chat_events_created_idx on chat_events (created_at);
 alter table chat_members add column if not exists accepted boolean not null default true;
 alter table chat_members add column if not exists archived boolean not null default false;
 alter table chat_members add column if not exists muted boolean not null default false;
@@ -735,8 +768,13 @@ alter table communities add column if not exists banner_height integer;
 alter table communities add column if not exists topic_id bigint references topics (id) on delete set null;
 
 -- grey badges: 'government' is an organisation (square picture), 'government_individual' an official
-alter table users drop constraint if exists users_verified_type_check;
-alter table users add constraint users_verified_type_check check (verified_type in ('blue', 'business', 'government', 'government_individual'));
+-- (replaced only while it lacks the new value: adding it checks every row)
+do $$ begin
+	if not exists (select 1 from pg_constraint where conname = 'users_verified_type_check' and pg_get_constraintdef(oid) like '%government_individual%') then
+		alter table users drop constraint if exists users_verified_type_check;
+		alter table users add constraint users_verified_type_check check (verified_type in ('blue', 'business', 'government', 'government_individual'));
+	end if;
+end $$;
 
 -- every mail the instance tried to send (mail.ts)
 create table if not exists mail_log (
@@ -753,6 +791,9 @@ create index if not exists mail_log_created_idx on mail_log (created_at desc);
 -- when the activity and message digests last went to this account
 alter table users add column if not exists activity_mailed_at timestamptz;
 alter table users add column if not exists messages_mailed_at timestamptz;
+-- when a digest last found nothing to mail (mail-digest.ts)
+alter table users add column if not exists activity_checked_at timestamptz;
+alter table users add column if not exists messages_checked_at timestamptz;
 
 -- browser push subscriptions (push.ts); settings are the per-type switches
 create table if not exists push_subscriptions (
@@ -940,9 +981,14 @@ create table if not exists link_previews (
 	fetched_at timestamptz not null default now()
 );
 create index if not exists login_events_ip_idx on login_events (ip, created_at desc);
-update users u set deactivated_at = null where u.deactivated_at is not null and u.status = 'suspended' and exists (
-	select 1 from audit_log l where l.target = u.id::text and l.created_at > u.deactivated_at
-		and l.action in ('set_status', 'temporary_status', 'bulk_status', 'auto_suspend_name', 'suspend_blocked_names', 'escalate'));
+do $$ begin
+	if not exists (select 1 from schema_steps where name = 'suspended_not_deactivated') then
+		update users u set deactivated_at = null where u.deactivated_at is not null and u.status = 'suspended' and exists (
+			select 1 from audit_log l where l.target = u.id::text and l.created_at > u.deactivated_at
+				and l.action in ('set_status', 'temporary_status', 'bulk_status', 'auto_suspend_name', 'suspend_blocked_names', 'escalate'));
+		insert into schema_steps (name) values ('suspended_not_deactivated');
+	end if;
+end $$;
 create table if not exists retired_identities (
 	kind text not null check (kind in ('handle', 'email', 'ip')),
 	value text not null,
@@ -965,9 +1011,153 @@ create table if not exists account_labels (
 );
 alter table users add column if not exists label_id bigint references account_labels(id) on delete set null;
 
-update posts p set reply_to_user_id = r.user_id from posts r where r.id = p.reply_to_id and p.reply_to_user_id is null;
-update posts set reply_to_id = conversation_id where reply_to_id is null and conversation_id <> id;
+do $$ begin
+	if not exists (select 1 from schema_steps where name = 'reply_to_user_id') then
+		update posts p set reply_to_user_id = r.user_id from posts r where r.id = p.reply_to_id and p.reply_to_user_id is null;
+		update posts set reply_to_id = conversation_id where reply_to_id is null and conversation_id <> id;
+		insert into schema_steps (name) values ('reply_to_user_id');
+	end if;
+end $$;
 
 alter table users add column if not exists role_granted_by bigint;
-update users u set role_granted_by = (select a.actor_id from audit_log a where a.action = 'set_role' and a.target = u.id::text order by a.created_at desc limit 1)
-	where u.role is not null and u.role_granted_by is null;
+do $$ begin
+	if not exists (select 1 from schema_steps where name = 'role_granted_by') then
+		update users u set role_granted_by = (select a.actor_id from audit_log a where a.action = 'set_role' and a.target = u.id::text order by a.created_at desc limit 1)
+			where u.role is not null and u.role_granted_by is null;
+		insert into schema_steps (name) values ('role_granted_by');
+	end if;
+end $$;
+
+do $$ begin
+	if not exists (select 1 from schema_steps where name = 'chat_trust') then
+		insert into chat_trust (user_id, trusted_id)
+			select distinct e.sender_id, m.user_id from chat_events e join chat_members m on m.conversation_id = e.conversation_id and m.user_id <> e.sender_id
+			where e.kind = 1 and e.conversation_id ~ '^[0-9]+[-:][0-9]+$'
+			on conflict do nothing;
+		update chat_members m set accepted = true where not m.accepted and m.conversation_id ~ '^[0-9]+[-:][0-9]+$'
+			and exists (select 1 from chat_members peer join chat_trust t on t.user_id = m.user_id and t.trusted_id = peer.user_id
+				where peer.conversation_id = m.conversation_id and peer.user_id <> m.user_id);
+		insert into schema_steps (name) values ('chat_trust');
+	end if;
+end $$;
+
+-- Account counters for userCols (users.ts), kept by the triggers below: counted
+-- on every read, one account with 60k posts cost 80 ms on each of its post
+-- cards. Posts with media go by the uploader, who is always the post's author
+-- (media.ts attachMedia).
+create table if not exists user_stats (
+	user_id bigint primary key references users (id) on delete cascade,
+	posts int not null default 0,
+	articles int not null default 0,
+	media_posts int not null default 0,
+	likes int not null default 0,
+	highlights int not null default 0,
+	followers int not null default 0,
+	following int not null default 0
+);
+create index if not exists media_user_post_idx on media (user_id, post_id) where post_id is not null;
+
+create or replace function user_stats_posts() returns trigger language plpgsql as $$
+begin
+	if tg_op = 'INSERT' then
+		insert into user_stats (user_id, posts, articles)
+			select user_id, count(*), count(article_id) from new_rows group by user_id
+			on conflict (user_id) do update set posts = user_stats.posts + excluded.posts, articles = user_stats.articles + excluded.articles;
+	else
+		update user_stats s set posts = s.posts - d.posts, articles = s.articles - d.articles
+			from (select user_id, count(*) as posts, count(article_id) as articles from old_rows group by user_id) d where s.user_id = d.user_id;
+	end if;
+	return null;
+end $$;
+create or replace trigger user_stats_posts_insert after insert on posts referencing new table as new_rows for each statement execute function user_stats_posts();
+create or replace trigger user_stats_posts_delete after delete on posts referencing old table as old_rows for each statement execute function user_stats_posts();
+
+create or replace function user_stats_likes() returns trigger language plpgsql as $$
+begin
+	if tg_op = 'INSERT' then
+		insert into user_stats (user_id, likes) select user_id, count(*) from new_rows group by user_id
+			on conflict (user_id) do update set likes = user_stats.likes + excluded.likes;
+	else
+		update user_stats s set likes = s.likes - d.n from (select user_id, count(*) as n from old_rows group by user_id) d where s.user_id = d.user_id;
+	end if;
+	return null;
+end $$;
+create or replace trigger user_stats_likes_insert after insert on likes referencing new table as new_rows for each statement execute function user_stats_likes();
+create or replace trigger user_stats_likes_delete after delete on likes referencing old table as old_rows for each statement execute function user_stats_likes();
+
+create or replace function user_stats_highlights() returns trigger language plpgsql as $$
+begin
+	if tg_op = 'INSERT' then
+		insert into user_stats (user_id, highlights) select user_id, count(*) from new_rows group by user_id
+			on conflict (user_id) do update set highlights = user_stats.highlights + excluded.highlights;
+	else
+		update user_stats s set highlights = s.highlights - d.n from (select user_id, count(*) as n from old_rows group by user_id) d where s.user_id = d.user_id;
+	end if;
+	return null;
+end $$;
+create or replace trigger user_stats_highlights_insert after insert on highlights referencing new table as new_rows for each statement execute function user_stats_highlights();
+create or replace trigger user_stats_highlights_delete after delete on highlights referencing old table as old_rows for each statement execute function user_stats_highlights();
+
+create or replace function user_stats_follows() returns trigger language plpgsql as $$
+begin
+	if tg_op = 'INSERT' then
+		insert into user_stats (user_id, followers, following)
+			select id, sum(followers), sum(following) from (
+				select followee_id as id, 1 as followers, 0 as following from new_rows
+				union all select follower_id, 0, 1 from new_rows
+			) x group by id
+			on conflict (user_id) do update set followers = user_stats.followers + excluded.followers, following = user_stats.following + excluded.following;
+	else
+		update user_stats s set followers = s.followers - d.followers, following = s.following - d.following
+			from (select id, sum(followers) as followers, sum(following) as following from (
+				select followee_id as id, 1 as followers, 0 as following from old_rows
+				union all select follower_id, 0, 1 from old_rows
+			) x group by id) d where s.user_id = d.id;
+	end if;
+	return null;
+end $$;
+create or replace trigger user_stats_follows_insert after insert on follows referencing new table as new_rows for each statement execute function user_stats_follows();
+create or replace trigger user_stats_follows_delete after delete on follows referencing old table as old_rows for each statement execute function user_stats_follows();
+
+-- posts with media are counted again for the uploaders whose attachments
+-- changed: one index range each. An account being deleted is skipped, its
+-- counters go with it.
+create or replace function user_stats_media() returns trigger language plpgsql as $$
+declare
+	affected bigint[];
+begin
+	if tg_op = 'INSERT' then
+		select array_agg(distinct user_id) into affected from new_rows where post_id is not null;
+	elsif tg_op = 'DELETE' then
+		select array_agg(distinct user_id) into affected from old_rows where post_id is not null;
+	else
+		select array_agg(distinct n.user_id) into affected from new_rows n join old_rows o on o.id = n.id where n.post_id is distinct from o.post_id;
+	end if;
+	if affected is null then return null; end if;
+	insert into user_stats (user_id, media_posts)
+		select a, (select count(distinct m.post_id) from media m where m.user_id = a and m.post_id is not null)
+		from unnest(affected) a where exists (select 1 from users where id = a)
+		on conflict (user_id) do update set media_posts = excluded.media_posts;
+	return null;
+end $$;
+create or replace trigger user_stats_media_insert after insert on media referencing new table as new_rows for each statement execute function user_stats_media();
+create or replace trigger user_stats_media_update after update on media referencing new table as new_rows old table as old_rows for each statement execute function user_stats_media();
+create or replace trigger user_stats_media_delete after delete on media referencing old table as old_rows for each statement execute function user_stats_media();
+
+do $$ begin
+	if not exists (select 1 from schema_steps where name = 'user_stats') then
+		insert into user_stats (user_id, posts, articles, media_posts, likes, highlights, followers, following)
+			select u.id,
+				(select count(*) from posts x where x.user_id = u.id),
+				(select count(*) from posts x where x.user_id = u.id and x.article_id is not null),
+				(select count(distinct m.post_id) from media m where m.user_id = u.id and m.post_id is not null),
+				(select count(*) from likes x where x.user_id = u.id),
+				(select count(*) from highlights x where x.user_id = u.id),
+				(select count(*) from follows x where x.followee_id = u.id),
+				(select count(*) from follows x where x.follower_id = u.id)
+			from users u
+			on conflict (user_id) do update set posts = excluded.posts, articles = excluded.articles, media_posts = excluded.media_posts,
+				likes = excluded.likes, highlights = excluded.highlights, followers = excluded.followers, following = excluded.following;
+		insert into schema_steps (name) values ('user_stats');
+	end if;
+end $$;

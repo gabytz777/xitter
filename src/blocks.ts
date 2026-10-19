@@ -5,6 +5,7 @@
 
 import { sql } from "./db";
 import { newId } from "./ids";
+import { staffViewer } from "./staff-access";
 
 // accounts the viewer blocked or was blocked by
 export const blockedFor = (viewerId: string) =>
@@ -15,18 +16,18 @@ const gone = sql`(status = 'suspended' or deactivated_at is not null)`;
 export const outOfView = (viewerId: string) =>
 	sql`(select id from users where ${gone} or (status = 'limited' and id <> ${viewerId}::bigint
 		and id not in (select followee_id from follows where follower_id = ${viewerId}::bigint)
-		and not exists (select 1 from users staff where staff.id = ${viewerId}::bigint and staff.role is not null)))`;
+		and not ${staffViewer(viewerId)}))`;
 
 // Protected accounts: their posts are for themselves and the accounts they let
 // follow. Staff see everything.
 export const protectedFor = (viewerId: string) =>
 	sql`(select id from users where protected and id <> ${viewerId}::bigint
 		and id not in (select followee_id from follows where follower_id = ${viewerId}::bigint)
-		and not exists (select 1 from users staff where staff.id = ${viewerId}::bigint and staff.role is not null))`;
+		and not ${staffViewer(viewerId)})`;
 
 export const suspendedFor = (viewerId: string) =>
 	sql`(select id from users where ${gone}
-		and not exists (select 1 from users staff where staff.id = ${viewerId}::bigint and staff.role is not null))`;
+		and not ${staffViewer(viewerId)})`;
 
 export const mutedFor = (viewerId: string) => sql`(select muted_id from mutes where muter_id = ${viewerId}::bigint)`;
 

@@ -57,14 +57,23 @@ export function encryptPayload(payload: Buffer, p256dh: Buffer, auth: Buffer, fi
 	return Buffer.concat([salt, rs, Buffer.from([asPublic.length]), asPublic, body]);
 }
 
+const signingKey = createPrivateKey(keys.privatePem);
+// one token per push service, reused while it has hours left (it is good for 12)
+const tokens = new Map<string, { header: string; until: number }>();
+
 // RFC 8292: a short-lived token for the push service the endpoint belongs to
 function vapidHeader(endpoint: string): string {
+	const aud = new URL(endpoint).origin;
+	const cached = tokens.get(aud);
+	if (cached && cached.until > Date.now()) return cached.header;
 	const from = mailFrom();
 	const mail = /<([^>]+)>/.exec(from)?.[1] ?? from;
-	const claims = { aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: mail.includes("@") ? `mailto:${mail}` : PUBLIC_ORIGIN };
+	const claims = { aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: mail.includes("@") ? `mailto:${mail}` : PUBLIC_ORIGIN };
 	const unsigned = `${b64url(Buffer.from(JSON.stringify({ typ: "JWT", alg: "ES256" })))}.${b64url(Buffer.from(JSON.stringify(claims)))}`;
-	const signature = sign("sha256", Buffer.from(unsigned), { key: createPrivateKey(keys.privatePem), dsaEncoding: "ieee-p1363" });
-	return `vapid t=${unsigned}.${b64url(signature)}, k=${b64url(keys.publicKey)}`;
+	const signature = sign("sha256", Buffer.from(unsigned), { key: signingKey, dsaEncoding: "ieee-p1363" });
+	const header = `vapid t=${unsigned}.${b64url(signature)}, k=${b64url(keys.publicKey)}`;
+	tokens.set(aud, { header, until: Date.now() + 6 * 3600_000 });
+	return header;
 }
 
 type Subscription = { id: string; user_id: string; endpoint: string; p256dh: string; auth: string; settings: Record<string, string>; last_pushed_at: Date };
@@ -76,6 +85,7 @@ export async function pushTo(sub: Pick<Subscription, "id" | "endpoint" | "p256dh
 		method: "POST",
 		headers: { authorization: vapidHeader(sub.endpoint), "content-encoding": "aes128gcm", "content-type": "application/octet-stream", ttl: "86400", urgency: "normal" },
 		body,
+		signal: AbortSignal.timeout(10_000),
 	}).catch(() => undefined);
 	if (r && (r.status === 404 || r.status === 410)) await sql`delete from push_subscriptions where id = ${sub.id}::bigint`;
 	return !!r?.ok;
@@ -158,22 +168,37 @@ export async function pushSettingsRoute(viewerId: string, action: string, body: 
 // More than this at once becomes one "N new notifications" push.
 const BURST = 3;
 
+// a pass that outlasts the interval would otherwise start again on top of itself
+let pushing = false;
+
 export async function pushDue(): Promise<number> {
-	const subs = (await sql`select id::text, user_id::text, endpoint, p256dh, auth, settings, last_pushed_at from push_subscriptions`) as Subscription[];
-	let sent = 0;
-	for (const sub of subs) {
-		const on = (k: string) => ({ ...DEFAULTS, ...sub.settings })[k] !== "off";
-		const since = new Date(sub.last_pushed_at).getTime();
-		const items = (await pushItems(sub.user_id, since)).filter((i) => on(SWITCH[i.kind]));
-		const messages = on("direct_messages") ? await newMessages(sub.user_id, sub.last_pushed_at) : [];
-		const all = [...items, ...messages].sort((a, b) => a.at - b.at);
-		if (!all.length) continue;
-		await sql`update push_subscriptions set last_pushed_at = ${new Date(Math.max(...all.map((i) => i.at)) + 1)} where id = ${sub.id}::bigint`;
-		const name = settings().instance_name;
-		const out = all.length > BURST ? [{ title: name, body: `${all.length} new notifications`, url: "/notifications", tag: "summary" }] : all.map((i) => ({ title: name, body: i.text, url: i.url, tag: i.key }));
-		for (const m of out) if (await pushTo(sub, m)) sent++;
+	if (pushing) return 0;
+	pushing = true;
+	try {
+		const subs = (await sql`select id::text, user_id::text, endpoint, p256dh, auth, settings, last_pushed_at from push_subscriptions`) as Subscription[];
+		let sent = 0;
+		// an account's notifications are worked out once for all its browsers,
+		// from the one pushed to longest ago (items newest first, so each
+		// browser's share is what it would have got on its own)
+		for (const [userId, own] of Map.groupBy(subs, (s) => s.user_id)) {
+			const found = await pushItems(userId, Math.min(...own.map((s) => new Date(s.last_pushed_at).getTime())));
+			for (const sub of own) {
+				const on = (k: string) => ({ ...DEFAULTS, ...sub.settings })[k] !== "off";
+				const since = new Date(sub.last_pushed_at).getTime();
+				const items = found.filter((i) => i.at > since && on(SWITCH[i.kind]));
+				const messages = on("direct_messages") ? await newMessages(sub.user_id, sub.last_pushed_at) : [];
+				const all = [...items, ...messages].sort((a, b) => a.at - b.at);
+				if (!all.length) continue;
+				await sql`update push_subscriptions set last_pushed_at = ${new Date(Math.max(...all.map((i) => i.at)) + 1)} where id = ${sub.id}::bigint`;
+				const name = settings().instance_name;
+				const out = all.length > BURST ? [{ title: name, body: `${all.length} new notifications`, url: "/notifications", tag: "summary" }] : all.map((i) => ({ title: name, body: i.text, url: i.url, tag: i.key }));
+				for (const m of out) if (await pushTo(sub, m)) sent++;
+			}
+		}
+		return sent;
+	} finally {
+		pushing = false;
 	}
-	return sent;
 }
 
 // who wrote since `after` (chat is end-to-end encrypted: never what)

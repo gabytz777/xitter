@@ -39,11 +39,14 @@ async function items(viewerId: string, opts: { before?: number; after?: number; 
 	if (!opts.mentionsOnly) {
 		for (const kind of ["like", "repost"] as const) {
 			const table = kind === "like" ? sql`likes` : sql`reposts`;
+			// newer than a mark (push, unread counts): only posts liked since then are
+			// grouped, found by time, instead of every post the viewer ever had liked
+			const recent = opts.after !== undefined ? sql`and a.post_id in (select n.post_id from ${table} n where n.created_at >= ${lo})` : sql``;
 			const rows = await sql`
 				select a.post_id, max(a.created_at) as at, count(*)::int as total,
 					(array_agg(a.user_id order by a.created_at desc))[1:${SHOWN_USERS}] as users
 				from ${table} a join posts p on p.id = a.post_id
-				where p.user_id = ${viewerId}::bigint and a.user_id <> ${viewerId}::bigint and a.user_id not in ${hidden}
+				where p.user_id = ${viewerId}::bigint and a.user_id <> ${viewerId}::bigint and a.user_id not in ${hidden} ${recent}
 				group by a.post_id
 				having max(a.created_at) >= ${lo} and max(a.created_at) < ${hi}
 				order by at desc limit ${opts.limit}`;
@@ -54,6 +57,7 @@ async function items(viewerId: string, opts: { before?: number; after?: number; 
 			select date_trunc('day', f.created_at) as day, max(f.created_at) as at, count(*)::int as total,
 				(array_agg(f.follower_id order by f.created_at desc))[1:${SHOWN_USERS}] as users
 			from follows f where f.followee_id = ${viewerId}::bigint and f.follower_id not in ${hidden}
+				and f.created_at >= date_trunc('day', ${lo}::timestamptz)
 			group by 1
 			having max(f.created_at) >= ${lo} and max(f.created_at) < ${hi}
 			order by at desc limit ${opts.limit}`;
@@ -87,7 +91,7 @@ async function items(viewerId: string, opts: { before?: number; after?: number; 
 	const posts = await sql`
 		select x.id, x.created_at as at, x.reason from (
 			select p.id, p.created_at, 'reply' as reason from posts p join posts parent on parent.id = p.reply_to_id
-				where parent.user_id = ${viewerId}::bigint and p.user_id <> ${viewerId}::bigint and p.user_id not in ${hidden} and not ${hasMutedWord(viewerId, "notifications", sql`p.id`)}
+				where p.reply_to_user_id = ${viewerId}::bigint and parent.user_id = ${viewerId}::bigint and p.user_id <> ${viewerId}::bigint and p.user_id not in ${hidden} and not ${hasMutedWord(viewerId, "notifications", sql`p.id`)}
 			union all
 			select p.id, p.created_at, 'mention' from posts p join post_mentions m on m.post_id = p.id
 				where m.user_id = ${viewerId}::bigint and p.user_id <> ${viewerId}::bigint and p.user_id not in ${hidden} and not ${hasMutedWord(viewerId, "notifications", sql`p.id`)}

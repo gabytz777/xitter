@@ -1,5 +1,5 @@
 import { type Viewer, getViewer, parseCookies } from "./auth";
-import { getClientFile } from "./client-cache";
+import { getClientFile, getClientFilePath } from "./client-cache";
 import { PORT, PUBLIC_ORIGIN } from "./config";
 import { migrate, sql } from "./db";
 import { knownOperation, runOperation } from "./graphql";
@@ -10,9 +10,9 @@ import { loadSettings, settings } from "./settings";
 import { flagPickerData } from "./flag-picker";
 import { flagSvg } from "./flags";
 import { onboarding } from "./onboarding";
-import { patchFile, patchText } from "./patch";
+import { cachedPatch, patchFile, patchText } from "./patch";
 import { clientError, recordError } from "./errors";
-import { staffGate } from "./staff-access";
+import { asRequest, markStaff, staffGate } from "./staff-access";
 import { backupPath, startBackups } from "./backups";
 import { memberInvitesRoute } from "./member-invites";
 import { orgRoute } from "./org-manage";
@@ -33,7 +33,7 @@ import { startScheduler } from "./scheduled";
 import { gifProxy } from "./gifs";
 import { cardImage } from "./explore-cards";
 import { rememberIp, requestIp } from "./login-history";
-import { bucketsFor, hit, limitApi, limitedResponse } from "./ratelimit";
+import { bucketsFor, hit, isMutation, limitApi, limitedResponse } from "./ratelimit";
 import { actingViewer, delegateMay } from "./delegation";
 import { automationRoute } from "./automation";
 import { stickerImage, stickerPacks } from "./stickers";
@@ -93,6 +93,7 @@ async function servePublic(p: string): Promise<Response> {
 const API_PREFIX = /^\/(i\/api\/|i\/jfapi\/|i\/media\/|1\.1\/|2\/|graphql\/|fleets\/|live_pipeline\/)/;
 // calls no handler exists for yet, most frequent first
 const unknown = new Map<string, number>();
+const MAX_UNKNOWN_PATHS = 1000;
 
 const apiError = (status: number, code: number, message: string) => Response.json({ errors: [{ code, message }] }, { status });
 
@@ -118,16 +119,22 @@ function staffBlockedPage(reason: string) {
 
 async function serveClient(req: Request, pathname: string): Promise<Response> {
 	const cdnPath = pathname.slice("/abs".length);
-	const raw = await getClientFile(cdnPath);
-	if (!raw) return new Response("not found", { status: 404 });
 	const ext = cdnPath.split(".").pop() ?? "";
 	const type = MIME[ext] ?? "application/octet-stream";
-	if (ext !== "js" && ext !== "css")
-		return new Response(new Uint8Array(raw), { headers: { "content-type": type, "cache-control": "public, max-age=31536000, immutable" } });
+	if (ext !== "js" && ext !== "css") {
+		const file = await getClientFilePath(cdnPath);
+		if (!file) return new Response("not found", { status: 404 });
+		return new Response(Bun.file(file), { headers: { "content-type": type, "cache-control": "public, max-age=31536000, immutable" } });
+	}
 
 	// The file name stays the same when our patches change, so patched files are
 	// revalidated against a hash of what we actually serve.
-	const body = patchFile(cdnPath, raw);
+	let body = cachedPatch(cdnPath);
+	if (!body) {
+		const raw = await getClientFile(cdnPath);
+		if (!raw) return new Response("not found", { status: 404 });
+		body = patchFile(cdnPath, raw);
+	}
 	let etag = etags.get(body);
 	if (!etag) {
 		etag = `"${Bun.hash(body).toString(36)}"`;
@@ -169,13 +176,13 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	const source = await platformSource(req);
 	if (source === null) return apiError(401, 32, "Invalid or revoked client token.");
 	viewer = { ...viewer, postSource: source };
-	if (req.method !== "GET" && req.headers.get("x-csrf-token") !== viewer.csrf)
-		return apiError(403, 353, "This request requires a matching csrf cookie and header.");
-
 	const path = url.pathname.replace(/^\/i\/(jf)?api/, "");
 	const parts = path.split("/").filter(Boolean);
 	const gql = parts.indexOf("graphql");
 	const operation = gql >= 0 ? parts[parts.length - 1] : undefined;
+	if ((req.method !== "GET" || operation) && req.headers.get("x-csrf-token") !== viewer.csrf)
+		return apiError(403, 353, "This request requires a matching csrf cookie and header.");
+	if (req.method === "GET" && operation && isMutation(operation)) return apiError(405, 144, "Use POST for this operation.");
 	// a delegate switched into another account (delegation.ts); the client sends
 	// this on every call while switched
 	const actAs = req.headers.get("x-act-as-user-id");
@@ -185,13 +192,13 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 		if (!delegateMay(acting.actor!.role, req.method, path, operation)) return apiError(403, 200, "Delegates can't do this for the account.");
 		viewer = acting;
 	}
+	const limited = limitApi(viewer, req.method, path, operation, url);
+	if (limited) return limited;
 	if (path === "/xitter/moderation") return noticesApi(req, viewer);
 	if (path === "/xitter/badges") return extraBadges(viewer.id, url);
 	if (path === "/xitter/gif") return gifProxy(url);
 	if (path === "/xitter/stickers") return Response.json(await stickerPacks());
 	if (path === "/xitter/client_error" && req.method === "POST") return clientError(req, viewer);
-	const limited = limitApi(viewer, req.method, path, operation, url);
-	if (limited) return limited;
 	if (viewer.status === "restricted" && bucketsFor(req.method, path, operation, url).some((b) => b === "post" || b === "dm"))
 		return apiError(403, 326, "Your account can't post or send messages right now.");
 	if (req.method !== "GET" && !/^\/(i|1\.1)\/media\/upload2?\.json$/.test(path) && Number(req.headers.get("content-length") ?? 0) > MAX_API_BODY)
@@ -225,7 +232,9 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	if (rest) return rest;
 
 	const key = `${req.method} ${gql >= 0 ? `graphql:${parts[parts.length - 1]}` : path}`;
-	unknown.set(key, (unknown.get(key) ?? 0) + 1);
+	if (unknown.has(key)) unknown.set(key, unknown.get(key)! + 1);
+	else if (unknown.size < MAX_UNKNOWN_PATHS) unknown.set(key, 1);
+	else unknown.set("(other paths)", (unknown.get("(other paths)") ?? 0) + 1);
 	console.log(`unhandled ${key}`);
 	return Response.json(gql >= 0 ? { data: {} } : {});
 }
@@ -248,7 +257,7 @@ await resumeVideos(MEDIA_DIR);
 // the request; caught here it is logged with its path and account
 async function handle(req: Request): Promise<Response | undefined> {
 	try {
-		return await route(req);
+		return await asRequest(() => route(req));
 	} catch (e) {
 		const viewer = await getViewer(req).catch(() => undefined);
 		await recordError("server", e, { path: `${req.method} ${new URL(req.url).pathname}`, userId: viewer?.id });
@@ -260,6 +269,12 @@ async function route(req: Request): Promise<Response | undefined> {
 	rememberIp(req, server.requestIP(req)?.address);
 	const url = new URL(req.url);
 	const p = url.pathname;
+	if (req.method !== "GET" && req.method !== "HEAD" && req.headers.has("cookie")) {
+		const site = req.headers.get("sec-fetch-site");
+		const origin = req.headers.get("origin");
+		if (site ? site !== "same-origin" && site !== "none" : origin && origin !== PUBLIC_ORIGIN && origin !== url.origin)
+			return new Response("This request came from another site.", { status: 403 });
+	}
 	if (p.startsWith("/abs/")) return serveClient(req, p);
 	// A profile for a handle nobody has: the client would render "this account
 	// doesn't exist", so send the browser to the Rick Astley instead. Set
@@ -333,6 +348,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/manifest.json") return new Response(null, { status: 404 });
 
 	const viewer = await getViewer(req);
+	if (viewer?.role && !(await staffGate(req, viewer))) markStaff();
 	// a suspended account can't sign in, so it appeals here with its password
 	if (p === "/appeal") return appealRoute(req, server.requestIP(req)?.address ?? "");
 	// maintenance: staff carry on, everyone else waits. Signed-out visitors see
@@ -361,7 +377,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p.startsWith("/embed/")) return embedImage(p);
 	if (p === "/oembed") return oembed(url);
 	// uploads stay inside the instance: only signed-in users get them
-	if (p.startsWith("/media/")) return viewer ? serveMedia(req, p) : new Response("not found", { status: 404 });
+	if (p.startsWith("/media/")) return viewer ? serveMedia(req, p, viewer) : new Response("not found", { status: 404 });
 	// the admin panel: staff only; everyone else gets the client's not-found page
 	if (p.startsWith("/admin/api/")) return adminApi(req, p.slice("/admin/api/".length), viewer);
 	if (p === "/admin/flags.json" && viewer?.role) return Response.json(flagPickerData(null).flags);
@@ -378,7 +394,7 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (blocked) return staffBlockedPage(blocked);
 		return new Response(await adminPage(), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 	}
-	if (p === "/_debug/unknown") return Response.json(Object.fromEntries([...unknown].sort((a, b) => b[1] - a[1])));
+	if (p === "/_debug/unknown" && viewer?.role === "admin") return Response.json(Object.fromEntries([...unknown].sort((a, b) => b[1] - a[1])));
 	if (API_PREFIX.test(p) || req.method !== "GET") {
 		// the event stream must outlive the default idle timeout
 		if (p.endsWith("/live_pipeline/events")) server.timeout(req, 0);

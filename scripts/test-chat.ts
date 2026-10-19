@@ -79,11 +79,14 @@ try {
 	check("inbox messages ordered oldest first", thrift.text(thrift.decode(thrift.fromBase64(data.latest_message_events.at(-1)))[1]) === seq2);
 	check("inbox latest message uses newest event", thrift.text(thrift.decode(thrift.fromBase64(data.latest_notifiable_message_create_event))[1]) === seq2);
 	check("newest timestamp is current", Math.abs(Number(thrift.text(thrift.decode(thrift.fromBase64(data.latest_notifiable_message_create_event))[6])) - Date.now()) < 3000);
+	const trustOf = async () => (await gql(b, "GetPublicKeysQuery", { ids: [a.id] })).data.user_results_by_rest_ids[0]?.result.chat_permissions.is_trusted;
+	check("a stranger isn't trusted before accepting", (await trustOf()) === false);
 	check("non-followers receive a request", (await gql(b, "GetMessageRequestsPageQuery")).data.get_message_requests_page.total_count === 1);
 	check("request not included in normal inbox", (await gql(b, "GetInitialXChatPageQuery")).data.get_initial_chat_page.items.length === 0);
 	check("request state matches client enum", (await gql(b, "GetConversationPageQuery", { conversation_id: conversation })).data.get_conversation_page.message_request_state === "Received");
 	check("sender sees the sent request state", (await gql(a, "GetConversationPageQuery", { conversation_id: conversation })).data.get_conversation_page.message_request_state === "Sent");
 	await gql(b, "AcceptMessageRequestMutation", { targetUserId: a.id });
+	check("accepting trusts the sender, so the client stops asking", (await trustOf()) === true);
 	check("accepting clears pending request", (await gql(b, "GetMessageRequestsPageQuery")).data.get_message_requests_page.total_count === 0);
 	check("accepted conversation appears in inbox", (await gql(b, "GetInitialXChatPageQuery")).data.get_initial_chat_page.items.length === 1);
 	const conversationKey = crypto.getRandomValues(new Uint8Array(32));

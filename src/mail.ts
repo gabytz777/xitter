@@ -27,6 +27,7 @@ export async function sendMail(to: string, subject: string, text: string, meta: 
 		method: "POST",
 		headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
 		body: JSON.stringify({ from: mailFrom(), to: [to], subject, text }),
+		signal: AbortSignal.timeout(15_000),
 	}).catch((e: Error) => e);
 	if (r instanceof Error || !r.ok) {
 		// Resend explains itself, e.g. that the sending domain isn't verified yet

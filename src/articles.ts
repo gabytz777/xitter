@@ -4,6 +4,8 @@
 // post carrying the article, which is how feeds, profiles and the reader see it.
 
 import type { User } from "./auth";
+import { protectedFor, suspendedFor } from "./blocks";
+import { staffViewer } from "./staff-access";
 import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { type MediaRow, mediaUrl, posterUrl } from "./media";
@@ -177,7 +179,10 @@ export async function getArticle(viewerId: string, id: string, withContent = tru
 	const row = await load(id);
 	if (!row || (row.state !== "Published" && String(row.user_id) !== viewerId)) return undefined;
 	// hidden by staff: only its author and staff see it
-	if (row.hidden && String(row.user_id) !== viewerId && !(await sql`select 1 from users where id = ${viewerId}::bigint and role is not null`).length) return undefined;
+	if (row.hidden && String(row.user_id) !== viewerId && !(await sql`select 1 where ${staffViewer(viewerId)}`).length) return undefined;
+	const [unseen] = await sql`select 1 where ${row.user_id}::bigint in ${protectedFor(viewerId)} or ${row.user_id}::bigint in ${suspendedFor(viewerId)}
+		or ${row.user_id}::bigint in (select blocker_id from blocks where blocked_id = ${viewerId}::bigint)`;
+	if (unseen) return undefined;
 	return entity(row, await userById(viewerId, String(row.user_id)), withContent);
 }
 
@@ -261,7 +266,7 @@ export async function slice(viewerId: string, userId: string, lifecycle: string,
 	if (userId !== viewerId && lifecycle !== "Published") return { items: [], next: undefined };
 	const before = typeof cursor === "string" && isId(cursor) ? cursor : undefined;
 	const rows = await sql`select ${columns} from articles a where a.user_id = ${userId}::bigint and a.state = ${lifecycle === "Published" ? "Published" : "Draft"}
-		and (not a.hidden or a.user_id = ${viewerId}::bigint or exists (select 1 from users staff where staff.id = ${viewerId}::bigint and staff.role is not null)) ${before ? sql`and a.id < ${before}::bigint` : sql``} order by a.id desc limit ${count}`;
+		and (not a.hidden or a.user_id = ${viewerId}::bigint or ${staffViewer(viewerId)}) ${before ? sql`and a.id < ${before}::bigint` : sql``} order by a.id desc limit ${count}`;
 	const author = await userById(viewerId, userId);
 	// in full: the editor opens an article from this list without fetching it again
 	const items = await Promise.all(rows.map((r: any) => entity(r as ArticleRow, author, true)));
@@ -272,7 +277,7 @@ export async function slice(viewerId: string, userId: string, lifecycle: string,
 export async function articlesByIds(viewerId: string, ids: string[]): Promise<Map<string, ArticleEntity>> {
 	const out = new Map<string, ArticleEntity>();
 	if (!ids.length) return out;
-	const rows = await sql`select ${columns} from articles a where a.id = any(${sql.array(ids, "INT8")}) and a.state = 'Published' and (not a.hidden or a.user_id = ${viewerId}::bigint or exists (select 1 from users staff where staff.id = ${viewerId}::bigint and staff.role is not null))`;
+	const rows = await sql`select ${columns} from articles a where a.id = any(${sql.array(ids, "INT8")}) and a.state = 'Published' and (not a.hidden or a.user_id = ${viewerId}::bigint or ${staffViewer(viewerId)})`;
 	for (const r of rows) out.set(String(r.id), await entity(r as ArticleRow, undefined, true));
 	return out;
 }

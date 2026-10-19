@@ -24,21 +24,61 @@ const HALF_LIFE = 12;
 
 export type RankedPage = { items: FeedItem[]; next?: number };
 
+type Ranked = { item_id: string; post_id: string; reposter_id: string | null; created_at: Date }[];
+
+// The pages of one scroll share a ranking (same viewer and asOf), so it is kept
+// a while instead of ranking every candidate again for each page.
+const RANKING_TTL = 10 * 60_000;
+const MAX_RANKINGS = 200;
+const rankings = new Map<string, { rows: Promise<Ranked>; until: number }>();
+
+function ranking(viewerId: string, asOf: string): Promise<Ranked> {
+	const key = `${viewerId}:${asOf}`;
+	const now = Date.now();
+	const hit = rankings.get(key);
+	if (hit && hit.until > now) return hit.rows;
+	for (const [k, r] of rankings) if (r.until <= now) rankings.delete(k);
+	while (rankings.size >= MAX_RANKINGS) rankings.delete(rankings.keys().next().value!);
+	const rows = rank(viewerId, asOf);
+	rankings.set(key, { rows, until: now + RANKING_TTL });
+	rows.catch(() => rankings.delete(key));
+	return rows;
+}
+
 // One page of the ranked feed. `asOf` (an item id) pins the ranking for the pages of one
 // scroll: posts newer than it wait for the next refresh, and ages are measured
 // from it, so the order does not shift while the viewer pages down.
 export async function rankedFeed(viewerId: string, opts: { asOf: string; offset: number; limit: number }): Promise<RankedPage> {
+	const ranked = await ranking(viewerId, opts.asOf);
+	const pageRows = ranked.slice(opts.offset, opts.offset + opts.limit);
+	const items = await itemsFromRows(viewerId, pageRows);
+	const nextOffset = opts.offset + pageRows.length;
+	return { items, ...(nextOffset < ranked.length ? { next: nextOffset } : {}) };
+}
+
+async function rank(viewerId: string, asOf: string): Promise<Ranked> {
 	// an item id: only entries up to it count, and ages are measured from its time
-	const at = idTime(opts.asOf);
+	const at = idTime(asOf);
 	const rows = await sql`
 		with candidates as (
 			select f.*, (select x.user_id from posts x where x.id = f.post_id) as original_author
 			from feed_items f
-			where not f.is_reply and f.item_id <= ${opts.asOf}::bigint and ${homeHidden(viewerId)} and ${communityVisible(viewerId)}
+			where not f.is_reply and f.item_id <= ${asOf}::bigint and ${homeHidden(viewerId)} and ${communityVisible(viewerId)}
 				-- "Visibility limited" (staff's Fosnr label): never recommended
 				and (select x.notice->>'type' from posts x where x.id = f.post_id) is distinct from 'Fosnr'
 				and not ${unwantedTopicMatch(viewerId, sql`f.post_id`, sql`(select x.user_id from posts x where x.id = f.post_id)`)}
 			order by f.item_id desc limit ${CANDIDATES * 3}
+		),
+		-- authors the viewer liked or replied to in the last month, once for all
+		-- candidates (inlined, the planner ran it again for each of them)
+		affinity as materialized (
+			select author, sum(n) as n from (
+				select lp.user_id as author, count(*) as n from likes l join posts lp on lp.id = l.post_id
+					where l.user_id = ${viewerId}::bigint and l.created_at > ${at}::timestamptz - interval '30 days' group by 1
+				union all
+				select parent.user_id, count(*) from posts rp join posts parent on parent.id = rp.reply_to_id
+					where rp.user_id = ${viewerId}::bigint and rp.created_at > ${at}::timestamptz - interval '30 days' group by 1
+			) x group by author
 		),
 		scored as (
 			select c.*,
@@ -58,11 +98,7 @@ export async function rankedFeed(viewerId: string, opts: { asOf: string; offset:
 						where r.post_id = c.post_id and fw.follower_id = ${viewerId}::bigint) then 1.5 else 1.0 end)
 				* (case when ${followedTopicMatch(viewerId, sql`c.post_id`)} then 1.5 else 1.0 end)
 				-- authors the viewer engaged with in the last month, up to double
-				* (1 + least(1.0, 0.1 * (
-					(select count(*) from likes l join posts lp on lp.id = l.post_id
-						where l.user_id = ${viewerId}::bigint and lp.user_id = c.original_author and l.created_at > ${at}::timestamptz - interval '30 days')
-					+ (select count(*) from posts rp join posts parent on parent.id = rp.reply_to_id
-						where rp.user_id = ${viewerId}::bigint and parent.user_id = c.original_author and rp.created_at > ${at}::timestamptz - interval '30 days'))))
+				* (1 + least(1.0, 0.1 * coalesce((select af.n from affinity af where af.author = c.original_author), 0)))
 				-- the viewer's own posts are known to them already
 				* (case when c.original_author = ${viewerId}::bigint then 0.5 else 1.0 end)
 				-- halves every HALF_LIFE hours: a day-old post needs about 50 times the
@@ -77,11 +113,8 @@ export async function rankedFeed(viewerId: string, opts: { asOf: string; offset:
 		)
 		select * from best order by score desc, item_id desc limit ${CANDIDATES}`;
 
-	const ranked = spreadAuthors(rows as any[]);
-	const pageRows = ranked.slice(opts.offset, opts.offset + opts.limit);
-	const items = await itemsFromRows(viewerId, pageRows);
-	const nextOffset = opts.offset + pageRows.length;
-	return { items, ...(nextOffset < ranked.length ? { next: nextOffset } : {}) };
+	// only what a page needs is kept
+	return spreadAuthors(rows as any[]).map((r) => ({ item_id: r.item_id, post_id: r.post_id, reposter_id: r.reposter_id, created_at: r.created_at }));
 }
 
 // Keep one author from filling the screen: an entry that would make a run

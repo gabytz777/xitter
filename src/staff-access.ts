@@ -2,6 +2,7 @@
 // require two-factor of staff and limit the panel to some addresses.
 // ADMIN_ANY_IP=1 lifts the address limit, for an admin who locked themselves out.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { BlockList, isIP } from "node:net";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
@@ -41,3 +42,15 @@ export async function staffGate(req: Request, viewer: Viewer): Promise<string | 
 	}
 	return null;
 }
+
+const staffRequest = new AsyncLocalStorage<{ staff: boolean }>();
+
+export const asRequest = <T>(run: () => T) => staffRequest.run({ staff: false }, run);
+
+export const markStaff = () => {
+	const request = staffRequest.getStore();
+	if (request) request.staff = true;
+};
+
+export const staffViewer = (viewerId: string) =>
+	staffRequest.getStore()?.staff ? sql`exists (select 1 from users staff where staff.id = ${viewerId}::bigint and staff.role is not null)` : sql`false`;

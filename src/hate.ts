@@ -39,16 +39,26 @@ const letterClass = (c: string) => {
 	return extra ? `[${c}${extra.replace(/[|$+\]\\^-]/g, "\\$&")}]` : c;
 };
 
+const classOf = (c: string) => (c === "f" ? "(?:f|ph)" : letterClass(c));
+
 const core = (word: string) =>
 	word.replace(/(\p{L})\1*/gu, (run, c) => {
-		const cls = c === "f" ? "(?:f|ph)" : letterClass(c);
+		const cls = classOf(c);
 		return run.length > 1 ? `${cls}{${run.length},}` : `${cls}+`;
 	});
 
+// what a term's first letter may be written as; a token is only tried against
+// the terms it could start with
+const startsOf = (c: string) => new Set([c, ...({ ...LOOKALIKE, i: "1!|l", g: "96q", a: "4@", f: "p" }[c] ?? "")]);
+
 const compiled = TERMS.map((t) => ({
 	...t,
-	inside: new RegExp(core(t.word), "u"),
+	starts: startsOf(t.word[0]),
+	// only from the start of a run of the first letter: tried at every letter of
+	// a long run ("nnnn…") the search took quadratic time
+	inside: new RegExp(`(?<!${classOf(t.word[0])})${core(t.word)}`, "u"),
 	whole: new RegExp(`^${core(t.word)}(?:${t.anywhere ? "s|z|h|hs|az|as|ers|er|a" : t.suffix ?? "s"})?$`, "u"),
+	backward: new RegExp(`^${t.word.replace(/(\p{L})\1*/gu, (run, c) => (run.length > 1 ? `${c}{${run.length},}` : `${c}+`))}(?:${t.anywhere ? "s|z|h|hs|az|as|ers|er|a" : t.suffix ?? "s"})?$`, "u"),
 }));
 
 const FLIPPED: Record<string, string> = { ɐ: "a", q: "b", ɔ: "c", p: "d", ǝ: "e", ɟ: "f", ƃ: "g", ɥ: "h", ı: "i", ɾ: "j", ʞ: "k", ן: "l", ɯ: "m", u: "n", d: "p", b: "q", ɹ: "r", ʇ: "t", n: "u", ʌ: "v", ʍ: "w", ʎ: "y" };
@@ -83,23 +93,37 @@ function attacked(words: string[], i: number) {
 	return near.some((w) => SECOND_PERSON.has(w) || DEMEANING.test(w));
 }
 
+const ANY_START = new Set(compiled.flatMap((t) => [...t.starts]));
+// the terms a backward form starting with a letter may be, in TERMS order
+const BACKWARD_BY_START = Map.groupBy(compiled, (t) => t.word[0]);
+
 function termIn(candidate: string, wholeOnly: boolean) {
-	const forms = [...new Set([candidate, candidate.replace(/^@+|!+$/g, "")])];
+	const stripped = candidate.replace(/^@+|!+$/g, "");
+	const forms = stripped === candidate ? [candidate] : [candidate, stripped];
+	if (wholeOnly && !forms.some((f) => ANY_START.has(f[0]))) return undefined;
 	return compiled.find((t) =>
 		forms.some((form) => {
 			const c = t.benign ? form.replace(t.benign, " ") : form;
-			return t.whole.test(c) || (!wholeOnly && !!t.anywhere && t.inside.test(c));
+			return (t.starts.has(c[0]) && t.whole.test(c)) || (!wholeOnly && !!t.anywhere && t.inside.test(c));
 		}),
 	);
 }
 
 const reverse = (s: string) => [...s].reverse().join("");
 
+const backwardIn = (candidate: string) => {
+	const end = candidate.replace(/@+$/, "");
+	const terms = BACKWARD_BY_START.get(plain(end[end.length - 1] ?? ""));
+	if (!terms) return undefined;
+	const form = plain(reverse(candidate).replace(/^@+|!+$/g, ""));
+	return terms.find((t) => t.backward.test(t.benign ? form.replace(t.benign, " ") : form));
+};
+
 function slurIn(tokens: string[]): HateHit | undefined {
 	const words = tokens.map(plain);
 	const found = (t: Term, at: number): HateHit | undefined => (!t.contextual || attacked(words, at) ? { category: "slur", term: t.word } : undefined);
 	for (const [i, token] of tokens.entries()) {
-		const t = termIn(token, false) ?? termIn(reverse(token), true);
+		const t = termIn(token, false) ?? backwardIn(token);
 		const hit = t && found(t, i);
 		if (hit) return hit;
 	}
@@ -109,7 +133,7 @@ function slurIn(tokens: string[]): HateHit | undefined {
 			if ([...tokens[j]].length > 5) break;
 			joined += tokens[j];
 			if (j === i) continue;
-			const t = termIn(joined, true) ?? termIn(reverse(joined), true);
+			const t = termIn(joined, true) ?? backwardIn(joined);
 			const hit = t && found(t, i);
 			if (hit) return hit;
 		}

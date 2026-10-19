@@ -145,7 +145,7 @@ export async function viewerById(id: string): Promise<Omit<Viewer, "csrf" | "tok
 	return row as Viewer | undefined;
 }
 
-export async function getViewer(req: Request): Promise<Viewer | undefined> {
+async function loadViewer(req: Request): Promise<Viewer | undefined> {
 	const token = parseCookies(req).auth_token;
 	if (!token) return undefined;
 	const [row] = await sql`select ${viewerCols()}, s.csrf, s.token
@@ -159,6 +159,16 @@ export async function getViewer(req: Request): Promise<Viewer | undefined> {
 	const country = row ? requestCountry(req) : undefined;
 	if (country) await sql`update users set country = ${country} where id = ${row.id}::bigint and country is null`;
 	return row as Viewer | undefined;
+}
+
+const viewers = new WeakMap<Request, Promise<Viewer | undefined>>();
+
+export function getViewer(req: Request): Promise<Viewer | undefined> {
+	const known = viewers.get(req);
+	if (known) return known;
+	const loading = loadViewer(req);
+	viewers.set(req, loading);
+	return loading;
 }
 
 export function sessionCookies(s: { token: string; csrf: string; userId: string }): string[] {

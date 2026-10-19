@@ -27,7 +27,7 @@ import { newId } from "./ids";
 import { hit } from "./ratelimit";
 import * as thrift from "./thrift";
 import { type Struct, bool, i32, i64, list, str, struct } from "./thrift";
-import { userById, userByName } from "./users";
+import { userByName, usersByIds } from "./users";
 
 // --- secrets: chat tokens are signed with tokenKey, realm tokens with the
 // Juicebox tenant secret. Environment first, else made once and kept in data/.
@@ -112,7 +112,7 @@ function verificationOf(u: User) {
 	};
 }
 
-function chatUser(u: User, viewerId: string, keyed: boolean, extra: object = {}) {
+function chatUser(u: User, viewerId: string, keyed: boolean, trusted: boolean, extra: object = {}) {
 	const self = u.id === viewerId;
 	const blocked = !!(u.stats?.blocking || u.stats?.blockedBy);
 	return {
@@ -128,7 +128,7 @@ function chatUser(u: User, viewerId: string, keyed: boolean, extra: object = {})
 			can_dm_reason: blocked ? "Blocked" : "Allowed",
 			dm_blocking: !!u.stats?.blocking,
 			has_public_key: keyed,
-			is_trusted: self || !!(u.stats?.followedByViewer || u.stats?.followsViewer),
+			is_trusted: self || trusted || !!(u.stats?.followedByViewer || u.stats?.followsViewer),
 			passes_premium_check: true,
 		},
 		core: { __typename: "UserCore", created_at_ms: new Date(u.created_at).getTime(), name: u.name, screen_name: u.screen_name },
@@ -143,23 +143,35 @@ function chatUser(u: User, viewerId: string, keyed: boolean, extra: object = {})
 	};
 }
 
+// one query for the accounts and one for their keys, however many there are
 async function userResults(viewerId: string, ids: string[], opts: { keys?: boolean; tokens?: boolean } = {}) {
-	const users = (await Promise.all(ids.map((id) => userById(viewerId, id)))).filter((u): u is User => !!u);
+	const found = await usersByIds(viewerId, ids);
+	const users = ids.map((id) => found.get(id)).filter((u): u is User => !!u);
 	const keyed = await hasKey(users.map((u) => u.id));
-	return Promise.all(
-		users.map(async (u) => ({
-			__typename: "UserResults",
-			rest_id: u.id,
-			result: chatUser(u, viewerId, keyed.has(u.id), opts.keys ? { get_public_keys: await publicKeys(u.id, !!opts.tokens && u.id === viewerId) } : {}),
-		})),
+	const trusted = new Set(
+		users.length
+			? (await sql`select trusted_id::text as id from chat_trust where user_id = ${viewerId}::bigint and trusted_id = any(${sql.array(users.map((u) => u.id), "INT8")})`).map((r: { id: string }) => r.id)
+			: [],
 	);
+	const keys = opts.keys ? await keyRows(users.map((u) => u.id)) : undefined;
+	return users.map((u) => ({
+		__typename: "UserResults",
+		rest_id: u.id,
+		result: chatUser(u, viewerId, keyed.has(u.id), trusted.has(u.id), keys ? { get_public_keys: publicKeys(u.id, keys.get(u.id) ?? [], !!opts.tokens && u.id === viewerId) } : {}),
+	}));
 }
 
 // --- keys
 
-async function publicKeys(userId: string, withTokens: boolean) {
-	const rows = await sql`select version::text, public_key, signing_public_key, identity_public_key_signature, registration_method
-		from chat_keys where user_id = ${userId}::bigint order by version desc`;
+// each account's keys, newest version first
+async function keyRows(userIds: string[]): Promise<Map<string, any[]>> {
+	if (!userIds.length) return new Map();
+	const rows = await sql`select user_id::text, version::text, public_key, signing_public_key, identity_public_key_signature, registration_method
+		from chat_keys where user_id = any(${sql.array(userIds, "INT8")}) order by user_id, version desc`;
+	return Map.groupBy(rows as any[], (r) => r.user_id as string);
+}
+
+function publicKeys(userId: string, rows: any[], withTokens: boolean) {
 	return {
 		__typename: "GetPublicKeysResult",
 		is_managed_pin_user: false,
@@ -319,7 +331,6 @@ export const chatSocket = {
 	},
 	async message(ws: ServerWebSocket<SocketData>, data: string | Buffer) {
 		if (typeof data === "string") return;
-		if (!hit("endpoint", `${ws.data.userId}:chat-socket`).ok) return;
 		let frame: Struct;
 		try {
 			frame = thrift.decode(new Uint8Array(data));
@@ -328,6 +339,7 @@ export const chatSocket = {
 		}
 		// keep-alive: answered in kind
 		if (frame[2]) return ws.send(thrift.encode({ 2: struct({ 2: struct({}) }) }));
+		if (!hit("endpoint", `${ws.data.userId}:chat-socket`).ok) return;
 		// an event sent straight to the socket: typing and the like, passed on
 		// to the conversation's other members, not kept
 		const ev = thrift.fields(frame[1]);
@@ -360,8 +372,12 @@ async function conversationData(viewerId: string, conversationId: string) {
 		and e.seq > coalesce((select deleted_before from chat_members where conversation_id = ${conversationId} and user_id = ${viewerId}::bigint), 0)
 		and not exists (select 1 from chat_hidden_events h where h.user_id = ${viewerId}::bigint and h.seq = e.seq) order by e.seq desc limit 21`;
 	const keys = await sql`select event from chat_events where conversation_id = ${conversationId} and kind = ${KIND.keyChange} order by seq desc limit 5`;
-	const reads = await sql`select distinct on (sender_id) sender_id::text as id, event from chat_events
-		where conversation_id = ${conversationId} and kind = ${KIND.read} order by sender_id, seq desc`;
+	// each member's newest read marker: one index lookup per member, where
+	// sorting every marker the conversation ever had grew with its history
+	const reads = await sql`select m.user_id::text as id, r.event from chat_members m
+		cross join lateral (select e.event from chat_events e where e.conversation_id = m.conversation_id and e.kind = ${KIND.read} and e.sender_id = m.user_id
+			order by e.seq desc limit 1) r
+		where m.conversation_id = ${conversationId} order by m.user_id`;
 	const [last] = await sql`select seq::text from chat_events where conversation_id = ${conversationId} order by seq desc limit 1`;
 	const b64 = (r: { event: Buffer }) => Buffer.from(r.event).toString("base64");
 	const direct = !!directMembers(conversationId);
@@ -865,6 +881,8 @@ export const chatHandlers: Record<string, (viewer: Viewer, vars: Vars) => Promis
 		const [request] = await sql`select 1 from chat_members where conversation_id = ${conversationId} and user_id <> ${v.id}::bigint and not accepted`;
 		mce[109] = bool(!!request);
 		await sql`update chat_members set accepted = true, archived = false where conversation_id = ${conversationId} and user_id = ${v.id}::bigint`;
+		const peer = directMembers(conversationId)?.find((id) => id !== v.id);
+		if (peer) await sql`insert into chat_trust (user_id, trusted_id) values (${v.id}::bigint, ${peer}::bigint) on conflict do nothing`;
 		const ev: Struct = {
 			2: str(String(vars.message_id ?? crypto.randomUUID())),
 			...(vars.conversation_token ? { 5: str(String(vars.conversation_token)) } : {}),
@@ -900,8 +918,9 @@ export async function juiceboxProxy(req: Request, path: string): Promise<Respons
 	const res = await fetch(`${JUICEBOX.url}/${path}`, {
 		method: req.method,
 		headers,
-		body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer(),
+		body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
+		duplex: "half",
 	}).catch(() => undefined);
 	if (!res) return new Response("key backup is unavailable", { status: 503 });
-	return new Response(await res.arrayBuffer(), { status: res.status, headers: { "content-type": res.headers.get("content-type") ?? "application/octet-stream" } });
+	return new Response(res.body, { status: res.status, headers: { "content-type": res.headers.get("content-type") ?? "application/octet-stream" } });
 }

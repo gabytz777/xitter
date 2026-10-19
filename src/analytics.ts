@@ -22,11 +22,24 @@ const ms = (x: unknown, fallback: number) => {
 };
 const DAY = 86_400_000;
 
+// the client's range, at most a bit over a year (the longest the page offers)
+// and not past tomorrow: from 0, or from year -270000, one request read every
+// row the account ever had or looped over every day since
+const MAX_RANGE = 400 * DAY;
+const span = (from: number, to: number): [number, number] => {
+	const end = Math.max(0, Math.min(to, Date.now() + DAY));
+	return [Math.min(end, Math.max(from, end - MAX_RANGE)), end];
+};
+
+// the start of the step (ms) an event falls in, counted in the database
+const bucketOf = (step: number) => sql`floor(extract(epoch from t.at) * 1000 / ${step})::bigint * ${step}`;
+
 // Every engagement on the account's posts and profile, and its own new posts,
-// as (engagement_type, at, verified actor). The types are X's: Displayed is an
-// impression, Fav a like, ProfilePic a profile visit.
-const events = (userId: string, from: number, to: number) => sql`
-	select t.type, t.at, coalesce(a.verified_type is not null, false) as verified from (
+// counted per (engagement_type, step, verified actor). The types are X's:
+// Displayed is an impression, Fav a like, ProfilePic a profile visit.
+const events = (userId: string, from: number, to: number, step: number, byVerified: boolean) => sql`
+	select t.type, ${step ? bucketOf(step) : sql`${from}::bigint`} as bucket,
+		${byVerified ? sql`coalesce(a.verified_type is not null, false)` : sql`false`} as verified, count(*)::int as count from (
 		select 'Displayed' as type, v.created_at as at, v.user_id as actor from post_views v join posts p on p.id = v.post_id
 			where p.user_id = ${userId}::bigint and v.user_id <> p.user_id
 		union all select 'Fav', l.created_at, l.user_id from likes l join posts p on p.id = l.post_id
@@ -45,35 +58,31 @@ const events = (userId: string, from: number, to: number) => sql`
 		union all select case when p.reply_to_id is not null then 'ReplyCreate' when p.quote_id is not null then 'QuoteCreate' else 'TweetCreate' end,
 			p.created_at, p.user_id from posts p where p.user_id = ${userId}::bigint
 	) t left join users a on a.id = t.actor
-	where t.at >= ${new Date(from)} and t.at < ${new Date(to)}`;
+	where t.at >= ${new Date(from)} and t.at < ${new Date(to)}
+	group by 1, 2, 3`;
 
 // X's UecMetricsTimeSeriesValue rows: counts per type (and per verified
 // actor when asked), per day, hour or for the whole range
 async function series(userId: string, from: number, to: number, granularity: "day" | "hour" | "total", byVerified: boolean) {
-	const rows = await events(userId, from, to);
 	const step = granularity === "day" ? DAY : granularity === "hour" ? 3_600_000 : 0;
-	const counts = new Map<string, { count: number; timestamp: string; engagement_type: string; is_engaging_user_verified?: boolean }>();
-	for (const r of rows as any[]) {
-		const t = r.at.getTime();
-		const bucket = step ? Math.floor(t / step) * step : from;
-		const key = `${bucket}|${r.type}|${byVerified ? r.verified : ""}`;
-		const row = counts.get(key) ?? { count: 0, timestamp: String(bucket), engagement_type: r.type, ...(byVerified ? { is_engaging_user_verified: r.verified } : {}) };
-		row.count++;
-		counts.set(key, row);
-	}
-	return [...counts.values()].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+	const rows = await events(userId, from, to, step, byVerified);
+	return (rows as any[])
+		.map((r) => ({ count: r.count, timestamp: String(r.bucket), engagement_type: r.type, ...(byVerified ? { is_engaging_user_verified: r.verified } : {}) }))
+		.sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 }
 
 // the older OrganicMetricsTimeSeries layout: one entry per day with named values
 async function followSeries(userId: string, from: number, to: number) {
-	const rows = (await series(userId, from, to, "day", false)).filter((r) => r.engagement_type === "Follow" || r.engagement_type === "Unfollow");
-	const out = [];
-	for (let day = Math.floor(from / DAY) * DAY; day < to; day += DAY) {
-		const at = (type: string) => rows.find((r) => r.engagement_type === type && Number(r.timestamp) === day)?.count ?? 0;
-		if (!at("Follow") && !at("Unfollow")) continue;
-		out.push({ metric_values: [{ metric_type: "Follows", metric_value: at("Follow") }, { metric_type: "Unfollows", metric_value: at("Unfollow") }], timestamp: { iso8601_time: new Date(day).toISOString() } });
-	}
-	return out;
+	const rows = await sql`select ${bucketOf(DAY)} as day,
+			count(*) filter (where t.type = 'Follow')::int as follows, count(*) filter (where t.type = 'Unfollow')::int as unfollows from (
+			select 'Follow' as type, f.created_at as at from follows f where f.followee_id = ${userId}::bigint
+			union all select 'Unfollow', u.created_at from unfollows u where u.followee_id = ${userId}::bigint
+		) t where t.at >= ${new Date(from)} and t.at < ${new Date(to)}
+		group by 1 order by 1`;
+	return (rows as any[]).map((r) => ({
+		metric_values: [{ metric_type: "Follows", metric_value: r.follows }, { metric_type: "Unfollows", metric_value: r.unfollows }],
+		timestamp: { iso8601_time: new Date(Number(r.day)).toISOString() },
+	}));
 }
 
 async function followers(userId: string) {
@@ -181,9 +190,9 @@ async function postCard(v: Viewer, p: any) {
 export const analyticsHandlers = {
 	accountOverviewDailyQuery: async (v: Viewer, vars: Vars) => {
 		const now = Date.now();
-		const from = ms(vars.current_from ?? vars.current_from_iso, now - 7 * DAY), to = ms(vars.current_to ?? vars.current_to_iso, now);
-		const prevFrom = ms(vars.prev_from ?? vars.prev_from_iso, from - (to - from)), prevTo = ms(vars.prev_to ?? vars.prev_to_iso, from);
-		const backFrom = ms(vars.backfill_from, now - 2 * DAY), backTo = ms(vars.backfill_to, now);
+		const [from, to] = span(ms(vars.current_from ?? vars.current_from_iso, now - 7 * DAY), ms(vars.current_to ?? vars.current_to_iso, now));
+		const [prevFrom, prevTo] = span(ms(vars.prev_from ?? vars.prev_from_iso, from - (to - from)), ms(vars.prev_to ?? vars.prev_to_iso, from));
+		const [backFrom, backTo] = span(ms(vars.backfill_from, now - 2 * DAY), ms(vars.backfill_to, now));
 		const [current, previous, backfill, follows, previousFollows, f] = await Promise.all([
 			series(v.id, from, to, "day", true),
 			series(v.id, prevFrom, prevTo, "total", true),
@@ -203,8 +212,8 @@ export const analyticsHandlers = {
 	},
 	accountOverviewHourlyQuery: async (v: Viewer, vars: Vars) => {
 		const now = Date.now();
-		const from = ms(vars.current_from, now - DAY), to = ms(vars.current_to, now);
-		const prevFrom = ms(vars.prev_from, from - (to - from)), prevTo = ms(vars.prev_to, from);
+		const [from, to] = span(ms(vars.current_from, now - DAY), ms(vars.current_to, now));
+		const [prevFrom, prevTo] = span(ms(vars.prev_from, from - (to - from)), ms(vars.prev_to, from));
 		const [current, previous, f] = await Promise.all([series(v.id, from, to, "hour", false), series(v.id, prevFrom, prevTo, "total", false), followers(v.id)]);
 		return viewerUser(v, { ...f, current_time_series: current, previous_totals: previous });
 	},
@@ -220,7 +229,7 @@ export const analyticsHandlers = {
 
 	contentPageQuery: async (v: Viewer, vars: Vars) => {
 		const now = Date.now();
-		const from = ms(vars.from_time, now - 7 * DAY), to = ms(vars.to_time, now);
+		const [from, to] = span(ms(vars.from_time, now - 7 * DAY), ms(vars.to_time, now));
 		const limit = Math.min(Math.max(Number(vars.max_results) || 100, 1), 1000);
 		const posts = await sql`select id::text, user_id::text, text, created_at, reply_to_id::text, community_id::text from posts
 			where user_id = ${v.id}::bigint and created_at >= ${new Date(from)} and created_at <= ${new Date(to)} order by id desc limit ${limit}`;
@@ -275,41 +284,36 @@ export const analyticsHandlers = {
 		const p = await ownPost(v, vars.rest_id);
 		if (!p) return tweetWrap(String(vars.rest_id ?? ""), undefined);
 		// no age, gender or app per engagement here: one row per day and type
-		const days = await postSeries(p.id, p.created_at.getTime(), Date.now() + 1, DAY);
+		const days = await postSeries(p.id, ...span(p.created_at.getTime(), Date.now() + 1), DAY);
 		return tweetWrap(p.id, { uec_metrics_daily_time_series_count: days, uec_country_metrics_daily_time_series_count: [] });
 	},
 	overviewDataPostQuery: async (v: Viewer, vars: Vars) => {
 		const p = await ownPost(v, vars.rest_id);
 		if (!p) return { data: { result: { id: gid("TweetResults", String(vars.rest_id ?? "")) } } };
-		const days = await postSeries(p.id, ms(vars.from_time, p.created_at.getTime()), ms(vars.to_time, Date.now()) + 1, DAY);
+		const days = await postSeries(p.id, ...span(ms(vars.from_time, p.created_at.getTime()), ms(vars.to_time, Date.now()) + 1), DAY);
 		return { data: { result: { id: gid("TweetResults", p.id), result: { __typename: "Tweet", id: gid("Tweet", p.id), organic_metrics_time_series: organic(days) } } } };
 	},
 	overviewDataUserQuery: async (v: Viewer, vars: Vars) => {
 		const now = Date.now();
-		const days = await series(v.id, ms(vars.from_time, now - 28 * DAY), ms(vars.to_time, now) + 1, "day", false);
+		const days = await series(v.id, ...span(ms(vars.from_time, now - 28 * DAY), ms(vars.to_time, now) + 1), "day", false);
 		return { data: { result: { id: gid("UserResults", v.id), result: { __typename: "User", id: gid("User", v.id), organic_metrics_time_series: organic(days) } } } };
 	},
 };
 
 // one post's engagements per step (an hour or a day)
 async function postSeries(postId: string, from: number, to: number, step: number) {
-	const rows = await sql`select t.type, t.at from (
+	const rows = await sql`select t.type, ${bucketOf(step)} as bucket, count(*)::int as count from (
 		select 'Displayed' as type, v.created_at as at from post_views v join posts p on p.id = v.post_id where v.post_id = ${postId}::bigint and v.user_id <> p.user_id
 		union all select 'Fav', l.created_at from likes l join posts p on p.id = l.post_id where l.post_id = ${postId}::bigint and l.user_id <> p.user_id
 		union all select 'Retweet', r.created_at from reposts r join posts p on p.id = r.post_id where r.post_id = ${postId}::bigint and r.user_id <> p.user_id
 		union all select 'Bookmark', b.created_at from bookmarks b join posts p on p.id = b.post_id where b.post_id = ${postId}::bigint and b.user_id <> p.user_id
 		union all select 'Reply', r.created_at from posts r join posts p on p.id = r.reply_to_id where r.reply_to_id = ${postId}::bigint and r.user_id <> p.user_id
 		union all select 'QuoteTweet', q.created_at from posts q join posts p on p.id = q.quote_id where q.quote_id = ${postId}::bigint and q.user_id <> p.user_id
-	) t where t.at >= ${new Date(from)} and t.at < ${new Date(to)}`;
-	const counts = new Map<string, { timestamp: string; engagement_type: string; count: number }>();
-	for (const r of rows as any[]) {
-		const bucket = Math.floor(r.at.getTime() / step) * step;
-		const key = `${bucket}|${r.type}`;
-		const row = counts.get(key) ?? { timestamp: String(bucket), engagement_type: r.type, count: 0 };
-		row.count++;
-		counts.set(key, row);
-	}
-	return [...counts.values()].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+	) t where t.at >= ${new Date(from)} and t.at < ${new Date(to)}
+		group by 1, 2`;
+	return (rows as any[])
+		.map((r) => ({ timestamp: String(r.bucket), engagement_type: r.type as string, count: r.count as number }))
+		.sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 }
 
 // daily type counts in the OrganicMetricsTimeSeries layout, by metric names

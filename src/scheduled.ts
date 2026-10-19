@@ -127,6 +127,14 @@ export async function runDue(): Promise<number> {
 	return due.length;
 }
 
+// a pass that outlasts the interval would otherwise start again on top of itself
+let running = false;
 export function startScheduler() {
-	setInterval(() => void runDue().catch((e) => console.error("scheduler:", e)), 15_000).unref();
+	setInterval(() => {
+		if (running) return;
+		running = true;
+		void runDue()
+			.catch((e) => console.error("scheduler:", e))
+			.finally(() => (running = false));
+	}, 15_000).unref();
 }
