@@ -10,6 +10,7 @@
 
 import { type Viewer, viewerById } from "./auth";
 import { isBlockedEitherWay } from "./blocks";
+import { chatHandlers } from "./chat";
 import { sql } from "./db";
 import { newId } from "./ids";
 import { userResult } from "./model";
@@ -56,7 +57,12 @@ const DELEGATE_PRIVATE_REST = /^\/(i\/)?account\/|^\/1\.1\/notifications\/settin
 const DELEGATE_PRIVATE_READS = /XChat|DirectMessage|DmInbox|Session|Email|Phone|TwoFactor|Password|LoginHistory/;
 // Post analytics are for Admins (as the client's role screen says).
 const ANALYTICS_OPS = /^(accountOverview|activeFollowersTile|useFetchAnalytics|contentPage|postDetailsProvider|overviewData)\w*Query$/;
+// The chat app's operations go by many names (GetPublicKeysQuery hands out the
+// key backup's token), so they are refused by where they live, not by name;
+// these few tell nothing about the account's messages.
+const CHAT_HARMLESS = new Set(["viewerQuery", "useDirectCallSetupQuery", "GetExternalAppIntegrationsQuery"]);
 export function delegateMay(role: Role, method: string, path: string, operation: string | undefined): boolean {
+	if (operation && Object.hasOwn(chatHandlers, operation) && !CHAT_HARMLESS.has(operation)) return false;
 	if (operation && role !== "Admin" && ANALYTICS_OPS.test(operation)) return false;
 	if (operation) return method === "GET" ? !DELEGATE_PRIVATE_READS.test(operation) : !DELEGATE_DENIED_OPS.test(operation);
 	if (DELEGATE_PRIVATE_REST.test(path)) return false;

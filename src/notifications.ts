@@ -291,7 +291,8 @@ export async function pushItems(viewerId: string, sinceMs: number): Promise<Push
 	const list = await items(viewerId, { after: sinceMs, limit: 20, mentionsOnly: false });
 	const userIds = [...new Set(list.flatMap((i) => (i.kind === "post" || i.kind === "staff" ? [] : i.users)))];
 	const postIds = [...new Set(list.flatMap((i) => (i.kind === "staff" || !i.postId ? [] : [i.postId])))];
-	const [users, posts] = await Promise.all([usersByIds(viewerId, userIds), postsByIds(viewerId, postIds)]);
+	// a push isn't the post being seen: no view is counted
+	const [users, posts] = await Promise.all([usersByIds(viewerId, userIds), postsByIds(viewerId, postIds, true, { views: false })]);
 	const name = (u?: User) => (u ? u.name || u.screen_name : "Someone");
 	const snippet = (p?: PostRow) => (p ? `: ${clip(p.text)}` : "");
 	const out: PushItem[] = [];

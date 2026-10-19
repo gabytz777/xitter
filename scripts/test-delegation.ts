@@ -108,6 +108,12 @@ try {
 	check(r.status === 403, "the automation label can't be changed", r.status);
 	r = await member.get("XChatDmSettingsQuery", {}, owner.id);
 	check(r.status === 403, "chat is off-limits", r.status);
+	r = await member.get("GetPublicKeysQuery", { ids: [owner.id], include_juicebox_tokens: true }, owner.id);
+	check(r.status === 403, "the account's chat keys and key backup token are off-limits", r.status);
+	r = await member.get("GetInboxPageRequestQuery", {}, owner.id);
+	check(r.status === 403, "the account's inbox is off-limits", r.status);
+	r = await member.gql("DeleteMessageMutation", { conversation_id: `${owner.id}-${other.id}`, sequence_ids: [] }, owner.id);
+	check(r.status === 403, "the account's messages can't be deleted", r.status);
 	r = await member.get("useFetchAnalyticsQuery", {}, owner.id);
 	check(r.status === 403, "a Contributor can't see post analytics", r.status);
 	r = await member.gql("useAddMemberModalMutation_add_Mutation", { userId: other.id, delegationGroupId: owner.id, selectedRole: "Contributor" }, owner.id);

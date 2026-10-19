@@ -8,6 +8,7 @@ import { blockedNameIn } from "./names";
 import { sql } from "./db";
 import { isFlag } from "./flags";
 import { newId } from "./ids";
+import { superadminNameHere } from "./superadmins";
 import { getSetting, settings } from "./settings";
 
 // Eight digits ("4821-0937"): X's sign-up dialog takes the code in digit boxes,
@@ -34,7 +35,7 @@ const RESERVED = new Set(
 	"all home explore notifications messages chat settings search compose i login logout signup signin register admin root api public media abs abouts about tos privacy help support account accounts verified premium jobs grok lists bookmarks communities topics hashtag intent share oauth xitter twitter x moderator mod staff system".split(" "),
 );
 
-export const isReserved = (name: string) => RESERVED.has(name.toLowerCase());
+export const isReserved = (name: string) => RESERVED.has(name.toLowerCase()) || superadminNameHere(name);
 
 // handles staff may give an account in the admin panel: any characters up to
 // 50, except what would break a profile address, a list of names or a mention
@@ -57,7 +58,7 @@ export function usernameProblem(name: string): string | null {
 export async function usernameState(raw: string): Promise<"available" | "taken" | "invalid"> {
 	const screenName = raw.trim().replace(/^@/, "");
 	if (!/^[A-Za-z0-9_]{4,15}$/.test(screenName)) return "invalid";
-	if (RESERVED.has(screenName.toLowerCase())) return "taken";
+	if (isReserved(screenName)) return "taken";
 	const [taken] = await sql`select 1 from users where lower(screen_name) = lower(${screenName})`;
 	return taken || (await handleHeld(screenName)) ? "taken" : "available";
 }
@@ -96,7 +97,7 @@ export async function checkSignup(f: SignupForm) {
 	const name = f.name.trim() || screenName;
 	const problem = usernameProblem(screenName);
 	if (problem) throw new SignupError(problem);
-	if (RESERVED.has(screenName.toLowerCase())) throw new SignupError("That username is reserved.");
+	if (isReserved(screenName)) throw new SignupError("That username is reserved.");
 	if (await handleHeld(screenName)) throw new SignupError("That username isn't available.");
 	// a blocked word in the handle or name (names.ts): no account at all
 	if (blockedNameIn(screenName, name) || hateInName(screenName, name)) throw new SignupError("That username isn't allowed here.");

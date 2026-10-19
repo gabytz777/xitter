@@ -80,32 +80,41 @@ async function rank(viewerId: string, asOf: string): Promise<Ranked> {
 					where rp.user_id = ${viewerId}::bigint and rp.created_at > ${at}::timestamptz - interval '30 days' group by 1
 			) x group by author
 		),
-		scored as (
-			select c.*,
+		-- what depends only on the post, once per post: a viral post reposted
+		-- hundreds of times was counted again for every one of its reposts
+		per_post as materialized (
+			select d.post_id,
 				-- on a log scale: raw counts let one answered reply outweigh days of age
 				ln(2
-				 + (select count(*) from likes l where l.post_id = c.post_id)
-				 + 2 * (select count(*) from reposts r where r.post_id = c.post_id)
-				 + 27 * (select count(*) from posts rp where rp.reply_to_id = c.post_id)
-				 + 150 * (select count(*) from posts rp where rp.reply_to_id = c.post_id
-					and exists (select 1 from posts ar where ar.reply_to_id = rp.id and ar.user_id = c.original_author))
-				)
-				-- people the viewer follows: their posts and reposts, and what they liked or reposted
-				* (case when c.author_id in (select followee_id from follows where follower_id = ${viewerId}::bigint) then 2.0 else 1.0 end)
-				* (case when exists (select 1 from likes l join follows fw on fw.followee_id = l.user_id
-						where l.post_id = c.post_id and fw.follower_id = ${viewerId}::bigint)
+				 + (select count(*) from likes l where l.post_id = d.post_id)
+				 + 2 * (select count(*) from reposts r where r.post_id = d.post_id)
+				 + 27 * (select count(*) from posts rp where rp.reply_to_id = d.post_id)
+				 + 150 * (select count(*) from posts rp where rp.reply_to_id = d.post_id
+					and exists (select 1 from posts ar where ar.reply_to_id = rp.id and ar.user_id = d.original_author))
+				) as engagement,
+				-- what people the viewer follows liked or reposted
+				(case when exists (select 1 from likes l join follows fw on fw.followee_id = l.user_id
+						where l.post_id = d.post_id and fw.follower_id = ${viewerId}::bigint)
 					or exists (select 1 from reposts r join follows fw on fw.followee_id = r.user_id
-						where r.post_id = c.post_id and fw.follower_id = ${viewerId}::bigint) then 1.5 else 1.0 end)
-				* (case when ${followedTopicMatch(viewerId, sql`c.post_id`)} then 1.5 else 1.0 end)
+						where r.post_id = d.post_id and fw.follower_id = ${viewerId}::bigint) then 1.5 else 1.0 end) as social,
+				(case when ${followedTopicMatch(viewerId, sql`d.post_id`)} then 1.5 else 1.0 end) as topic,
 				-- authors the viewer engaged with in the last month, up to double
-				* (1 + least(1.0, 0.1 * coalesce((select af.n from affinity af where af.author = c.original_author), 0)))
+				(1 + least(1.0, 0.1 * coalesce((select af.n from affinity af where af.author = d.original_author), 0))) as affinity,
 				-- the viewer's own posts are known to them already
-				* (case when c.original_author = ${viewerId}::bigint then 0.5 else 1.0 end)
+				(case when d.original_author = ${viewerId}::bigint then 0.5 else 1.0 end) as own
+			from (select distinct post_id, original_author from candidates) d
+		),
+		scored as (
+			select c.*,
+				p.engagement
+				-- people the viewer follows: their posts and reposts
+				* (case when c.author_id in (select followee_id from follows where follower_id = ${viewerId}::bigint) then 2.0 else 1.0 end)
+				* p.social * p.topic * p.affinity * p.own
 				-- halves every HALF_LIFE hours: a day-old post needs about 50 times the
 				-- engagement of a new one, so a quiet instance's feed still moves
 				* power(0.5, greatest(extract(epoch from (${at}::timestamptz - c.created_at)) / 3600, 0) / ${HALF_LIFE})
 				as score
-			from candidates c
+			from candidates c join per_post p on p.post_id = c.post_id
 		),
 		-- one entry per post: the best of the post itself and its reposts
 		best as (

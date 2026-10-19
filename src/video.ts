@@ -19,6 +19,10 @@ const FFPROBE = process.env.FFPROBE ?? "ffprobe";
 // priority, and killed when a job runs far longer than its file needs
 const THREADS = process.env.FFMPEG_THREADS ?? "2";
 const PROBE_MS = 60_000;
+// Uploads are read only as these containers and only from the file itself: left
+// to guess, ffmpeg took a text "ffconcat" playlist naming other media files and
+// copied them into the uploader's video.
+const INPUT = ["-protocol_whitelist", "file", "-format_whitelist", "mov,mp4,m4a,3gp,matroska,webm,avi,mpegts"];
 const STEP_MS = 120_000;
 
 // progress of running jobs, in percent
@@ -57,7 +61,7 @@ function spawnLimited(cmd: string[], ms: number, stderr: "pipe" | "ignore") {
 }
 
 async function probe(file: string): Promise<Probe | undefined> {
-	const p = spawnLimited([FFPROBE, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", file], PROBE_MS, "ignore");
+	const p = spawnLimited([FFPROBE, "-v", "error", ...INPUT, "-print_format", "json", "-show_format", "-show_streams", file], PROBE_MS, "ignore");
 	const out = await new Response(p.stdout).text();
 	if ((await p.exited) !== 0) return undefined;
 	const info = JSON.parse(out);
@@ -113,7 +117,7 @@ async function convert(dir: string, id: string) {
 					"-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
 					"-c:a", "aac", "-b:a", "128k", "-ac", "2",
 				];
-		if (!(await run(["-i", src, "-map", "0:v:0", "-map", "0:a:0?", ...video, "-movflags", "+faststart", "-f", "mp4", tmp], id, info.seconds)))
+		if (!(await run([...INPUT, "-i", src, "-map", "0:v:0", "-map", "0:a:0?", ...video, "-movflags", "+faststart", "-f", "mp4", tmp], id, info.seconds)))
 			return await fail("The video could not be converted.");
 		if (!(await run(["-ss", String(Math.min(1, info.seconds / 2)), "-i", tmp, "-frames:v", "1", "-q:v", "3", posterFile(dir, id)], id, 0)))
 			return await fail("The video could not be converted.");

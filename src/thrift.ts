@@ -35,12 +35,16 @@ export const int = (v: Value | undefined) => (v?.t === 10 ? v.v : v?.t === 8 || 
 // Everything here comes from clients. A negative length once moved the cursor
 // backwards, so one 7-byte message looped forever and hung the server: lengths
 // and counts must be non-negative and fit in what is left (every element takes
-// at least a byte), and nesting stops at MAX_DEPTH.
+// at least a byte), and nesting stops at MAX_DEPTH. Each value becomes an
+// object, so a blob of one-byte list elements grew ~50x in memory: a decode
+// stops after MAX_VALUES, far more than any chat event holds.
 const MAX_DEPTH = 64;
+const MAX_VALUES = 50_000;
 
 class Reader {
 	pos = 0;
 	depth = 0;
+	values = 0;
 	view: DataView;
 	constructor(public buf: Uint8Array) {
 		this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -54,6 +58,7 @@ class Reader {
 	}
 	value(t: number): Value {
 		if (++this.depth > MAX_DEPTH) throw new Error("thrift: nested too deep");
+		if (++this.values > MAX_VALUES) throw new Error("thrift: too many values");
 		try {
 			return this.read(t);
 		} finally {
@@ -134,41 +139,71 @@ export function decode(buf: Uint8Array): Struct {
 	return s;
 }
 
+// written into one growing buffer: a number per byte took ~300 bytes of heap
+// for each byte of a large event
+class Writer {
+	buf = new Uint8Array(256);
+	pos = 0;
+	room(n: number) {
+		if (this.pos + n <= this.buf.length) return;
+		const next = new Uint8Array(Math.max(this.buf.length * 2, this.pos + n));
+		next.set(this.buf.subarray(0, this.pos));
+		this.buf = next;
+	}
+	u8(n: number) {
+		this.room(1);
+		this.buf[this.pos++] = n & 255;
+	}
+	i16(n: number) {
+		this.room(2);
+		this.buf[this.pos++] = (n >> 8) & 255;
+		this.buf[this.pos++] = n & 255;
+	}
+	i32(n: number) {
+		this.room(4);
+		this.buf[this.pos++] = (n >>> 24) & 255;
+		this.buf[this.pos++] = (n >> 16) & 255;
+		this.buf[this.pos++] = (n >> 8) & 255;
+		this.buf[this.pos++] = n & 255;
+	}
+	bytes(b: Uint8Array) {
+		this.room(b.length);
+		this.buf.set(b, this.pos);
+		this.pos += b.length;
+	}
+}
+
 export function encode(s: Struct): Uint8Array {
-	const out: number[] = [];
-	const u8 = (n: number) => out.push(n & 255);
-	const i16 = (n: number) => out.push((n >> 8) & 255, n & 255);
-	const i32 = (n: number) => out.push((n >>> 24) & 255, (n >> 16) & 255, (n >> 8) & 255, n & 255);
+	const w = new Writer();
 	const value = (x: Value) => {
 		switch (x.t) {
 			case 2:
-				return u8(x.v ? 1 : 0);
+				return w.u8(x.v ? 1 : 0);
 			case 3:
-				return u8(x.v);
+				return w.u8(x.v);
 			case 4: {
 				const b = new Uint8Array(8);
 				new DataView(b.buffer).setFloat64(0, x.v);
-				return out.push(...b);
+				return w.bytes(b);
 			}
 			case 6:
-				return i16(x.v);
+				return w.i16(x.v);
 			case 8:
-				return i32(x.v);
+				return w.i32(x.v);
 			case 10: {
 				const b = new Uint8Array(8);
 				new DataView(b.buffer).setBigInt64(0, x.v);
-				return out.push(...b);
+				return w.bytes(b);
 			}
 			case 11:
-				i32(x.v.length);
-				for (const b of x.v) out.push(b);
-				return;
+				w.i32(x.v.length);
+				return w.bytes(x.v);
 			case 12:
 				return fieldsOf(x.v);
 			case 13:
-				u8(x.k);
-				u8(x.e);
-				i32(x.v.length);
+				w.u8(x.k);
+				w.u8(x.e);
+				w.i32(x.v.length);
 				for (const [k, v] of x.v) {
 					value(k);
 					value(v);
@@ -176,22 +211,22 @@ export function encode(s: Struct): Uint8Array {
 				return;
 			case 14:
 			case 15:
-				u8(x.e);
-				i32(x.v.length);
+				w.u8(x.e);
+				w.i32(x.v.length);
 				for (const v of x.v) value(v);
 				return;
 		}
 	};
 	const fieldsOf = (s: Struct) => {
 		for (const [id, x] of Object.entries(s).sort(([a], [b]) => Number(a) - Number(b))) {
-			u8(x.t);
-			i16(Number(id));
+			w.u8(x.t);
+			w.i16(Number(id));
 			value(x);
 		}
-		u8(0);
+		w.u8(0);
 	};
 	fieldsOf(s);
-	return Uint8Array.from(out);
+	return w.buf.slice(0, w.pos);
 }
 
 export const fromBase64 = (s: string) => new Uint8Array(Buffer.from(s, "base64"));

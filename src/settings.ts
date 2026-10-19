@@ -87,6 +87,9 @@ const DEFAULTS = {
 	// the client's own feature switches, set by an admin (Admin > Feature
 	// switches); they win over the build's values and Xitter's own (shell.ts)
 	switch_overrides: {} as Record<string, unknown>,
+	// staff-permissions.ts: what moderators and support may do, where an admin
+	// changed it from the defaults (Admin > Staff permissions)
+	staff_permissions: { moderator: {} as Record<string, boolean>, support: {} as Record<string, boolean> },
 };
 export type Settings = typeof DEFAULTS;
 type Key = keyof Settings;

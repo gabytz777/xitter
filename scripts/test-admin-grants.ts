@@ -39,6 +39,9 @@ try {
 	await asA("setRole", { id: b.id, role: "admin" });
 	const asB = await admin(b.name);
 	check((await asB("setRole", { id: a.id, role: null })) === 403, "the new admin can't demote the one who promoted them");
+	await sql`update users set role = 'support' where id = ${a.id}::bigint`;
+	check((await asA("resetPassword", { id: b.id })) === 403, "once demoted, they can't reset the password of the admin they made");
+	check((await asA("userSessions", { id: b.id })) === 403, "or look at that admin's sessions");
 	console.log(`all passed (${checks})`);
 } finally {
 	for (const id of created) {

@@ -35,6 +35,12 @@ const RULES: [RegExp, string][] = [
 	// the site's own links, also when the address is the start of a longer string
 	// or template (profile hrefs, share links); subdomains are not matched
 	[/https:\/\/x\.com(?=["'`$/?#])/g, PUBLIC_ORIGIN],
+	// The profile editor leaves GIFs out of its avatar and banner pickers even
+	// though the upload API and the crop patch below support animated GIFs.
+	[/(location:\w+\.rz\.(?:Avatar|ProfileBanner),mediaItem:)/g, "acceptGifs:!0,$1"],
+	// ...and its "Edit media" cropper takes only isImage files, which a GIF
+	// isn't (it is isGif), so it got nothing and spun forever
+	[/(_getMedia=\(\)=>\{let\{media:(\w+)\}=this\.props;return \2&&\2\.mediaFile&&)\2\.mediaFile\.isImage\?/g, "$1($2.mediaFile.isImage||$2.mediaFile.isGif)?"],
 	// the upload host is assembled from a variable, which would force https and drop the port
 	[/`https:\/\/\$\{(\w+)\}\/i\/media\//g, "`${location.origin}/i/media/"],
 	[/"x\.com"/g, `"${PUBLIC_HOSTNAME}"`],

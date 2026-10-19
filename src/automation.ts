@@ -58,7 +58,7 @@ export async function automationRoute(req: Request, viewer: Viewer): Promise<Res
 	// the same tries as signing in to that account
 	const account = name.toLowerCase();
 	if (used("password", account)) return automationPage(req, viewer, current, "Too many tries for that account. Wait 15 minutes.");
-	const [owner] = await sql`select id::text, screen_name, password_hash, status, automated_by from users where lower(screen_name) = ${account}`;
+	const [owner] = await sql`select id::text, screen_name, password_hash, status, automated_by from users where lower(screen_name) = ${account} and instance is null`;
 	const ok = owner && (await Bun.password.verify(password, owner.password_hash).catch(() => false));
 	if (!ok) {
 		hit("password", account);

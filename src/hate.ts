@@ -97,10 +97,24 @@ const ANY_START = new Set(compiled.flatMap((t) => [...t.starts]));
 // the terms a backward form starting with a letter may be, in TERMS order
 const BACKWARD_BY_START = Map.groupBy(compiled, (t) => t.word[0]);
 
+const WHOLE_ANY = new RegExp(compiled.map((t) => t.whole.source).join("|"), "u");
+const INSIDE_ANY = new RegExp(compiled.filter((t) => t.anywhere).map((t) => t.inside.source).join("|"), "u");
+const runsOf = (word: string) => word.replace(/(\p{L})\1*/gu, (run, c) => (run.length > 1 ? `${c}{${run.length},}` : `${c}+`));
+const BACKWARD_ANY = new RegExp(
+	compiled
+		.map((t) => {
+			const suffixes = (t.anywhere ? "s|z|h|hs|az|as|ers|er|a" : (t.suffix ?? "s")).split("|").map((x) => [...x].reverse().join(""));
+			return `^(?:${suffixes.join("|")})?${runsOf([...t.word].reverse().join(""))}$`;
+		})
+		.join("|"),
+	"u",
+);
+
 function termIn(candidate: string, wholeOnly: boolean) {
 	const stripped = candidate.replace(/^@+|!+$/g, "");
 	const forms = stripped === candidate ? [candidate] : [candidate, stripped];
 	if (wholeOnly && !forms.some((f) => ANY_START.has(f[0]))) return undefined;
+	if (!forms.some((f) => WHOLE_ANY.test(f) || (!wholeOnly && INSIDE_ANY.test(f)))) return undefined;
 	return compiled.find((t) =>
 		forms.some((form) => {
 			const c = t.benign ? form.replace(t.benign, " ") : form;
@@ -114,7 +128,7 @@ const reverse = (s: string) => [...s].reverse().join("");
 const backwardIn = (candidate: string) => {
 	const end = candidate.replace(/@+$/, "");
 	const terms = BACKWARD_BY_START.get(plain(end[end.length - 1] ?? ""));
-	if (!terms) return undefined;
+	if (!terms || !BACKWARD_ANY.test(plain(candidate.replace(/@+$|^!+/g, "")))) return undefined;
 	const form = plain(reverse(candidate).replace(/^@+|!+$/g, ""));
 	return terms.find((t) => t.backward.test(t.benign ? form.replace(t.benign, " ") : form));
 };
@@ -127,13 +141,16 @@ function slurIn(tokens: string[]): HateHit | undefined {
 		const hit = t && found(t, i);
 		if (hit) return hit;
 	}
+	const short = tokens.map((token) => [...token].length <= 5);
+	const opens = tokens.map((token) => ANY_START.has(token.replace(/^@+/, "")[0] ?? ""));
+	const closes = tokens.map((token) => BACKWARD_BY_START.has(plain(token.replace(/@+$/, "").at(-1) ?? "")));
 	for (let i = 0; i < tokens.length; i++) {
-		let joined = "";
-		for (let j = i; j < Math.min(tokens.length, i + 8); j++) {
-			if ([...tokens[j]].length > 5) break;
+		if (!short[i]) continue;
+		let joined = tokens[i];
+		for (let j = i + 1; j < Math.min(tokens.length, i + 8) && short[j]; j++) {
 			joined += tokens[j];
-			if (j === i) continue;
-			const t = termIn(joined, true) ?? backwardIn(joined);
+			if (!opens[i] && !closes[j]) continue;
+			const t = (opens[i] ? termIn(joined, true) : undefined) ?? (closes[j] ? backwardIn(joined) : undefined);
 			const hit = t && found(t, i);
 			if (hit) return hit;
 		}

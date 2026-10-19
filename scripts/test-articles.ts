@@ -29,7 +29,9 @@ async function session(username: string) {
 		await fetch(`${origin}/i/media/upload.json?command=FINALIZE&media_id=${init.media_id_string}`, { method: "POST", headers });
 		return init.media_id_string as string;
 	}
-	return { gql, get, upload };
+	const rest = async (path: string, form: Record<string, string>) =>
+		(await fetch(`${origin}/i/api/1.1/${path}`, { method: "POST", headers, body: new URLSearchParams(form) })).json();
+	return { gql, get, upload, rest };
 }
 
 let failures = 0;
@@ -41,6 +43,7 @@ function check(label: string, ok: boolean, detail: unknown = "") {
 const a = await session(nameA);
 const b = await session(nameB);
 const userA = (await a.get("UserByScreenName", { screen_name: nameA })).data.user.result;
+const userB = (await b.get("UserByScreenName", { screen_name: nameB })).data.user.result;
 
 // what the editor sends when a draft is created: an empty document
 const created = (await a.gql("ArticleEntityDraftCreate", { content_state: { blocks: [], entity_map: [] } })).data.articleentity_create_draft.article_entity_results.result;
@@ -94,6 +97,14 @@ check("the profile's Articles tab lists it", tab.some((e: any) => e.content?.ite
 check("the profile says it has articles", (await b.get("UserByScreenName", { screen_name: nameA })).data.user.result.user_seed_tweet_count > 0);
 const redirect = (await b.get("ArticleRedirectScreenQuery", { articleEntityId: id })).data.article_result_by_rest_id.result;
 check("/i/article/<id> resolves to the post", redirect?.metadata?.tweet_results?.rest_id === postId && redirect.metadata.author_results?.result?.core?.screen_name === nameA);
+const listed = async () =>
+	((await b.get("ArticleEntitiesSlice", { userId: userA.rest_id, lifecycle: "Published" })).data.user.result.articles_article_mixer_slice.items as any[]).some(
+		(i) => i.article_entity_results.result.rest_id === id,
+	);
+check("others see the published article in the author's list", await listed());
+await a.rest("blocks/create.json", { user_id: userB.rest_id });
+check("an author who blocked you doesn't list theirs for you", !(await listed()));
+await a.rest("blocks/destroy.json", { user_id: userB.rest_id });
 
 if (process.env.KEEP) {
 	console.log(`kept /${nameA}/article/${postId}`);

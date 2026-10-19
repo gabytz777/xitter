@@ -8,6 +8,7 @@
 import type { Viewer } from "./auth";
 import { sql } from "./db";
 import { mediaForPosts, mediaUrl, posterUrl } from "./media";
+import { seenBy } from "./posts";
 import { userResult } from "./model";
 import { userById } from "./users";
 
@@ -259,7 +260,7 @@ export const analyticsHandlers = {
 		const p = await ownPost(v, vars.rest_id);
 		if (!p) return tweetWrap(String(vars.rest_id ?? ""), undefined);
 		const card = await postCard(v, p);
-		const parent = p.reply_to_id ? (await sql`select id::text, user_id::text, text, created_at from posts where id = ${p.reply_to_id}::bigint`)[0] : undefined;
+		const parent = p.reply_to_id ? (await sql`select p.id::text, p.user_id::text, p.text, p.created_at from posts p join users u on u.id = p.user_id where p.id = ${p.reply_to_id}::bigint and ${seenBy(v.id)} and u.id not in (select blocker_id from blocks where blocked_id = ${v.id}::bigint)`)[0] : undefined;
 		const parentUser = parent ? await userById(v.id, parent.user_id) : undefined;
 		return tweetWrap(p.id, {
 			...card,

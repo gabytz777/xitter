@@ -11,6 +11,7 @@ export const SLOTS = {
 	"icon-dark": "Icon on dark themes (narrow sidebar)",
 	"icon-light": "Icon on the light theme",
 	favicon: "Browser tab icon",
+	"app-icon": "PWA app icon (home screen, notifications): square, 512×512, no transparency",
 } as const;
 export type Slot = keyof typeof SLOTS;
 

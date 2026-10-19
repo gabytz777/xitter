@@ -7,15 +7,16 @@ const from = (peer: string | undefined, header?: string) => {
 	return requestIp(req);
 };
 
-test("Cloudflare and local proxies pass the visitor's address on", () => {
+test("Cloudflare passes the visitor's address on", () => {
 	expect(from("172.70.1.2", "203.0.113.5")).toBe("203.0.113.5");
 	expect(from("2606:4700::1", "203.0.113.5")).toBe("203.0.113.5");
-	expect(from("127.0.0.1", "203.0.113.5")).toBe("203.0.113.5");
-	expect(from("::ffff:172.18.0.1", "203.0.113.5")).toBe("203.0.113.5");
 });
 
 test("anyone else reaching the origin can't pick an address", () => {
 	expect(from("198.51.100.20", "203.0.113.5")).toBe("198.51.100.20");
+	// a local nginx or Caddy hands the visitor's own header on
+	expect(from("127.0.0.1", "203.0.113.5")).toBe("127.0.0.1");
+	expect(from("::ffff:172.18.0.1", "203.0.113.5")).toBe("::ffff:172.18.0.1");
 	expect(from("198.51.100.20")).toBe("198.51.100.20");
 	expect(from("172.70.1.2", "not an ip")).toBe("172.70.1.2");
 });

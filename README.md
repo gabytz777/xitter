@@ -70,6 +70,11 @@ copy during setup, and it stays on that machine.
   translator globes (blue translator, gold translator moderator, yellow approver),
   roles, organisations, posts, reports, invites, instance settings,
   feature switches, announcements, topics, Explore cards and an audit log
+- Staff roles (admin, moderator, support) whose powers an admin chooses: Admin >
+  Staff permissions turns each permission (changing standing, deleting posts,
+  editing profiles, resetting passwords…) on or off for moderators and support,
+  and who sees IP addresses, email addresses, invite codes and server errors
+  (`src/staff-permissions.ts`; `bun scripts/test-staff-permissions.ts` checks it)
 
 Not built yet: Spaces and live video, Moments, signing in other apps (Connected
 apps stays empty). Email is sent through
@@ -145,6 +150,15 @@ any variable from the Configuration table can be added to `.env`.
 `FETCH_CLIENT=0` skips the first-start download; `docker compose exec app bun
 scripts/fetch-client.ts --latest` re-pins the build.
 
+For an optional PgBouncer connection pool, add `DB_HOST=pool` and
+`DB_PORT=6432` to `.env`, then start with
+`docker compose --profile sqlpool up -d --build`. PgBouncer uses session pooling
+so Bun's prepared statements and startup migration keep their connection
+semantics. `PGBOUNCER_POOL_SIZE` defaults to 20 server connections; tune it
+alongside `DB_POOL_MAX` for the number of app replicas. Backups use a direct
+PostgreSQL connection. The Compose PostgreSQL service also uses conservative
+cache and autovacuum settings; adjust them for the host's memory and workload.
+
 ### Keep these private
 
 - An `auth_token` cookie is a live login to your X account. Use it only for
@@ -157,6 +171,7 @@ scripts/fetch-client.ts --latest` re-pins the build.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DATABASE_URL` | `postgres://dev@localhost:5432/xitter` | Postgres connection |
+| `BACKUP_DATABASE_URL` | `DATABASE_URL` | Direct Postgres connection for `pg_dump` when the app uses a pooler |
 | `DB_POOL_MAX` | `20` | Postgres connections the server keeps open |
 | `DB_STATEMENT_TIMEOUT`, `DB_LOCK_TIMEOUT` | `30s`, `10s` | A query running or waiting on a lock longer than this is cancelled, so one stuck query can't hold every connection (the migration at start-up has no limit) |
 | `PORT` | `3000` | Listen port |
@@ -169,6 +184,7 @@ scripts/fetch-client.ts --latest` re-pins the build.
 | `SOURCE_URL` | this repository | The source link shown to users |
 | `LOG_REQUESTS` | unset | `1` logs every API call, `errors` also prints the client's error reports |
 | `RATE_LIMITS` | on | `off` turns the rate limits off (for the test scripts; limits are in `src/ratelimit.ts`, `scripts/test-ratelimit.ts` checks them) |
+| `TRUSTED_PROXIES` | unset | Comma-separated addresses or ranges (`127.0.0.1`, `172.16.0.0/12`) whose `CF-Connecting-IP` header is believed, besides Cloudflare's own ranges: set it to a Cloudflare tunnel's address. A plain nginx or Caddy passes the visitor's header on, so leave it out of this list |
 | `EMBED_PROXY` | `https://cors.estrogen.delivery/` | where link previews are fetched from and their images served, as `<proxy>?url=<link>`, so neither the instance nor its readers reach the linked site |
 | `JUICEBOX_URL` | `http://localhost:8580` | Private address of the key-backup realm, proxied through `/juicebox/` |
 | `CHAT_TOKEN_SECRET` | saved in `data/chat-secrets.json` | Signing secret for chat socket tokens |
@@ -181,6 +197,12 @@ scripts/fetch-client.ts --latest` re-pins the build.
 
 Everything else (name, sign-up mode, features, limits, announcement, rules,
 logos) is set in the admin panel.
+
+## Federation
+
+Instances listed in `instances.json` share public accounts and posts with each
+other. [FEDERATION.md](FEDERATION.md) covers the list, the protocol,
+defederation and superadmins.
 
 ## Encrypted chat and key backup
 

@@ -102,7 +102,9 @@ try {
 	await sub.post("/1.1/notifications/settings/save.json", { push_device_info: { ...device, settings: { mentions: "on" } } });
 	await other.gql("FavoriteTweet", { tweet_id: post.id });
 	await waitFor(2, 20);
-	check("a subscription the push service says is gone is dropped", !(await sql`select 1 from push_subscriptions where endpoint = ${endpoint}`).length);
+	const gone = async () => !(await sql`select 1 from push_subscriptions where endpoint = ${endpoint}`).length;
+	for (let i = 0; i < 20 && !(await gone()); i++) await Bun.sleep(250);
+	check("a subscription the push service says is gone is dropped", await gone());
 } finally {
 	await other.form("/1.1/friendships/destroy.json", { user_id: subId });
 	for (const id of made.reverse()) await sql`delete from posts where id = ${id}::bigint`;

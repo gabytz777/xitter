@@ -13,6 +13,7 @@ type Vars = Record<string, any>;
 const MAX_PENDING = 100;
 const MIN_LEAD_SECONDS = 30;
 const MAX_LEAD_DAYS = 365 * 2;
+const RETRIES = 5;
 
 const ids = (value: unknown): string[] => (Array.isArray(value) ? value.map(String).filter(isId) : []);
 
@@ -107,22 +108,29 @@ export const scheduledHandlers = {
 	FetchDraftTweets: async (v: Viewer) => ({ data: { viewer: { draft_list: { response_data: await list(v, "draft") } } } }),
 };
 
-// posts whose time has come; a failure drops the entry so it can't loop
+// posts whose time has come; a refused post is dropped, and one that failed for
+// another reason (the database timing out) is tried again later, a few times
 export async function runDue(): Promise<number> {
 	const due = await sql`delete from scheduled_posts where id in (
 			select id from scheduled_posts where kind = 'scheduled' and execute_at <= now() order by execute_at limit 20 for update skip locked)
-		returning user_id::text, request`;
+		returning id::text, user_id::text, request, attempts`;
 	for (const row of due) {
 		const r = row.request as Vars;
+		let id: string;
 		try {
 			const replyTo = isId(r.in_reply_to_status_id) ? r.in_reply_to_status_id : undefined;
 			const quoteId = typeof r.attachment_url === "string" ? /\/status(?:es)?\/(\d{1,19})/.exec(r.attachment_url)?.[1] : undefined;
-			const id = await createPost(row.user_id, String(r.status ?? "").trim(), { replyToId: replyTo, quoteId });
-			const media = ids(r.media_ids);
-			if (media.length) await attachMedia(row.user_id, id, media);
+			id = await createPost(row.user_id, String(r.status ?? "").trim(), { replyToId: replyTo, quoteId });
 		} catch (e) {
 			console.error("scheduled post failed:", e instanceof Error ? e.message : e);
+			if (!(e instanceof PostError) && row.attempts < RETRIES)
+				await sql`insert into scheduled_posts (id, user_id, kind, execute_at, request, attempts)
+					values (${row.id}::bigint, ${row.user_id}::bigint, 'scheduled', now() + ${`${2 ** row.attempts} minutes`}::interval, ${JSON.stringify(row.request)}::text::jsonb, ${row.attempts + 1})
+					on conflict (id) do nothing`.catch((err) => console.error("scheduled post lost:", err instanceof Error ? err.message : err));
+			continue;
 		}
+		const media = ids(r.media_ids);
+		if (media.length) await attachMedia(row.user_id, id, media).catch((e) => console.error("scheduled post media failed:", e instanceof Error ? e.message : e));
 	}
 	return due.length;
 }

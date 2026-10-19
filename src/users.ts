@@ -142,9 +142,9 @@ export async function setProtected(userId: string, on: boolean): Promise<void> {
 export async function followList(viewerId: string, userId: string, kind: "following" | "followers" | "verified_followers", limit = 200): Promise<User[]> {
 	// a protected account's lists are for itself and its followers
 	if (userId !== viewerId) {
-		const [hidden] = await sql`select 1 from users u where u.id = ${userId}::bigint and u.protected
-			and not exists (select 1 from follows f where f.follower_id = ${viewerId}::bigint and f.followee_id = u.id)
-			and not ${staffViewer(viewerId)}`;
+		const [hidden] = await sql`select 1 from users u where u.id = ${userId}::bigint and not ${staffViewer(viewerId)} and (
+			(u.protected and not exists (select 1 from follows f where f.follower_id = ${viewerId}::bigint and f.followee_id = u.id))
+			or exists (select 1 from blocks b where b.blocker_id = u.id and b.blocked_id = ${viewerId}::bigint))`;
 		if (hidden) return [];
 	}
 	const rows =

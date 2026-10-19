@@ -69,6 +69,8 @@ export type Viewer = User & {
 	csrf: string;
 	token: string;
 	postSource?: string;
+	instance?: string | null;
+	superadmin?: boolean;
 	// set while a delegate acts as this account (delegation.ts): who they are
 	actor?: { id: string; screen_name: string; role: "Admin" | "Contributor" };
 };
@@ -90,7 +92,7 @@ export async function login(screenName: string, password: string): Promise<{ tok
 	if (password.length > 1024 || screenName.length > 64) return undefined;
 	await expireSanctions();
 	// accounts with a second factor sign in through the dialog's code step (startSession)
-	const [u] = await sql`select id, password_hash, deactivated_at from users where lower(screen_name) = lower(${screenName}) and not totp_enabled
+	const [u] = await sql`select id, password_hash, deactivated_at from users where lower(screen_name) = lower(${screenName}) and not totp_enabled and instance is null
 		and (status <> 'suspended' or deactivated_at > now() - interval '30 days')`;
 	// verify against a dummy hash when the user is unknown so timing does not reveal it
 	const ok = await Bun.password.verify(password, u?.password_hash ?? DUMMY_HASH).catch(() => false);
@@ -134,7 +136,7 @@ export function parseCookies(req: Request): Record<string, string> {
 
 import { requestCountry } from "./login-history";
 
-const viewerCols = () => sql`u.id, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.status, u.role, u.protected, u.language, u.created_at,
+const viewerCols = () => sql`u.id, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.status, u.role, u.protected, u.language, u.created_at, u.instance,
 	u.preferences->>'discoverable_by_email' = 'true' as discoverable_by_email,
 	(select coalesce(json_agg(json_build_object('id', b.id::text, 'name', b.name) order by ub.position, b.name), '[]')
 		from user_badges ub join custom_badges b on b.id = ub.badge_id where ub.user_id = u.id) as badges`;
@@ -148,9 +150,10 @@ export async function viewerById(id: string): Promise<Omit<Viewer, "csrf" | "tok
 async function loadViewer(req: Request): Promise<Viewer | undefined> {
 	const token = parseCookies(req).auth_token;
 	if (!token) return undefined;
-	const [row] = await sql`select ${viewerCols()}, s.csrf, s.token
+	const [row] = await sql`select ${viewerCols()}, s.csrf, s.token, s.superadmin
 		from sessions s join users u on u.id = s.user_id
-		where s.token = ${token} and u.status <> 'suspended'`;
+		where s.token = ${token} and u.status <> 'suspended' and (s.expires_at is null or s.expires_at > now())
+			and (u.instance is null or (s.superadmin and s.expires_at is not null))`;
 	// for the admin panel's session list; written at most once a minute
 	if (row)
 		await sql`update sessions set last_seen_at = now(), user_agent = ${(req.headers.get("user-agent") ?? "").slice(0, 500)}

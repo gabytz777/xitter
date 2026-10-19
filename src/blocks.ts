@@ -12,7 +12,7 @@ export const blockedFor = (viewerId: string) =>
 	sql`(select blocked_id from blocks where blocker_id = ${viewerId}::bigint
 		union all select blocker_id from blocks where blocked_id = ${viewerId}::bigint)`;
 
-const gone = sql`(status = 'suspended' or deactivated_at is not null)`;
+const gone = sql`(status = 'suspended' or deactivated_at is not null or instance_blocked)`;
 export const outOfView = (viewerId: string) =>
 	sql`(select id from users where ${gone} or (status = 'limited' and id <> ${viewerId}::bigint
 		and id not in (select followee_id from follows where follower_id = ${viewerId}::bigint)
@@ -40,17 +40,23 @@ export const hasMutedWord = (viewerId: string, surface: Surface, postId: ReturnT
 			and position(lower(k.keyword) in lower(mp.text)) > 0
 			and not (k.exclude_following and mp.user_id in (select followee_id from follows where follower_id = ${viewerId}::bigint)))`;
 
-export async function setBlock(blockerId: string, blockedId: string, on: boolean) {
-	if (blockerId === blockedId) return;
+export async function setBlock(blockerId: string, blockedId: string, on: boolean): Promise<boolean> {
+	if (blockerId === blockedId) return false;
 	if (!on) {
 		await sql`delete from blocks where blocker_id = ${blockerId}::bigint and blocked_id = ${blockedId}::bigint`;
-		return;
+		return true;
 	}
+	const [admin] = await sql`select 1 from users b join users t on t.id = ${blockedId}::bigint where b.id = ${blockerId}::bigint and b.instance is null and t.role = 'admin'`;
+	if (admin) return false;
 	await sql.begin(async (tx) => {
 		await tx`insert into blocks (blocker_id, blocked_id) values (${blockerId}::bigint, ${blockedId}::bigint) on conflict do nothing`;
 		await tx`delete from follows where (follower_id = ${blockerId}::bigint and followee_id = ${blockedId}::bigint)
 			or (follower_id = ${blockedId}::bigint and followee_id = ${blockerId}::bigint)`;
+		for (const t of [tx`list_members`, tx`list_subscribers`])
+			await tx`delete from ${t} m using lists l where m.list_id = l.id
+				and ((l.owner_id = ${blockerId}::bigint and m.user_id = ${blockedId}::bigint) or (l.owner_id = ${blockedId}::bigint and m.user_id = ${blockerId}::bigint))`;
 	});
+	return true;
 }
 
 export async function isBlockedEitherWay(a: string, b: string): Promise<boolean> {

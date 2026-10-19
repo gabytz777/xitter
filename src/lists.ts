@@ -334,7 +334,7 @@ async function recommended(viewerId: string, id: string, vars: Vars) {
 	const rows = vars.cursor
 		? []
 		: await sql`select f.followee_id::text as user_id from follows f where f.follower_id = ${viewerId}::bigint
-			and f.followee_id not in (select user_id from list_members where list_id = ${id}::bigint)
+			and f.followee_id not in (select m.user_id from list_members m join lists l on l.id = m.list_id where m.list_id = ${id}::bigint and l.owner_id = ${viewerId}::bigint)
 			and f.followee_id not in ${blockedFor(viewerId)} order by f.created_at desc limit 20`;
 	const users = await usersByIds(viewerId, rows.map((r: any) => r.user_id));
 	const base = BigInt(newId());

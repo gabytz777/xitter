@@ -53,7 +53,9 @@ try {
 	check((await fetch(`${origin}/i/api/xitter/client_error`, { method: "POST", headers: one.headers, body: JSON.stringify({ message: `TestError ${names[0]}`, stack: "TestError\n    at t (main.js:1:1)", page: `${origin}/home` }) })).status === 204, "browser error accepted");
 	await fetch(`${origin}/i/api/xitter/client_error`, { method: "POST", headers: one.headers, body: JSON.stringify({ message: `TestError ${names[0]}`, stack: "TestError\n    at t (main.js:1:1)", page: `${origin}/home` }) });
 	await recordError("job", new Error(`job failed for ${names[0]}`), { path: "test job" });
-	const open = (await support.admin("errors")).data.errors;
+	// stack traces show internals: admins only by default (staff-permissions.ts)
+	check((await support.admin("errors")).status === 403, "support can't read errors");
+	const open = (await admin.admin("errors")).data.errors;
 	const mine = open.find((e: any) => e.message === `TestError ${names[0]}`);
 	check(mine?.count === 2 && mine.path === "/home" && mine.screen_name === names[0], "repeats count on one row, with page and account");
 	check(open.some((e: any) => e.source === "job" && e.path === "test job"), "background job errors kept");

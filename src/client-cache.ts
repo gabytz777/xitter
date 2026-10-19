@@ -6,6 +6,7 @@ import { dirname, join, normalize } from "node:path";
 
 export const CLIENT_DIR = process.env.CLIENT_DIR ?? "client";
 export const CDN_ORIGIN = "https://abs.twimg.com";
+const downloads = new Map<string, Promise<Buffer | undefined>>();
 
 function localPath(cdnPath: string): string | undefined {
 	const clean = normalize(cdnPath).replace(/^([/\\])+/, "");
@@ -25,12 +26,20 @@ export async function getClientFile(cdnPath: string, allowFetch = true): Promise
 	if (cached || !allowFetch) return cached;
 	const p = localPath(cdnPath);
 	if (!p || (existsSync(p) && !statSync(p).isFile())) return undefined;
-	const res = await fetch(CDN_ORIGIN + cdnPath);
-	if (!res.ok) return undefined;
-	const buf = Buffer.from(await res.arrayBuffer());
-	mkdirSync(dirname(p), { recursive: true });
-	writeFileSync(p, buf);
-	return buf;
+	let pending = downloads.get(p);
+	if (!pending) {
+		pending = (async () => {
+			const res = await fetch(CDN_ORIGIN + cdnPath);
+			if (!res.ok) return undefined;
+			const buf = Buffer.from(await res.arrayBuffer());
+			mkdirSync(dirname(p), { recursive: true });
+			writeFileSync(p, buf);
+			return buf;
+		})();
+		downloads.set(p, pending);
+		void pending.then(() => downloads.delete(p), () => downloads.delete(p));
+	}
+	return pending;
 }
 
 export async function getClientFilePath(cdnPath: string): Promise<string | undefined> {

@@ -137,19 +137,20 @@ async function hydrate(viewerId: string, posts: PostRow[], quotes = true): Promi
 	return posts;
 }
 
-export async function postsByIds(viewerId: string, ids: string[], quotes = true): Promise<Map<string, PostRow>> {
+// `views: false` for lookups nobody sees as a page (push texts)
+export async function postsByIds(viewerId: string, ids: string[], quotes = true, opts: { views?: boolean } = {}): Promise<Map<string, PostRow>> {
 	if (!ids.length) return new Map();
 	const rows = await sql`${select(viewerId)} where p.id = any(${sql.array(ids, "INT8")})`;
 	const posts = await hydrate(viewerId, rows.map(toRow), quotes);
 	// being shown a post counts once per viewer; nobody waits for it
 	const seen = posts.filter((p) => p.author.id !== viewerId).map((p) => p.id);
-	if (seen.length)
+	if (seen.length && opts.views !== false)
 		void sql`insert into post_views (post_id, user_id) select x, ${viewerId}::bigint from unnest(${sql.array(seen, "INT8")}::bigint[]) x on conflict do nothing`.catch(() => {});
 	const out = new Map(posts.map((p) => [p.id, p]));
 	const unknown = ids.filter((id) => !out.has(id));
 	if (unknown.length) {
 		const versions = await sql`select version_id::text, post_id::text, text, created_at from post_versions where version_id = any(${sql.array(unknown, "INT8")})`;
-		const current = await postsByIds(viewerId, [...new Set(versions.map((v: any) => v.post_id as string))] as string[], quotes);
+		const current = await postsByIds(viewerId, [...new Set(versions.map((v: any) => v.post_id as string))] as string[], quotes, opts);
 		for (const v of versions) {
 			const base = current.get(v.post_id);
 			if (base) out.set(v.version_id, { ...base, id: v.version_id, text: v.text, created_at: v.created_at, staleEditOf: base.id });
@@ -406,6 +407,9 @@ export async function likedPosts(viewerId: string, userId: string, limit = 100):
 	return hydrate(viewerId, rows.map(toRow));
 }
 
+export const seenBy = (userId: string) =>
+	sql`(u.id = ${userId}::bigint or ((not p.hidden or ${staffViewer(userId)}) and u.id not in ${protectedFor(userId)} and u.id not in ${suspendedFor(userId)}))`;
+
 export async function createPost(userId: string, text: string, opts: { replyToId?: string; quoteId?: string; articleId?: string; source?: string; communityId?: string; placeId?: string; replyPolicy?: string } = {}): Promise<string> {
 	const [author] = await sql`select status, deactivated_at from users where id = ${userId}::bigint`;
 	if (!author || author.status === "restricted" || author.status === "suspended" || author.deactivated_at) throw new PostError("Your account can't post right now.", 326);
@@ -416,11 +420,17 @@ export async function createPost(userId: string, text: string, opts: { replyToId
 	let conversationId = id;
 	let replyToUserId: string | null = null;
 	if (opts.replyToId) {
-		const [parent] = await sql`select conversation_id, user_id from posts where id = ${opts.replyToId}::bigint`;
+		const [parent] = await sql`select p.conversation_id, p.user_id from posts p join users u on u.id = p.user_id where p.id = ${opts.replyToId}::bigint and ${seenBy(userId)}`;
 		if (!parent) throw new PostError("The post you are replying to no longer exists.", 385);
 		if (await isBlockedEitherWay(userId, String(parent.user_id))) throw new PostError("You can't reply to this post.", 433);
 		conversationId = parent.conversation_id;
 		replyToUserId = String(parent.user_id);
+		// a public reply inside a protected thread still belongs to that thread
+		// (GHSA-m9x2-9x93-6879): its root must be one the author may see too; a
+		// deleted root leaves the thread open
+		const [unseenRoot] = await sql`select 1 from posts p join users u on u.id = p.user_id
+			where p.id = ${conversationId}::bigint and not ${seenBy(userId)}`;
+		if (unseenRoot) throw new PostError("The post you are replying to no longer exists.", 385);
 		const [limited] = await sql`select exists (select 1 from posts r where r.id = ${conversationId}::bigint and r.reply_policy is not null and r.user_id <> ${userId}::bigint and not (
 				(r.reply_policy = 'Community' and exists (select 1 from follows f where f.follower_id = r.user_id and f.followee_id = ${userId}::bigint))
 				or (r.reply_policy = 'ByInvitation' and exists (select 1 from post_mentions m where m.post_id = r.id and m.user_id = ${userId}::bigint))
@@ -428,7 +438,7 @@ export async function createPost(userId: string, text: string, opts: { replyToId
 		if (limited.no) throw new PostError("The author of the original post limited who can reply to it.", 433);
 	}
 	if (opts.quoteId) {
-		const [quoted] = await sql`select id, user_id from posts where id = ${opts.quoteId}::bigint`;
+		const [quoted] = await sql`select p.id, p.user_id from posts p join users u on u.id = p.user_id where p.id = ${opts.quoteId}::bigint and ${seenBy(userId)}`;
 		if (!quoted) throw new PostError("The post you are quoting no longer exists.", 385);
 		if (await isBlockedEitherWay(userId, String(quoted.user_id))) throw new PostError("You can't quote this post.", 433);
 		const [owner] = await sql`select protected from users where id = ${quoted.user_id}::bigint`;

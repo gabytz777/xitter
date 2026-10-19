@@ -5,6 +5,10 @@
 // The address is the socket's, or Cloudflare's CF-Connecting-IP when the site
 // sits behind it (the same trust countries.ts gives CF-IPCountry). Bun only
 // knows the socket address through the server, so server.ts notes it per request.
+// A local proxy is trusted only when TRUSTED_PROXIES names it: nginx or Caddy
+// pass a visitor's own CF-Connecting-IP on, which let anyone pick their
+// address for the rate limits and the admin panel's address list. A Cloudflare
+// tunnel (cloudflared) on the same machine or network is such a proxy.
 
 import { BlockList, isIP } from "node:net";
 import { countryFromHeader, countryName } from "./countries";
@@ -21,9 +25,8 @@ const CLOUDFLARE = [
 	"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
 	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
 ];
-const LOCAL = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10"];
 const trusted = new BlockList();
-for (const range of [...CLOUDFLARE, ...LOCAL, ...(process.env.TRUSTED_PROXIES ?? "").split(",").map((r) => r.trim()).filter(Boolean)]) {
+for (const range of [...CLOUDFLARE, ...(process.env.TRUSTED_PROXIES ?? "").split(",").map((r) => r.trim()).filter(Boolean)]) {
 	const [address, bits] = range.split("/");
 	const family = isIP(address);
 	if (family) trusted.addSubnet(address, Number(bits ?? (family === 4 ? 32 : 128)), family === 4 ? "ipv4" : "ipv6");

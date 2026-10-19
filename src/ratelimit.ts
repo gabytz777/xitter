@@ -38,8 +38,12 @@ export const RULES = {
 	auth: { limit: 40, window: 15 * MIN },
 	// password tries on one account, from anywhere
 	password: { limit: 10, window: 15 * MIN },
+	// second-factor codes tried on one account, from anywhere: each right
+	// password opened a new five-guess challenge, so the guesses never ran out
+	code: { limit: 10, window: 60 * MIN },
 	// codes and links mailed (sign-up, password reset), per address
 	mail: { limit: 5, window: 60 * MIN },
+	federation: { limit: 30_000, window: 15 * MIN },
 } satisfies Record<string, Rule>;
 
 export type Bucket = keyof typeof RULES;

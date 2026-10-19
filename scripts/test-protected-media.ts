@@ -46,6 +46,10 @@ try {
 	check("signed out doesn't", (await fetch(`${origin}/media/${hidden}.gif`)).status === 404);
 	const pub = await get(`pf${stamp}`, open);
 	check("public media stays publicly cached", pub.status === 200 && pub.headers.get("cache-control")?.startsWith("public") === true, pub.headers.get("cache-control"));
+	await sql`delete from posts where id = ${openPost}::bigint`;
+	await Bun.sleep(31_000);
+	check("a deleted post's media is gone for others", (await get(`pf${stamp}`, open)).status === 404);
+	check("but its owner still gets it", (await get(`ps${stamp}`, open)).status === 200);
 } finally {
 	for (const id of media) rmSync(join(dir, id), { force: true });
 	await sql`delete from users where id = any(${sql.array(ids, "INT8")})`;

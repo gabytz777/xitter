@@ -14,7 +14,7 @@ export async function requestReset(usernameOrEmail: string): Promise<void> {
 	const who = usernameOrEmail.trim().replace(/^@/, "");
 	if (!who || !mailEnabled()) return;
 	const [u] = await sql`select id::text, screen_name, email from users
-		where (lower(screen_name) = lower(${who}) or lower(email) = lower(${who})) and email is not null and status <> 'suspended'`;
+		where (lower(screen_name) = lower(${who}) or lower(email) = lower(${who})) and email is not null and status <> 'suspended' and instance is null`;
 	if (!u) return;
 	const [recent] = await sql`select 1 from password_resets where user_id = ${u.id}::bigint and created_at > now() - interval '2 minutes'`;
 	if (recent) return;

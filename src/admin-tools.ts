@@ -17,6 +17,7 @@ import { escalate, shutOut } from "./moderation";
 import { blockedNameIn, blockedWordIn, suspendForName } from "./names";
 import { setSetting, settings } from "./settings";
 import { clientIp, ipAllowed, parseRange } from "./staff-access";
+import { allows } from "./staff-permissions";
 import { BACKUP_DIR, createBackup, deleteBackup, listBackups } from "./backups";
 import { clientStatus, latestSha, rollbackClient, updateClient } from "./client-update";
 
@@ -289,7 +290,7 @@ export const toolActions: Record<string, Action> = {
 		run: async (a, b) => {
 			const id = idOf(b.id);
 			await guard(a, id);
-			return { sessions: await sql`select id::text, created_at, last_seen_at, user_agent, ip, token = ${a.token} as current from sessions where user_id = ${id}::bigint order by last_seen_at desc` };
+			return { sessions: await sql`select id::text, created_at, last_seen_at, user_agent, ${allows(a.role, "ip_addresses") ? sql`ip` : sql`null as ip`}, token = ${a.token} as current from sessions where user_id = ${id}::bigint order by last_seen_at desc` };
 		},
 	},
 	revokeSession: {
@@ -625,7 +626,7 @@ export const toolActions: Record<string, Action> = {
 
 	// errors.ts: distinct errors, the latest first
 	errors: {
-		role: "support",
+		role: "admin",
 		run: async (_a, b) => ({
 			errors: await sql`select e.fingerprint, e.source, e.message, e.stack, e.path, e.count, e.first_at, e.last_at, e.resolved, e.user_id::text as user_id, u.screen_name
 				from error_log e left join users u on u.id = e.user_id

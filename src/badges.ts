@@ -46,8 +46,9 @@ export const BADGES_SCRIPT = String.raw`(function(){
 		var holder,inside;
 		if(slot){
 			holder=slot.parentElement;
-			var old=holder.nextElementSibling;
-			if(old&&old.hasAttribute("data-xitter-badges"))return;
+			// anywhere in the row, not only right after: the client can draw its
+			// translator globe between X's badge and ours, and ours came twice
+			if(holder.parentElement&&holder.parentElement.querySelector(":scope > [data-xitter-badges]"))return;
 		}else{
 			// no check and the slot taken by a label (automated, parody, staff-made):
 			// X draws no badge box, so the badges go at the end of the name itself

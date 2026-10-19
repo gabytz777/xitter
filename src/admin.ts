@@ -1,11 +1,17 @@
 // The admin panel's API: POST /admin/api/<action> with a JSON body, from a
 // signed-in staff account, with the csrf header like every other write.
 //
-// Roles: support reads everything and can reset passwords and sign people
-// out; moderators also change an account's standing and delete posts; admins
-// do everything else (profiles, badges, roles, organisations, invites,
-// instance settings). Every change is written to the audit log.
+// Roles: support reads everything and can sign people out; moderators also
+// change an account's standing and delete posts; admins do everything else
+// (passwords, profiles, badges, roles, organisations, invites, instance
+// settings). Those are the defaults: an admin can give moderators and
+// support more or take some away (staff-permissions.ts). Every change is
+// written to the audit log.
 
+import { isSuperadminViewer } from "./superadmin";
+import { SUPERADMINS, isSuperadminHome, superadminNameHere } from "./superadmins";
+import { FEDERATION_ON, ID_RE, INSTANCE_ID, acceptKeyChange, isBlocked as isFederationBlocked, isPeer, liftBlock, listBlocks, listed, listedInstance, pendingKeyChange, publicKey, registryCheckedAt, registryError, registrySequence, setBlock as setFederationBlock } from "./federation";
+import { pullFrom } from "./federation-sync";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
 import { isFlag } from "./flags";
@@ -26,9 +32,7 @@ import { stickerActions } from "./stickers";
 import { hashflagActions } from "./hashflags";
 import { switchActions } from "./feature-switches";
 import { staffGate } from "./staff-access";
-
-type Role = "admin" | "moderator" | "support";
-const RANK: Record<Role, number> = { support: 1, moderator: 2, admin: 3 };
+import { GRANTABLE, PERMISSIONS, RANK, type Role, allows, mayRun, permissionOf, rolePermissions } from "./staff-permissions";
 
 export class AdminError extends Error {
 	constructor(
@@ -63,15 +67,20 @@ async function userRow(id: string) {
 // The owner, the longest-standing admin, outranks the other admins: they can't
 // change the owner's account, the owner can change theirs. Admins otherwise
 // can't touch each other, except that whoever gave an account its staff role
-// can still act on it.
+// can still act on it, while they still rank as high as it (not once demoted).
 const ownerId = async () => (await sql`select id::text from users where role = 'admin' order by created_at, id limit 1`)[0]?.id as string | undefined;
 const rankOf = (role: string | null, isOwner: boolean) => (isOwner ? 4 : role ? RANK[role as Role] : 0);
 
 export async function guard(actor: Viewer, targetId: string) {
 	const u = await userRow(targetId);
-	if (targetId === actor.id || !u.role) return u;
+	if (targetId === actor.id) return u;
+	const [t] = await sql`select instance from users where id = ${targetId}::bigint`;
+	if (isSuperadminViewer({ screen_name: u.screen_name, instance: t?.instance }) && !actor.superadmin) throw new AdminError("That account is a superadmin.", 403);
+	if (!u.role || actor.superadmin) return u;
 	const owner = await ownerId();
-	if (rankOf(u.role, targetId === owner) >= rankOf(actor.role ?? null, actor.id === owner) && (targetId === owner || u.role_granted_by !== actor.id))
+	const target = rankOf(u.role, targetId === owner);
+	const own = rankOf(actor.role ?? null, actor.id === owner);
+	if (target > own || (target === own && (targetId === owner || u.role_granted_by !== actor.id)))
 		throw new AdminError(targetId === owner ? "That account is the instance owner." : "That account is staff at your level or above.", 403);
 	return u;
 }
@@ -84,13 +93,100 @@ const randomPassword = () => {
 const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const userListCols = sql`u.id::text as id, u.screen_name, u.name, u.avatar_url, u.verified_type, u.translator, u.flag, u.status, u.role,
-	u.created_at, u.last_seen_at, u.invite_code,
+	u.created_at, u.last_seen_at,
 	(select count(*)::int from posts p where p.user_id = u.id) as posts,
 	(select count(*)::int from follows f where f.followee_id = u.id) as followers,
 	(select o.screen_name from affiliations af join users o on o.id = af.org_id where af.user_id = u.id) as org,
 	(select count(*)::int from affiliations af where af.org_id = u.id) as affiliates`;
 
+const instanceOf = (v: unknown) => {
+	const id = typeof v === "string" ? v.trim().toLowerCase() : "";
+	if (!ID_RE.test(id) || id === INSTANCE_ID) throw new AdminError("Name another instance by its address, like xit.example.org.");
+	return id;
+};
+
 const ACTIONS: Record<string, Action> = {
+	federation: { role: "support", run: async (a) => {
+		const blocks = await listBlocks();
+		const stats = await sql`select p.instance, p.cursor::text, p.last_ok_at, p.last_error, p.last_error_at, p.key,
+			(select count(*)::int from users u where u.instance = p.instance) as accounts,
+			(select count(*)::int from posts x join users u on u.id = x.user_id where u.instance = p.instance) as posts
+			from federation_peers p`;
+		const [{ head }] = await sql`select coalesce(max(seq), 0)::text as head from federation_outbox`;
+		const byId = new Map(stats.map((r: any) => [r.instance, r]));
+		const known = new Set([...listed().map((i) => i.id), ...stats.map((r: any) => r.instance), ...blocks.map((b) => b.instance)]);
+		known.delete(INSTANCE_ID);
+		return {
+			enabled: FEDERATION_ON,
+			id: INSTANCE_ID,
+			public_key: publicKey(),
+			entry: { id: INSTANCE_ID, name: settings().instance_name, source_url: settings().source_url || null, public_key: publicKey(), state: "active" },
+			listed_here: listedInstance(INSTANCE_ID) ?? null,
+			registry: { sequence: registrySequence(), checked_at: registryCheckedAt ? new Date(registryCheckedAt).toISOString() : null, error: registryError },
+			outbox_head: head,
+			superadmins: SUPERADMINS.map((x) => `${x.screen_name}@${x.instance}`),
+			superadmin: !!a.superadmin,
+			instances: await Promise.all(
+				[...known].sort().map(async (id) => {
+					const l = listedInstance(id);
+					const r: any = byId.get(id);
+					return {
+						id,
+						name: l?.name ?? id,
+						listed: l?.state ?? null,
+						key_source: l?.public_key ? "list" : r?.key ? "first contact" : null,
+						key_change: r?.key && !l?.public_key ? ((await pendingKeyChange(id).catch(() => undefined)) ?? null) : null,
+						block: blocks.find((b) => b.instance === id) ?? null,
+						federating: isPeer(id),
+						cursor: r?.cursor ?? "0",
+						last_ok_at: r?.last_ok_at ?? null,
+						last_error: r?.last_error ?? null,
+						accounts: r?.accounts ?? 0,
+						posts: r?.posts ?? 0,
+					};
+				}),
+			),
+		};
+	} },
+	federationBlock: { role: "admin", run: async (a, b) => {
+		const id = instanceOf(b.instance);
+		const reason = typeof b.reason === "string" ? b.reason.trim().slice(0, 500) : "";
+		await setFederationBlock(id, "local", reason, { id: a.id, name: a.screen_name });
+		await audit(a, "federation_block", id, { reason });
+		return {};
+	} },
+	federationUnblock: { role: "admin", run: async (a, b) => {
+		const id = instanceOf(b.instance);
+		const [row] = await sql`select source from federation_blocks where instance = ${id}`;
+		if (row?.source === "registry") throw new AdminError("The instance list has it switched off. That changes with a pull request to instances.json.");
+		if (row?.source === "emergency" && !a.superadmin) throw new AdminError("A superadmin defederated it in an emergency. Only a superadmin can lift that.", 403);
+		await liftBlock(id, row?.source === "emergency" ? "emergency" : "local");
+		await audit(a, "federation_unblock", id);
+		return {};
+	} },
+	federationPurge: { role: "admin", run: async (a, b) => {
+		const id = instanceOf(b.instance);
+		if (!isFederationBlocked(id)) throw new AdminError("Defederate the instance before deleting what came from it.");
+		const gone = await sql`delete from users where instance = ${id} returning id`;
+		await sql`delete from federated_objects where instance = ${id}`;
+		await sql`update federation_peers set cursor = 0 where instance = ${id}`;
+		await audit(a, "federation_purge", id, { accounts: gone.length });
+		return { accounts: gone.length };
+	} },
+	federationAcceptKey: { role: "admin", run: async (a, b) => {
+		const id = instanceOf(b.instance);
+		if (isSuperadminHome(id) && !a.superadmin) throw new AdminError("That is a superadmin's home instance. Only a superadmin can accept a new key for it.", 403);
+		await acceptKeyChange(id).catch((e) => {
+			throw new AdminError(e instanceof Error ? e.message : String(e));
+		});
+		await audit(a, "federation_accept_key", id);
+		return {};
+	} },
+	federationPull: { role: "admin", run: async (a, b) => {
+		const id = instanceOf(b.instance);
+		await audit(a, "federation_pull", id);
+		return { applied: await pullFrom(id) };
+	} },
 	setNotesAccess: { role: "admin", run: async (a, b) => {
 		const id = idOf(b.id);
 		await guard(a, id);
@@ -114,10 +210,10 @@ const ACTIONS: Record<string, Action> = {
 		await audit(a, "revoke_platform", id);
 		return {};
 	} },
-	mail: { role: "support", run: async () => ({
+	mail: { role: "support", run: async (a) => ({
 		enabled: mailEnabled(),
 		from: mailFrom(),
-		log: await sql`select m.id::text, m.to_addr, m.kind, m.subject, m.status, m.error, m.created_at, u.screen_name
+		log: await sql`select m.id::text, ${allows(a.role, "emails") ? sql`m.to_addr` : sql`null::text as to_addr`}, m.kind, m.subject, m.status, m.error, m.created_at, u.screen_name
 			from mail_log m left join users u on u.id = m.user_id order by m.created_at desc limit 50`,
 	}) },
 	// what Resend says to a test mail answers whether the sending domain is verified
@@ -166,7 +262,32 @@ const ACTIONS: Record<string, Action> = {
 		await audit(a, "delete_topic", id);
 		return {};
 	} },
-	me: { role: "support", run: async (a) => ({ id: a.id, screen_name: a.screen_name, role: a.role }) },
+	// `allowed`: the actions this account may run, for the panel to show only those
+	me: { role: "support", run: async (a) => ({ id: a.id, screen_name: a.screen_name, role: a.role,
+		allowed: Object.entries(ACTIONS).filter(([name, x]) => mayRun(a.role, name, x.role)).map(([name]) => name) }) },
+
+	staffPermissions: { role: "admin", run: async () => ({
+		permissions: Object.entries(PERMISSIONS).map(([key, p]) => ({ key, group: p.group, label: p.label, default_role: p.role })),
+		roles: Object.fromEntries(GRANTABLE.map((r) => [r, rolePermissions(r)])),
+	}) },
+	// { role, permissions: { key: boolean } }; a key left out goes back to its default
+	saveStaffPermissions: { role: "admin", run: async (a, b) => {
+		if (!GRANTABLE.includes(b.role)) throw new AdminError("Choose moderator or support.");
+		if (!b.permissions || typeof b.permissions !== "object") throw new AdminError("Provide the permissions.");
+		const chosen: Record<string, boolean> = {};
+		for (const [key, on] of Object.entries(b.permissions)) {
+			if (!Object.hasOwn(PERMISSIONS, key)) throw new AdminError(`Unknown permission ${key}.`);
+			if (typeof on !== "boolean") throw new AdminError("Permissions are on or off.");
+			// only what differs from the default is kept, so a new default still reaches the role
+			if (on !== (RANK[b.role as Role] >= RANK[PERMISSIONS[key].role])) chosen[key] = on;
+		}
+		const before = rolePermissions(b.role);
+		await setSetting("staff_permissions", { ...settings().staff_permissions, [b.role]: chosen });
+		const after = rolePermissions(b.role);
+		const changed = Object.keys(after).filter((k) => after[k] !== before[k]);
+		await audit(a, "set_staff_permissions", null, { role: b.role, granted: changed.filter((k) => after[k]), revoked: changed.filter((k) => !after[k]) });
+		return { permissions: after };
+	} },
 
 	stats: {
 		role: "support",
@@ -228,9 +349,9 @@ const ACTIONS: Record<string, Action> = {
 
 	user: {
 		role: "support",
-		run: async (_a, b) => {
+		run: async (a, b) => {
 			const id = idOf(b.id);
-			const [u] = await sql`select ${userListCols}, u.bio, u.location, u.website, u.based_in_override, u.country, u.count_overrides, u.notes_writer, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text,
+			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.count_overrides, u.notes_writer, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text,
 				(select coalesce(json_agg(ub.badge_id::text order by ub.position), '[]') from user_badges ub where ub.user_id = u.id) as badge_ids,
 				(select count(*)::int from sessions s where s.user_id = u.id) as sessions,
 				(select c.screen_name from invites i join users c on c.id = i.created_by where i.code = u.invite_code) as invited_by
@@ -242,7 +363,8 @@ const ACTIONS: Record<string, Action> = {
 				left join users a on a.id = l.actor_id where l.target = ${id} order by l.id desc limit 50`;
 			const strikes = await activeStrikes(id);
 			const ladder = settings().automod.ladder;
-			const alts = await sql`select distinct u.id::text as id, u.screen_name, u.status from login_events mine
+			// null when the viewer may not see addresses
+			const alts = !allows(a.role, "ip_addresses") ? null : await sql`select distinct u.id::text as id, u.screen_name, u.status from login_events mine
 				join login_events other on other.ip = mine.ip and other.user_id <> mine.user_id and other.created_at > now() - interval '90 days'
 				join users u on u.id = other.user_id
 				where mine.user_id = ${id}::bigint and mine.ip is not null and mine.created_at > now() - interval '90 days' limit 20`;
@@ -359,8 +481,9 @@ const ACTIONS: Record<string, Action> = {
 		},
 	},
 
+	// admins only by default: the new password signs in as the account
 	resetPassword: {
-		role: "support",
+		role: "admin",
 		run: async (a, b) => {
 			const id = idOf(b.id);
 			await guard(a, id);
@@ -410,6 +533,7 @@ const ACTIONS: Record<string, Action> = {
 			const screenName = String(b.screen_name ?? "").trim().replace(/^@/, "");
 			const name = String(b.name ?? "").trim() || screenName;
 			if (!/^[A-Za-z0-9_]{4,15}$/.test(screenName)) throw new AdminError("Handles are 4 to 15 letters, digits or underscores.");
+			if (superadminNameHere(screenName)) throw new AdminError("That handle is reserved.");
 			const [taken] = await sql`select 1 from users where lower(screen_name) = lower(${screenName})`;
 			if (taken) throw new AdminError("That handle is taken.");
 			const password = randomPassword();
@@ -438,6 +562,7 @@ const ACTIONS: Record<string, Action> = {
 			const [u] = await sql`select id::text as id from users where lower(screen_name) = lower(${String(b.screen_name ?? "").replace(/^@/, "")})`;
 			if (!u) throw new AdminError("No account with that handle.");
 			if (u.id === orgId) throw new AdminError("An organisation can't be its own affiliate.");
+			await guard(a, u.id);
 			// one organisation per person; adding moves them
 			await sql`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${u.id}::bigint)
 				on conflict (user_id) do update set org_id = excluded.org_id, created_at = now()`;
@@ -451,6 +576,7 @@ const ACTIONS: Record<string, Action> = {
 		run: async (a, b) => {
 			const orgId = idOf(b.orgId, "organisation");
 			const userId = idOf(b.userId, "account");
+			await guard(a, userId);
 			await sql`delete from affiliations where org_id = ${orgId}::bigint and user_id = ${userId}::bigint`;
 			await audit(a, "remove_affiliate", userId, { org: orgId });
 			return {};
@@ -522,10 +648,11 @@ const ACTIONS: Record<string, Action> = {
 		},
 	},
 
+	// without the invites permission a code shows as null
 	invites: {
 		role: "support",
-		run: async () => ({
-			invites: await sql`select i.code, i.max_uses, i.uses, i.expires_at, i.revoked, i.created_at,
+		run: async (a) => ({
+			invites: await sql`select ${allows(a.role, "invites") ? sql`i.code` : sql`null::text as code`}, i.max_uses, i.uses, i.expires_at, i.revoked, i.created_at,
 				c.screen_name as created_by, o.screen_name as org,
 				(select coalesce(json_agg(u.screen_name order by u.created_at), '[]') from users u where u.invite_code = i.code) as used_by
 				from invites i left join users c on c.id = i.created_by left join users o on o.id = i.org_id
@@ -693,6 +820,11 @@ Object.assign(ACTIONS, stickerActions);
 Object.assign(ACTIONS, hashflagActions);
 Object.assign(ACTIONS, switchActions);
 
+// every permission names real actions, and its default is the role written on them
+for (const [key, p] of Object.entries(PERMISSIONS))
+	for (const name of p.actions)
+		if (ACTIONS[name]?.role !== p.role) throw new Error(`Staff permission ${key}: ${name} ${ACTIONS[name] ? `needs ${ACTIONS[name].role}, not ${p.role}` : "is no action"}.`);
+
 export async function adminApi(req: Request, action: string, viewer: Viewer | undefined): Promise<Response> {
 	const fail = (message: string, status: number) => Response.json({ error: message }, { status });
 	if (!viewer?.role) return fail("Staff only.", 403);
@@ -711,7 +843,7 @@ export async function adminApi(req: Request, action: string, viewer: Viewer | un
 	}
 	const a = ACTIONS[action];
 	if (!a) return fail("Unknown action.", 404);
-	if (RANK[viewer.role as Role] < RANK[a.role]) return fail(`Needs the ${a.role} role.`, 403);
+	if (!mayRun(viewer.role, action, a.role)) return fail(permissionOf(action) ? "An admin hasn't given your role permission to do that." : `Needs the ${a.role} role.`, 403);
 	const body = await req.json().catch(() => ({}));
 	try {
 		return Response.json((await a.run(viewer, body ?? {}, req)) ?? {});

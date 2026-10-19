@@ -139,7 +139,7 @@ export async function appealRoute(req: Request, address: string) {
 	if (!cookie || form.get("csrf") !== cookie) return page("The form expired. Try again.", 403);
 	const handle = String(form.get("username") ?? "").trim().replace(/^@/, "").toLowerCase().slice(0, 15);
 	if (used("password", handle)) return page("Too many tries for that account. Wait 15 minutes.", 429);
-	const [user] = await sql`select id::text, password_hash from users where lower(screen_name) = ${handle}`;
+	const [user] = await sql`select id::text, password_hash from users where lower(screen_name) = ${handle} and instance is null`;
 	const valid = await Bun.password.verify(String(form.get("password") ?? "").slice(0, 1024), user?.password_hash ?? (await dummyHash)).catch(() => false);
 	if (!user || !valid) {
 		hit("password", handle);

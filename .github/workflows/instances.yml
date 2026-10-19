@@ -1,0 +1,32 @@
+name: instances
+
+on:
+  pull_request:
+    paths:
+      - instances.json
+      - INSTANCES.md
+      - scripts/check-instances.ts
+  push:
+    branches: [main]
+    paths:
+      - instances.json
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - name: Read the list on the base branch
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: git show "$BASE:instances.json" > "$RUNNER_TEMP/base.json" 2>/dev/null || echo '{"version":1,"sequence":0,"instances":[]}' > "$RUNNER_TEMP/base.json"
+      - name: Check instances.json
+        run: bun scripts/check-instances.ts --base "$RUNNER_TEMP/base.json" --online

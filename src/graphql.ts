@@ -55,7 +55,9 @@ import {
 	setPinnedReply,
 	pinnedReplyOf,
 	unrepost,
+	seenBy,
 } from "./posts";
+import { lookupRemoteUser } from "./federation-sync";
 import { TopicError, setTopicState, suggestedTopics, topicById, topicContext, topicFeedbackActions, topicFeedbackKeys, topicResult, topicsForPosts } from "./topics";
 import { affiliatesOf, followList, suggestedUsers, userById, userByName, usersByIds } from "./users";
 
@@ -430,6 +432,9 @@ const wholeList = (entries: unknown[], base: bigint) => [
 const reactors = (kind: "reposts" | "likes", key: string): Handler => async (viewer, vars) => {
 	const empty = { data: { [key]: { timeline: { instructions: [{ type: "TimelineAddEntries", entries: [] }] } } } };
 	if (!isId(vars.tweetId) || vars.cursor) return empty;
+	const [post] = await sql`select 1 from posts p join users u on u.id = p.user_id where p.id = ${vars.tweetId}::bigint and ${seenBy(viewer.id)}
+		and u.id not in (select blocker_id from blocks where blocked_id = ${viewer.id}::bigint)`;
+	if (!post) return empty;
 	const rows =
 		kind === "reposts"
 			? await sql`select r.user_id::text as id from reposts r where r.post_id = ${vars.tweetId}::bigint and r.user_id not in ${blockedFor(viewer.id)} and r.user_id not in ${protectedFor(viewer.id)} and r.user_id not in ${outOfView(viewer.id)} order by r.created_at desc limit 100`
@@ -652,7 +657,8 @@ const handlers: Record<string, Handler> = {
 	},
 
 	UserByScreenName: async (v, vars) => {
-		const user = typeof vars.screen_name === "string" ? await userByName(v.id, vars.screen_name) : undefined;
+		const name = typeof vars.screen_name === "string" ? vars.screen_name.replace(/^@/, "") : "";
+		const user = name ? ((await userByName(v.id, name)) ?? (name.includes("@") && (await lookupRemoteUser(name).catch(() => undefined)) ? await userByName(v.id, name) : undefined)) : undefined;
 		// an empty answer makes the client show "this account doesn't exist"
 		if (!user) return { data: {} };
 		// staff too: they look a suspended account up in the admin panel

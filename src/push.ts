@@ -14,7 +14,8 @@ import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { newId } from "./ids";
 import { mailFrom } from "./mail";
-import { type PushItem, pushItems } from "./notifications";
+import { type PushItem, pushItems, unreadCount } from "./notifications";
+import { OFFLINE_PAGE } from "./pwa";
 import { settings } from "./settings";
 
 const KEY_FILE = "data/push-vapid.json";
@@ -79,8 +80,8 @@ function vapidHeader(endpoint: string): string {
 type Subscription = { id: string; user_id: string; endpoint: string; p256dh: string; auth: string; settings: Record<string, string>; last_pushed_at: Date };
 
 // Sends one message; a subscription the push service says is gone is dropped.
-export async function pushTo(sub: Pick<Subscription, "id" | "endpoint" | "p256dh" | "auth">, message: { title: string; body: string; url: string; tag?: string }): Promise<boolean> {
-	const body = encryptPayload(Buffer.from(JSON.stringify({ ...message, icon: `${PUBLIC_ORIGIN}/public/icon-light.png` })), Buffer.from(sub.p256dh, "base64url"), Buffer.from(sub.auth, "base64url"));
+export async function pushTo(sub: Pick<Subscription, "id" | "endpoint" | "p256dh" | "auth">, message: { title: string; body: string; url: string; tag?: string; count?: number }): Promise<boolean> {
+	const body = encryptPayload(Buffer.from(JSON.stringify({ ...message, icon: `${PUBLIC_ORIGIN}/public/app-icon.png`, badge: `${PUBLIC_ORIGIN}/public/notification-badge.png` })), Buffer.from(sub.p256dh, "base64url"), Buffer.from(sub.auth, "base64url"));
 	const r = await fetch(sub.endpoint, {
 		method: "POST",
 		headers: { authorization: vapidHeader(sub.endpoint), "content-encoding": "aes128gcm", "content-type": "application/octet-stream", ttl: "86400", urgency: "normal" },
@@ -191,7 +192,9 @@ export async function pushDue(): Promise<number> {
 				if (!all.length) continue;
 				await sql`update push_subscriptions set last_pushed_at = ${new Date(Math.max(...all.map((i) => i.at)) + 1)} where id = ${sub.id}::bigint`;
 				const name = settings().instance_name;
-				const out = all.length > BURST ? [{ title: name, body: `${all.length} new notifications`, url: "/notifications", tag: "summary" }] : all.map((i) => ({ title: name, body: i.text, url: i.url, tag: i.key }));
+				// for the installed app's icon badge
+				const count = await unreadCount(sub.user_id);
+				const out = all.length > BURST ? [{ title: name, body: `${all.length} new notifications`, url: "/notifications", tag: "summary", count }] : all.map((i) => ({ title: name, body: i.text, url: i.url, tag: i.key, count }));
 				for (const m of out) if (await pushTo(sub, m)) sent++;
 			}
 		}
@@ -216,13 +219,27 @@ export function startPush() {
 	setInterval(() => void pushDue().catch((e) => console.error("push:", e)), 15_000).unref();
 }
 
-// Our service worker, at /sw.js where the client registers it
-export const SERVICE_WORKER = `self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+// Our service worker, at /sw.js where the client registers it. Pages come from
+// the network as before; only when that fails (no connection) does it answer
+// with a page saying so, so the installed app doesn't show the browser's error.
+export const SERVICE_WORKER = `const OFFLINE = ${JSON.stringify(OFFLINE_PAGE)};
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(Promise.all([self.clients.claim(), self.registration.navigationPreload && self.registration.navigationPreload.enable()])));
+self.addEventListener("fetch", (e) => {
+	if (e.request.mode !== "navigate" || e.request.method !== "GET") return;
+	e.respondWith((async () => {
+		try {
+			return (await e.preloadResponse) || (await fetch(e.request));
+		} catch {
+			return new Response(OFFLINE, { status: 503, headers: { "content-type": "text/html; charset=utf-8" } });
+		}
+	})());
+});
 self.addEventListener("push", (e) => {
 	let d = {};
 	try { d = e.data ? e.data.json() : {}; } catch {}
-	e.waitUntil(self.registration.showNotification(d.title || "New notification", { body: d.body || "", icon: d.icon, tag: d.tag, data: { url: d.url || "/notifications" } }));
+	const badge = typeof d.count === "number" && self.navigator.setAppBadge ? (d.count ? self.navigator.setAppBadge(d.count) : self.navigator.clearAppBadge()).catch(() => {}) : Promise.resolve();
+	e.waitUntil(Promise.all([badge, self.registration.showNotification(d.title || "New notification", { body: d.body || "", icon: d.icon, badge: d.badge, tag: d.tag, timestamp: Date.now(), data: { url: d.url || "/notifications" } })]));
 });
 self.addEventListener("notificationclick", (e) => {
 	e.notification.close();

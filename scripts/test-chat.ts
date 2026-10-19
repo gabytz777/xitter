@@ -126,6 +126,8 @@ try {
 	await setBlock(b.id, a.id, true);
 	check("recipient block rejects sends", !!(await send(a, conversation)).errors);
 	check("block rejects sends in reverse direction", !!(await send(b, conversation)).errors);
+	check("the blocker can still mute the conversation", !(await gql(b, "MuteConversationMutation", { conversationIds: [conversation] })).errors);
+	await gql(b, "UnmuteConversationMutation", { conversationIds: [conversation] });
 	await setBlock(b.id, a.id, false);
 	for (const content of ["image/png", "video/mp4", "application/pdf"]) {
 		const plain = crypto.getRandomValues(new Uint8Array(71));
@@ -162,6 +164,11 @@ try {
 	await gql(a, "RemoveFromGroupMutation", { conversation_id: group, user_ids: [outsider.id], action_signatures: [] });
 	check("removed group member cannot send", !!(await send(outsider, group)).errors);
 	check("removed group member cannot fetch history", (await gql(outsider, "GetInboxPageConversationDataQuery", { conversation_id: group })).data.get_inbox_page_conversation_data === null);
+	await gql(a, "AddGroupMembersMutation", { conversation_id: group, user_ids: [outsider.id], action_signatures: [] });
+	await sql`update users set status = 'suspended' where id = ${outsider.id}::bigint`;
+	check("a suspended member doesn't stop the group sending", !(await send(b, group)).errors);
+	check("or its admin removing them", !(await gql(a, "RemoveFromGroupMutation", { conversation_id: group, user_ids: [outsider.id], action_signatures: [] })).errors);
+	await sql`update users set status = 'active' where id = ${outsider.id}::bigint`;
 	check("cannot delete another sender's message for everyone", !!(await gql(b, "DeleteMessageMutation", { conversation_id: conversation, sequence_ids: [seq], delete_message_action: "DeleteForAll" })).errors);
 	await gql(b, "DeleteMessageMutation", { conversation_id: conversation, sequence_ids: [seq], delete_message_action: "DeleteForSelf" });
 	const hidden = (await gql(b, "GetConversationPageQuery", { conversation_id: conversation })).data.get_conversation_page.encoded_message_events;

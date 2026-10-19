@@ -5,6 +5,7 @@ import { handleHeld } from "./held";
 import { automodStrike, shutOut } from "./moderation";
 import { blockedNameIn, suspendForName } from "./names";
 import { isReserved, usernameProblem } from "./invites";
+import { superadminNameHere } from "./superadmins";
 import { sql } from "./db";
 import type { Viewer } from "./auth";
 
@@ -33,6 +34,7 @@ export async function changeUsername(viewer: Viewer, wanted: string): Promise<st
 	if (wanted === viewer.screen_name) return undefined;
 	const problem = usernameProblem(wanted);
 	if (problem) return problem;
+	if (superadminNameHere(viewer.screen_name)) return "A superadmin's username can't change.";
 	if (isReserved(wanted)) return "That username is reserved.";
 	if (await handleHeld(wanted, viewer.id)) return "That username isn't available.";
 	const [renames] = await sql`select count(*)::int as n from username_changes where user_id = ${viewer.id}::bigint and changed_at > now() - interval '1 day'`;

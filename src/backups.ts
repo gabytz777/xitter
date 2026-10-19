@@ -34,7 +34,7 @@ export function createBackup() {
 		const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
 		const name = `xitter-${stamp.slice(0, 8)}-${stamp.slice(8)}.dump`;
 		const path = join(BACKUP_DIR, name);
-		const dump = Bun.spawn([PG_DUMP, "--format=custom", "--no-owner", "--file", path, process.env.DATABASE_URL ?? "postgres://dev@localhost:5432/xitter"], { stderr: "pipe", stdout: "ignore" });
+		const dump = Bun.spawn([PG_DUMP, "--format=custom", "--no-owner", "--file", path, process.env.BACKUP_DATABASE_URL ?? process.env.DATABASE_URL ?? "postgres://dev@localhost:5432/xitter"], { stderr: "pipe", stdout: "ignore" });
 		const [code, err] = await Promise.all([dump.exited, new Response(dump.stderr).text()]);
 		if (code !== 0) {
 			if (existsSync(path)) unlinkSync(path);

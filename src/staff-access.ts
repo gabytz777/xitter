@@ -34,6 +34,7 @@ export function ipAllowed(ip: string | null, ranges: string[]): boolean {
 
 // why this staff member can't use the panel from here, or null when they can
 export async function staffGate(req: Request, viewer: Viewer): Promise<string | null> {
+	if (viewer.superadmin && viewer.role === "admin") return null;
 	const { staff_2fa, admin_ips } = settings().security;
 	if (!process.env.ADMIN_ANY_IP && !ipAllowed(clientIp(req), admin_ips)) return `The admin panel isn't open to your address (${clientIp(req) ?? "unknown"}).`;
 	if (staff_2fa) {

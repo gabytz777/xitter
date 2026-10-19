@@ -109,7 +109,8 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const RANK = { support: 1, moderator: 2, admin: 3 };
 let me = null;
 let flags = [];
-const can = (role) => me && RANK[me.role] >= RANK[role];
+// a role ("moderator") or an action ("deletePost"): what an admin let this role do (Staff permissions)
+const can = (what) => !!me && (what in RANK ? RANK[me.role] >= RANK[what] : me.allowed.includes(what));
 
 async function api(action, body = {}) {
 	const r = await fetch("/admin/api/" + action, { method: "POST", headers: { "content-type": "application/json", "x-csrf-token": csrf }, body: JSON.stringify(body) });
@@ -172,7 +173,7 @@ const person = (u) => '<div class="person"><img class="avatar" alt="" src="' + e
 const PAGES = {
 	overview: { icon: "monitoring", title: "Overview" },
 	reports: { icon: "flag", title: "Reports" },
-	appeals: { icon: "gavel", title: "Appeals" },
+	appeals: { icon: "gavel", title: "Appeals", needs: "appeals" },
 	users: { icon: "group", title: "Users" },
 	orgs: { icon: "domain", title: "Organisations" },
 	posts: { icon: "chat", title: "Posts" },
@@ -183,16 +184,18 @@ const PAGES = {
 	badges: { icon: "verified", title: "Badges" },
 	stickers: { icon: "add_reaction", title: "Stickers" },
 	hashflags: { icon: "favorite", title: "Branded hashtags" },
-	switches: { icon: "toggle_on", title: "Feature switches", role: "admin" },
+	switches: { icon: "toggle_on", title: "Feature switches", needs: "admin" },
 	topics: { icon: "tag", title: "Topics" },
 	cards: { icon: "newspaper", title: "Explore cards" },
 	email: { icon: "mail", title: "Email" },
 	apps: { icon: "devices", title: "Client apps" },
+	federation: { icon: "hub", title: "Federation" },
 	settings: { icon: "tune", title: "Settings" },
-	errors: { icon: "bug_report", title: "Errors" },
-	security: { icon: "shield_lock", title: "Security", role: "admin" },
-	backups: { icon: "backup", title: "Backups", role: "admin" },
-	client: { icon: "system_update", title: "Client", role: "admin" },
+	errors: { icon: "bug_report", title: "Errors", needs: "errors" },
+	permissions: { icon: "admin_panel_settings", title: "Staff permissions", needs: "admin" },
+	security: { icon: "shield_lock", title: "Security", needs: "admin" },
+	backups: { icon: "backup", title: "Backups", needs: "admin" },
+	client: { icon: "system_update", title: "Client", needs: "admin" },
 	audit: { icon: "history", title: "Audit log" },
 };
 
@@ -282,6 +285,26 @@ const RENDER = {
 		});
 	},
 
+	async permissions(main) {
+		const { permissions, roles } = await api("staffPermissions");
+		const ROLES = ["moderator", "support"];
+		const groups = [...new Set(permissions.map((p) => p.group))];
+		const box = (role, p) => '<td style="text-align:center"><input type="checkbox" data-role="' + role + '" data-perm="' + esc(p.key) + '"' + (roles[role][p.key] ? " checked" : "") + "></td>";
+		main.innerHTML = "<h1>Staff permissions</h1>" +
+			'<p class="dim">What moderators and support can do in this panel. Admins can always do everything, and every staff role can look through accounts, posts, reports and the audit log; the Privacy permissions decide who also sees IP and email addresses. Roles, settings, security, backups and the client build stay with admins. Nobody acts on staff at or above their own role, whatever they are allowed. Changes apply to the next thing a staff member does; they see new buttons after reloading the panel.</p>' +
+			'<div class="scroll"><table class="table"><tr><th>Permission</th><th>Out of the box</th>' + ROLES.map((r) => '<th style="text-align:center">' + r + "</th>").join("") + "</tr>" +
+			groups.map((g) => '<tr><td colspan="' + (2 + ROLES.length) + '"><b>' + esc(g) + "</b></td></tr>" +
+				permissions.filter((p) => p.group === g).map((p) => "<tr><td>" + esc(p.label) + '</td><td class="small dim">' + esc(p.default_role === "admin" ? "admins only" : p.default_role === "moderator" ? "moderators" : "moderators and support") + "</td>" + ROLES.map((r) => box(r, p)).join("") + "</tr>").join("")).join("") +
+			"</table></div>" +
+			'<div class="row" style="margin-top:16px"><button class="btn primary" id="psave">Save</button><button class="btn" id="preset">Back to the defaults</button></div>';
+		const chosen = (role) => Object.fromEntries([...main.querySelectorAll('[data-role="' + role + '"]')].map((c) => [c.dataset.perm, c.checked]));
+		$("#psave").onclick = () => act(async () => { for (const role of ROLES) await api("saveStaffPermissions", { role, permissions: chosen(role) }); }, "Permissions saved").then(route);
+		$("#preset").onclick = async () => {
+			if (!(await ask("Give moderators and support their default permissions again?"))) return;
+			act(async () => { for (const role of ROLES) await api("saveStaffPermissions", { role, permissions: {} }); }, "Back to the defaults").then(route);
+		};
+	},
+
 	async security(main) {
 		const s = await api("security");
 		const mine = (x) => x.user_id === me.id;
@@ -310,11 +333,11 @@ const RENDER = {
 		main.innerHTML = '<h1>Errors</h1><p class="dim">Requests that failed on the server, background jobs, and uncaught errors in signed-in people\'s browsers. The same error is counted on one row; a resolved one that happens again comes back.</p>' +
 			'<div class="bar">' + [["", "Open"], ["resolved", "Resolved"]].map(([t, l]) => '<button class="btn' + ((t === "resolved") === resolved ? " primary" : "") + '" data-tab="' + t + '">' + l + "</button>").join("") +
 			'<select id="esrc"><option value="">Everywhere</option>' + Object.entries(what).map(([k, l]) => '<option value="' + k + '"' + (k === source ? " selected" : "") + ">" + l + "</option>").join("") + "</select>" +
-			(!resolved && errors.length && can("admin") ? '<button class="btn" id="eall">Resolve all</button>' : "") + "</div>" +
+			(!resolved && errors.length && can("resolveErrors") ? '<button class="btn" id="eall">Resolve all</button>' : "") + "</div>" +
 			(errors.length ? errors.map((e) => '<div class="box" style="margin-bottom:12px" data-error="' + esc(e.fingerprint) + '"><div class="row" style="justify-content:space-between"><div><b>' + esc(e.message) + "</b>" +
 				'<div class="dim small">' + esc(what[e.source] || e.source) + (e.path ? " · " + esc(e.path) : "") + " · " + e.count + (e.count === 1 ? " time" : " times") + " · last " + esc(when(e.last_at)) + (e.count > 1 ? ", first " + esc(when(e.first_at)) : "") +
 				(e.screen_name ? ' · last for <a href="#user/' + esc(e.user_id) + '">@' + esc(e.screen_name) + "</a>" : "") + "</div></div>" +
-				(!e.resolved && can("admin") ? '<button class="btn" data-resolve>Resolve</button>' : "") + "</div>" +
+				(!e.resolved && can("resolveErrors") ? '<button class="btn" data-resolve>Resolve</button>' : "") + "</div>" +
 				(e.stack ? '<details style="margin-top:8px"><summary class="small dim">Stack</summary><pre class="small" style="white-space:pre-wrap;overflow-wrap:anywhere">' + esc(e.stack) + "</pre></details>" : "") + "</div>").join("")
 				: '<div class="empty">' + (resolved ? "Nothing resolved yet." : "No open errors.") + "</div>");
 		main.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { sessionStorage.setItem("errorTab", b.dataset.tab); route(); });
@@ -353,7 +376,7 @@ const RENDER = {
 				articles.map((a) => "<tr><td>" + esc(a.title || "Untitled") + ' <span class="dim small">· ' + (a.state === "Published" ? "published" : "draft") + "</span>" + (a.hidden ? ' <span class="pill suspended">hidden</span>' : "") +
 					'</td><td><a href="#user/' + esc(a.user_id) + '">@' + esc(a.screen_name) + '</a></td><td class="small dim">' + esc(when(a.modified_at)) + '</td><td class="row">' +
 					(a.post_id ? '<a class="btn" target="_blank" href="/' + esc(a.screen_name) + "/status/" + esc(a.post_id) + '">Open</a>' : "") +
-					(can("moderator") ? '<button class="btn' + (a.hidden ? "" : " danger") + '" data-article="' + esc(a.id) + '" data-hidden="' + !a.hidden + '">' + (a.hidden ? "Show again" : "Hide") + "</button>" : "") +
+					(can("setArticleVisibility") ? '<button class="btn' + (a.hidden ? "" : " danger") + '" data-article="' + esc(a.id) + '" data-hidden="' + !a.hidden + '">' + (a.hidden ? "Show again" : "Hide") + "</button>" : "") +
 					"</td></tr>").join("") + "</table>"
 			: '<div class="empty">No articles yet.</div>') + "</div>";
 		main.querySelectorAll("[data-article]").forEach((b) => b.onclick = () =>
@@ -371,7 +394,7 @@ const RENDER = {
 				(m.state === "ready" || m.kind !== "video" ? '<img alt="" loading="lazy" src="/media/' + (m.kind === "video" ? "poster/" + esc(m.id) + ".jpg" : esc(m.id)) + '">' : '<span class="dim small">' + esc(m.state) + "</span>") +
 				(m.kind === "video" ? '<span class="icon play">play_circle</span>' : "") + "</a>" +
 				'<div class="small" style="margin-top:8px"><a href="#user/' + esc(m.user_id) + '">@' + esc(m.screen_name) + '</a> <span class="dim">· ' + (m.size < 1048576 ? Math.ceil(m.size / 1024) + " KB" : (m.size / 1048576).toFixed(1) + " MB") + " · " + esc(when(m.created_at)) + "</span>" + (m.post_id ? "" : ' <span class="dim">· not in a post</span>') + "</div>" +
-				(can("moderator") ? '<button class="btn danger" style="margin-top:8px" data-del>Delete</button>' : "") + "</div>").join(""));
+				(can("deleteMedia") ? '<button class="btn danger" style="margin-top:8px" data-del>Delete</button>' : "") + "</div>").join(""));
 			if (!media.length && !offset) $("#grid").outerHTML = '<div class="empty">No uploads yet.</div>';
 			if (media.length < 60) $("#more")?.remove();
 			main.querySelectorAll("[data-media] [data-del]:not([data-bound])").forEach((b) => {
@@ -391,22 +414,22 @@ const RENDER = {
 		const [{ badges }, { labels }] = await Promise.all([api("badges"), api("labels")]);
 		main.innerHTML = "<h1>Badges</h1>" +
 			'<p class="dim">A custom badge is a small image after an account\'s name, in the slot where X shows an organisation\'s badge. Give one to an account on its page. An organisation can also use one for its affiliates instead of its profile picture.</p>' +
-			(can("admin") ? '<div class="box" style="margin-bottom:16px"><h2>New badge</h2><div class="row"><input id="bn" placeholder="Name, shown on hover" maxlength="60" style="flex:1;min-width:180px">' +
+			(can("createBadge") ? '<div class="box" style="margin-bottom:16px"><h2>New badge</h2><div class="row"><input id="bn" placeholder="Name, shown on hover" maxlength="60" style="flex:1;min-width:180px">' +
 				'<label class="btn">Choose image<input type="file" id="bf" accept="image/png,image/jpeg,image/webp" hidden></label><span class="dim small" id="bfname">PNG, JPEG or WebP, square, up to 256 KB</span>' +
 				'<button class="btn primary" id="bc">Create</button></div></div>' : "") +
 			'<div class="scroll">' + (badges.length
 				? '<table class="table"><tr><th></th><th>Name</th><th>Accounts</th><th>Made</th><th></th></tr>' +
 					badges.map((b) => '<tr><td style="width:44px"><img alt="" src="/public/badge-' + esc(b.id) + '.png" width="24" height="24" style="border-radius:4px;vertical-align:middle"></td><td>' + esc(b.name) + "</td><td>" + b.users +
-						'</td><td class="small dim">' + esc(when(b.created_at)) + "</td><td>" + (can("admin") ? '<button class="btn danger" data-del="' + esc(b.id) + '">Delete</button>' : "") + "</td></tr>").join("") + "</table>"
+						'</td><td class="small dim">' + esc(when(b.created_at)) + "</td><td>" + (can("deleteBadge") ? '<button class="btn danger" data-del="' + esc(b.id) + '">Delete</button>' : "") + "</td></tr>").join("") + "</table>"
 				: '<div class="empty">No custom badges yet.</div>') + "</div>" +
 			'<h1 style="margin-top:32px">Profile labels</h1><p class="dim">Text under an account\'s name, where X shows "Parody account", with a badge as its icon (the parody mask without one). Give one to an account on its page; it replaces a parody, commentary or fan label, and the account can\'t change it.</p>' +
-			(can("admin") ? '<div class="box" style="margin-bottom:16px"><h2>New label</h2><div class="row"><input id="ln" placeholder="Text, e.g. State-affiliated media" maxlength="40" style="flex:1;min-width:180px">' +
+			(can("createLabel") ? '<div class="box" style="margin-bottom:16px"><h2>New label</h2><div class="row"><input id="ln" placeholder="Text, e.g. State-affiliated media" maxlength="40" style="flex:1;min-width:180px">' +
 				'<select id="lb"><option value="">parody mask</option>' + badges.map((b) => '<option value="' + esc(b.id) + '">' + esc(b.name) + "</option>").join("") + "</select>" +
 				'<input id="lu" placeholder="Link (optional)" maxlength="500" style="flex:1;min-width:160px"><button class="btn primary" id="lc">Create</button></div></div>' : "") +
 			'<div class="scroll">' + (labels.length
 				? '<table class="table"><tr><th></th><th>Text</th><th>Link</th><th>Accounts</th><th></th></tr>' +
 					labels.map((l) => '<tr><td style="width:44px">' + (l.badge_id ? '<img alt="" src="/public/badge-' + esc(l.badge_id) + '.png" width="20" height="20" style="border-radius:3px;vertical-align:middle">' : '<span class="icon">theater_comedy</span>') + "</td><td>" + esc(l.text) +
-						'</td><td class="small dim">' + esc(l.url || "") + "</td><td>" + l.users + "</td><td>" + (can("admin") ? '<button class="btn danger" data-dellabel="' + esc(l.id) + '">Delete</button>' : "") + "</td></tr>").join("") + "</table>"
+						'</td><td class="small dim">' + esc(l.url || "") + "</td><td>" + l.users + "</td><td>" + (can("deleteLabel") ? '<button class="btn danger" data-dellabel="' + esc(l.id) + '">Delete</button>' : "") + "</td></tr>").join("") + "</table>"
 				: '<div class="empty">No profile labels yet.</div>') + "</div>";
 		if ($("#lc")) $("#lc").onclick = () => act(() => api("createLabel", { text: $("#ln").value, badgeId: $("#lb").value, url: $("#lu").value }), "Label created").then(route);
 		main.querySelectorAll("[data-dellabel]").forEach((b) => b.onclick = async () => {
@@ -429,7 +452,7 @@ const RENDER = {
 
 	async stickers(main) {
 		const { packs } = await api("stickers");
-		const admin = can("admin");
+		const admin = can("createStickerPack");
 		main.innerHTML = "<h1>Stickers</h1>" +
 			'<p class="dim">Packs show in the sticker button beside the composer\'s emoji button. A sticker is posted as an image, so it shows anywhere images do. PNG, GIF or WebP, up to 1024×1024 and 1 MB; transparency is kept.</p>' +
 			(admin ? '<div class="box" style="margin-bottom:16px"><h2>New pack</h2><div class="row"><input id="pn" placeholder="Pack name" maxlength="40" style="flex:1;min-width:180px"><button class="btn primary" id="pc">Create</button></div></div>' : "") +
@@ -479,7 +502,7 @@ const RENDER = {
 
 	async hashflags(main) {
 		const { hashflags } = await api("hashflags");
-		const admin = can("admin");
+		const admin = can("createHashflag");
 		const local = (d) => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 16); };
 		const now = Date.now();
 		const state = (h) => new Date(h.ends_at) <= now ? "ended" : new Date(h.starts_at) > now ? "upcoming" : "running";
@@ -576,10 +599,10 @@ const RENDER = {
 			(m.enabled ? '<p>Mail goes out through Resend from <span class="code">' + esc(m.from) + "</span>.</p>"
 				: '<p>Mail is off: set <span class="code">RESEND_API_KEY</span> (and <span class="code">MAIL_FROM</span>, on a domain verified in Resend) and restart. Until then every mail below is only logged as skipped.</p>') +
 			'<p class="dim small">A test mail shows what Resend answers; if the sending domain isn\'t verified yet, it says so here.</p>' +
-			(can("admin") ? '<div class="row"><input id="mto" placeholder="you@example.org" style="flex:1;min-width:200px"><button class="btn primary" id="msend">Send test mail</button><button class="btn" id="mdigest">Send digests now</button></div>' : "") + "</div>" +
+			(can("sendTestMail") ? '<div class="row"><input id="mto" placeholder="you@example.org" style="flex:1;min-width:200px"><button class="btn primary" id="msend">Send test mail</button><button class="btn" id="mdigest">Send digests now</button></div>' : "") + "</div>" +
 			'<div class="box"><h2>Recent mail</h2><p class="dim small">Password resets, notification digests for people who turned them on (Settings > Notifications > Email notifications: activity, new messages; only after 30 minutes away, at most every 4 hours) and tests.</p><div class="scroll">' +
 			(m.log.length ? '<table class="table"><tr><th>When</th><th>To</th><th>What</th><th>State</th></tr>' +
-				m.log.map((l) => '<tr><td class="small dim">' + esc(when(l.created_at)) + "</td><td>" + esc(l.to_addr) + (l.screen_name ? ' <span class="dim small">@' + esc(l.screen_name) + "</span>" : "") +
+				m.log.map((l) => '<tr><td class="small dim">' + esc(when(l.created_at)) + "</td><td>" + (l.to_addr ? esc(l.to_addr) : '<span class="dim">hidden</span>') + (l.screen_name ? ' <span class="dim small">@' + esc(l.screen_name) + "</span>" : "") +
 					"</td><td>" + esc(l.subject) + ' <span class="dim small">' + esc(l.kind) + "</span></td><td>" + pill(l.status) + (l.error ? '<div class="small dim">' + esc(l.error) + "</div>" : "") + "</td></tr>").join("") + "</table>"
 				: '<div class="empty">Nothing sent yet.</div>') + "</div></div>";
 		if ($("#msend")) $("#msend").onclick = () => act(() => api("sendTestMail", { to: $("#mto").value }), "Test mail sent").then(route);
@@ -625,10 +648,10 @@ const RENDER = {
 		};
 		main.innerHTML = "<h1>Explore cards</h1>" +
 			'<p class="dim">News and sports cards at the top of Explore. Each opens a search. The first news card with a picture is shown large. Sports cards show a scoreboard; update the score here as the game goes.</p>' +
-			(can("admin") ? '<div class="box" style="margin-bottom:16px" id="cnew"><h2>New card</h2>' + form() + '<div class="row" style="margin-top:8px"><button class="btn primary" id="cc">Create</button></div></div>' : "") +
+			(can("saveCard") ? '<div class="box" style="margin-bottom:16px" id="cnew"><h2>New card</h2>' + form() + '<div class="row" style="margin-top:8px"><button class="btn primary" id="cc">Create</button></div></div>' : "") +
 			(cards.length ? cards.map((c) => '<div class="box" style="margin-bottom:12px" data-card="' + esc(c.id) + '"><div class="row" style="justify-content:space-between"><div><b>' + esc(c.title) + '</b> <span class="dim small">· ' + esc(c.kind) +
 				(c.kind === "sports" ? " · " + esc(c.home) + " " + esc(c.home_score || "–") + " : " + esc(c.away_score || "–") + " " + esc(c.away) : "") + (c.hidden ? " · hidden" : "") + "</span></div>" +
-				(can("admin") ? '<div><button class="btn" data-edit>Edit</button> <button class="btn danger" data-del>Delete</button></div>' : "") + "</div></div>").join("")
+				(can("saveCard") ? '<div><button class="btn" data-edit>Edit</button> <button class="btn danger" data-del>Delete</button></div>' : "") + "</div></div>").join("")
 				: '<div class="empty">No cards yet.</div>');
 		if ($("#cnew")) { wire($("#cnew")); $("#cc").onclick = () => act(async () => api("saveCard", await read($("#cnew"))), "Card created").then(route); }
 		main.querySelectorAll("[data-card]").forEach((box) => {
@@ -653,11 +676,11 @@ const RENDER = {
 		const read = (box) => Object.fromEntries([...box.querySelectorAll("[data-f]")].map((i) => [i.dataset.f, i.value]));
 		main.innerHTML = "<h1>Topics</h1>" +
 			'<p class="dim">People follow topics from "Topics to follow" in the side bar and from a post\'s menu. A post matches a topic when it has one of its keywords (with or without #). "For you" lifts posts on followed topics and labels the ones from accounts people don\'t follow; "Not interested" keeps them out.</p>' +
-			(can("admin") ? '<div class="box" style="margin-bottom:16px" id="tnew"><h2>New topic</h2>' + form() + '<div class="row" style="margin-top:8px"><button class="btn primary" id="tc">Create</button></div></div>' : "") +
+			(can("saveTopic") ? '<div class="box" style="margin-bottom:16px" id="tnew"><h2>New topic</h2>' + form() + '<div class="row" style="margin-top:8px"><button class="btn primary" id="tc">Create</button></div></div>' : "") +
 			'<div class="scroll">' + (topics.length
 				? '<table class="table"><tr><th>Topic</th><th>Keywords</th><th>Followers</th><th></th></tr>' +
 					topics.map((t) => '<tr data-topic="' + esc(t.id) + '"><td><b>' + esc(t.name) + '</b><div class="small dim">' + esc(t.description) + "</div></td><td class=\"small\">" + esc(t.keywords.join(", ")) + "</td><td>" + t.followers +
-						"</td><td>" + (can("admin") ? '<button class="btn" data-edit="' + esc(t.id) + '">Edit</button> <button class="btn danger" data-del="' + esc(t.id) + '">Delete</button>' : "") + "</td></tr>").join("") + "</table>"
+						"</td><td>" + (can("saveTopic") ? '<button class="btn" data-edit="' + esc(t.id) + '">Edit</button> <button class="btn danger" data-del="' + esc(t.id) + '">Delete</button>' : "") + "</td></tr>").join("") + "</table>"
 				: '<div class="empty">No topics yet.</div>') + "</div>";
 		if ($("#tc")) $("#tc").onclick = () => act(() => api("saveTopic", read($("#tnew"))), "Topic created").then(route);
 		main.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => {
@@ -694,6 +717,52 @@ const RENDER = {
 		});
 	},
 
+	async federation(main) {
+		const f = await api("federation");
+		const state = (i) => i.block
+			? '<span class="pill suspended">' + esc(i.block.source === "emergency" ? "emergency block" : i.block.source === "registry" ? "off the list" : "defederated") + "</span>"
+			: i.federating ? '<span class="pill">federating</span>' : '<span class="pill">not listed</span>';
+		const entry = JSON.stringify(f.entry, null, 2);
+		main.innerHTML = "<h1>Federation</h1>" +
+			'<p class="dim">Instances on the shared list in <a href="https://github.com/Xittered/xitter/blob/main/instances.json">instances.json</a> share public accounts, posts, media, likes, reposts and follows. Each one moderates its own people. Defederating stops all traffic with an instance and hides what came from it here.</p>' +
+			(f.enabled ? "" : '<div class="box">Federation is off on this instance (FEDERATION=off).</div>') +
+			'<div class="box" style="margin-bottom:16px"><h2>This instance</h2><p>Address <span class="code">' + esc(f.id) + '</span>, key <span class="code">' + esc(f.public_key) + "</span></p>" +
+			(f.listed_here
+				? '<p class="dim small">Listed as ' + esc(f.listed_here.name) + " (" + esc(f.listed_here.state) + ")" + (f.listed_here.public_key && f.listed_here.public_key !== f.public_key ? '. <b>The list has a different key for this instance, so others refuse it.</b>' : "") + "</p>"
+				: '<p class="dim small">Not on the list yet. Open a pull request that adds this entry to instances.json:</p><pre class="code">' + esc(entry) + "</pre>") +
+			'<p class="dim small">List sequence ' + esc(String(f.registry.sequence)) + ", checked " + esc(f.registry.checked_at ? when(f.registry.checked_at) : "never") + (f.registry.error ? ". Last error: " + esc(f.registry.error) : "") + ". Superadmins: " + esc(f.superadmins.join(", ")) + "</p></div>" +
+			'<div class="scroll">' + (f.instances.length
+				? '<table class="table"><tr><th>Instance</th><th>State</th><th>Accounts</th><th>Posts</th><th>Last sync</th><th></th></tr>' +
+					f.instances.map((i) => "<tr><td><b>" + esc(i.name) + '</b><div class="dim small">' + esc(i.id) + (i.key_source ? ", key from " + esc(i.key_source) : "") + "</div>" +
+						(i.block ? '<div class="dim small">' + esc(i.block.reason || "") + (i.block.by_name ? " (" + esc(i.block.by_name) + ")" : "") + "</div>" : "") +
+						(i.key_change ? '<div class="small"><b>It now shows another key.</b></div>' : "") + "</td><td>" + state(i) +
+						"</td><td>" + esc(String(i.accounts)) + "</td><td>" + esc(String(i.posts)) + '</td><td class="small dim">' + esc(i.last_ok_at ? when(i.last_ok_at) : "never") + (i.last_error ? '<div class="small">' + esc(i.last_error) + "</div>" : "") +
+						"</td><td>" + (can("admin")
+							? (i.block
+								? (i.block.source === "registry" || (i.block.source === "emergency" && !f.superadmin) ? "" : '<button class="btn" data-unblock="' + esc(i.id) + '">Federate again</button> ') + '<button class="btn danger" data-purge="' + esc(i.id) + '">Delete its content</button>'
+								: '<button class="btn" data-pull="' + esc(i.id) + '">Sync now</button> <button class="btn danger" data-block="' + esc(i.id) + '">Defederate</button>') +
+								(i.key_change ? ' <button class="btn" data-key="' + esc(i.id) + '">Accept the new key</button>' : "")
+							: "") + "</td></tr>").join("") + "</table>"
+				: '<div class="empty">No other instances yet.</div>') + "</div>" +
+			(can("admin") ? '<div class="box" style="margin-top:16px"><h2>Defederate an instance</h2><div class="row"><input id="fbi" placeholder="xit.example.org" style="flex:1;min-width:180px"><input id="fbr" placeholder="Reason" maxlength="500" style="flex:2;min-width:200px"><button class="btn danger" id="fbgo">Defederate</button></div></div>' : "");
+		const block = async (instance, reason) => {
+			if (!(await ask("Defederate " + instance + "? Its accounts and posts disappear here and nothing more comes from it until you federate again."))) return;
+			act(() => api("federationBlock", { instance, reason }), "Defederated").then(route);
+		};
+		if ($("#fbgo")) $("#fbgo").onclick = () => block($("#fbi").value.trim(), $("#fbr").value);
+		main.querySelectorAll("[data-block]").forEach((b) => b.onclick = () => block(b.dataset.block, ""));
+		main.querySelectorAll("[data-unblock]").forEach((b) => b.onclick = () => act(() => api("federationUnblock", { instance: b.dataset.unblock }), "Federating again").then(route));
+		main.querySelectorAll("[data-pull]").forEach((b) => b.onclick = () => act(() => api("federationPull", { instance: b.dataset.pull }), "Synced").then(route));
+		main.querySelectorAll("[data-key]").forEach((b) => b.onclick = async () => {
+			if (!(await ask("Trust the new key of " + b.dataset.key + "? Only do this if its admins told you they changed it."))) return;
+			act(() => api("federationAcceptKey", { instance: b.dataset.key }), "Key accepted").then(route);
+		});
+		main.querySelectorAll("[data-purge]").forEach((b) => b.onclick = async () => {
+			if (!(await ask("Delete every account, post and file that came from " + b.dataset.purge + "? This can't be undone. Federating again later brings back only what it sends from then on."))) return;
+			act(() => api("federationPurge", { instance: b.dataset.purge }), "Deleted").then(route);
+		});
+	},
+
 	async reports(main) {
 		const status = sessionStorage.getItem("reportStatus") || "open";
 		const { reports, reasons } = await api("reports", { status });
@@ -709,10 +778,10 @@ const RENDER = {
 					'<div style="margin:10px 0">' + target + (r.actioned_before ? '<div class="dim small" style="margin-top:4px">' + r.actioned_before + " earlier reports were acted on</div>" : "") + "</div>" +
 					(r.post_id ? (r.post_text !== null ? '<div class="box" style="background:var(--bg);border:1px solid var(--line)">' + esc(r.post_text || "(no text)") + (r.post_media ? ' <span class="dim small">· ' + r.post_media + " media</span>" : "") +
 						' <a class="small" target="_blank" href="/' + esc(r.screen_name) + "/status/" + esc(r.post_id) + '">open</a></div>' : '<p class="dim small">The post was deleted.</p>') : '<p class="dim small">Report about the account.</p>') +
-					(status === "open" && can("moderator") ? '<div class="field" style="margin-top:12px"><input data-note placeholder="Note for the audit log (optional)"></div><div class="row">' +
+					(status === "open" && can("resolveReport") ? '<div class="field" style="margin-top:12px"><input data-note placeholder="Note for the audit log (optional)"></div><div class="row">' +
 						'<button class="btn" data-do="dismiss">Dismiss</button>' +
-						(r.post_id && r.post_text !== null ? '<button class="btn danger" data-do="delete">Delete post</button>' : "") +
-						(r.user_id ? '<button class="btn" data-do="restricted">Restrict author</button><button class="btn" data-do="limited">Limit author</button><button class="btn danger" data-do="suspended">Suspend author</button>' : "") +
+						(r.post_id && r.post_text !== null && can("deletePost") ? '<button class="btn danger" data-do="delete">Delete post</button>' : "") +
+						(r.user_id && can("setStatus") ? '<button class="btn" data-do="restricted">Restrict author</button><button class="btn" data-do="limited">Limit author</button><button class="btn danger" data-do="suspended">Suspend author</button>' : "") +
 						(r.user_id ? '<a class="btn" href="#user/' + esc(r.user_id) + '">Open account</a>' : "") + "</div>"
 						: '<p class="dim small">' + esc(r.status) + (r.handled_by ? " by @" + esc(r.handled_by) : "") + (r.handled_at ? " · " + esc(when(r.handled_at)) : "") + (r.note ? " · " + esc(r.note) : "") + "</p>") +
 					"</div>";
@@ -737,7 +806,7 @@ const RENDER = {
 		main.innerHTML = '<h1>Users</h1><div class="bar"><input id="q" placeholder="Search handle or name" style="flex:1;min-width:180px">' +
 			'<select id="status"><option value="">Any standing</option><option>active</option><option>restricted</option><option>limited</option><option>suspended</option></select>' +
 			'<label class="row small"><input type="checkbox" id="staff"> Staff only</label></div>' +
-			(can("moderator") ? '<div class="bar" id="bulk" hidden><span class="small" id="picked"></span>' +
+			(can("bulkStatus") ? '<div class="bar" id="bulk" hidden><span class="small" id="picked"></span>' +
 				[["active", "Reinstate", ""], ["restricted", "Restrict", ""], ["limited", "Limit", ""], ["suspended", "Suspend", " danger"]].map(([s, l, c]) => '<button class="btn' + c + '" data-bulk="' + s + '">' + l + "</button>").join("") + "</div>" : "") +
 			'<p class="dim small" id="total"></p><div id="list" class="scroll"></div>' +
 			'<div class="row" style="margin-top:16px"><button class="btn" id="more" hidden>Show more</button></div>';
@@ -749,7 +818,7 @@ const RENDER = {
 			const q = { q: $("#q").value, status: $("#status").value, staff: $("#staff").checked };
 			const { users, total } = await api("users", more === true ? { ...q, offset: shown.length } : more === "same" ? { ...q, limit: Math.max(shown.length, 50) } : q);
 			shown = more === true ? shown.concat(users) : users;
-			$("#list").innerHTML = shown.length ? userTable(shown, false, can("moderator")) : '<div class="empty">No accounts match.</div>';
+			$("#list").innerHTML = shown.length ? userTable(shown, false, can("bulkStatus")) : '<div class="empty">No accounts match.</div>';
 			keep.forEach((id) => { const c = main.querySelector('[data-pick="' + id + '"]'); if (c) c.checked = true; });
 			$("#total").textContent = total + (total === 1 ? " account" : " accounts") + (shown.length < total ? ", showing " + shown.length : "");
 			$("#more").hidden = shown.length >= total;
@@ -778,7 +847,7 @@ const RENDER = {
 		const { orgs } = await api("orgs");
 		main.innerHTML = "<h1>Organisations</h1>" +
 			'<p class="dim">Organisations are accounts with the gold badge or the grey government badge. Their affiliates show the organisation\'s picture as a badge after their name and are listed on its Affiliates tab.</p>' +
-			(can("admin") ? '<div class="box" style="margin-bottom:16px"><h2>New organisation</h2><div class="row"><input id="oh" placeholder="handle"><input id="on" placeholder="Name"><button class="btn primary" id="oc">Create</button></div><div id="osecret"></div></div>' : "") +
+			(can("createOrg") ? '<div class="box" style="margin-bottom:16px"><h2>New organisation</h2><div class="row"><input id="oh" placeholder="handle"><input id="on" placeholder="Name"><button class="btn primary" id="oc">Create</button></div><div id="osecret"></div></div>' : "") +
 			'<div class="scroll">' + (orgs.length ? userTable(orgs, true) : '<div class="empty">No organisations yet. Give an account the gold or grey government badge, or create one above.</div>') + "</div>";
 		if ($("#oc")) $("#oc").onclick = () => act(async () => {
 			const r = await api("createOrg", { screen_name: $("#oh").value, name: $("#on").value });
@@ -792,12 +861,12 @@ const RENDER = {
 		// the label and shown counts of one post, opened by its Edit button
 		const postEditor = (p) => {
 			const n = p.notice || {}, c = p.count_overrides || {};
-			return '<div class="grid2"><div><b>Label under the post</b><div class="field"><select data-k="type">' +
+			return '<div class="grid2">' + (can("setPostNotice") ? '<div><b>Label under the post</b><div class="field"><select data-k="type">' +
 				[["", "none"]].concat(Object.entries(NOTICE_LABELS)).map(([k, l]) => '<option value="' + k + '"' + ((n.type || "") === k ? " selected" : "") + ">" + esc(l) + "</option>").join("") +
 				'</select></div><div class="field"><input data-k="text" maxlength="280" placeholder="Text (blank: the usual one for the label)" value="' + esc(n.text || "") + '"></div>' +
 				'<div class="field"><input data-k="url" placeholder="Learn more link (blank: the rules page)" value="' + esc(n.url || "") + '"></div>' +
-				'<p class="dim small">Visibility limited also keeps the post out of For you and search.</p><button class="btn primary" data-save-notice>Save label</button></div>' +
-				(can("admin") ? '<div><b>Shown counts</b><p class="dim small">Blank shows the real number. Only the number changes, not who liked or reposted.</p><div class="row" style="flex-wrap:wrap">' +
+				'<p class="dim small">Visibility limited also keeps the post out of For you and search.</p><button class="btn primary" data-save-notice>Save label</button></div>' : "") +
+				(can("setPostCounts") ? '<div><b>Shown counts</b><p class="dim small">Blank shows the real number. Only the number changes, not who liked or reposted.</p><div class="row" style="flex-wrap:wrap">' +
 					["likes", "replies", "reposts", "quotes", "bookmarks", "views"].map((k) => '<label class="small" style="width:30%">' + k + '<input data-k="' + k + '" type="number" min="0" value="' + (c[k] ?? "") + '"></label>').join("") +
 					'</div><button class="btn primary" data-save-counts style="margin-top:8px">Save counts</button></div>' : "") + "</div>";
 		};
@@ -819,11 +888,11 @@ const RENDER = {
 						(p.hidden ? ' <span class="pill suspended">hidden</span>' : "") + (p.sensitive ? ' <span class="pill restricted">sensitive</span>' : "") +
 						(p.notice ? ' <span class="pill restricted">' + esc(NOTICE_LABELS[p.notice.type] || p.notice.type) + "</span>" : "") + (p.count_overrides ? ' <span class="pill">counts set</span>' : "") +
 						'<div class="dim small">' + p.likes + ' likes · <a href="/' + esc(p.screen_name) + "/status/" + esc(p.id) + '" target="_blank">open</a></div></td><td><a href="#user/' + "" + '" data-handle="' + esc(p.screen_name) + '">@' + esc(p.screen_name) + '</a></td><td class="small dim">' + esc(when(p.created_at)) + "</td><td>" +
-						(can("moderator") ? '<div class="row" style="flex-wrap:nowrap">' +
-							'<button class="btn" data-vis="' + esc(p.id) + '" data-hidden="' + !p.hidden + '" data-sensitive="' + !!p.sensitive + '" title="Hidden posts are seen by staff only">' + (p.hidden ? "Show" : "Hide") + "</button>" +
-							'<button class="btn" data-vis="' + esc(p.id) + '" data-hidden="' + !!p.hidden + '" data-sensitive="' + !p.sensitive + '" title="Media behind a content warning">' + (p.sensitive ? "Not sensitive" : "Sensitive") + "</button>" +
-							'<button class="btn" data-edit="' + esc(p.id) + '">Edit</button>' +
-							'<button class="btn danger" data-del="' + esc(p.id) + '">Delete</button></div>' : "") + "</td></tr>" +
+						'<div class="row" style="flex-wrap:nowrap">' +
+							(can("setPostVisibility") ? '<button class="btn" data-vis="' + esc(p.id) + '" data-hidden="' + !p.hidden + '" data-sensitive="' + !!p.sensitive + '" title="Hidden posts are seen by staff only">' + (p.hidden ? "Show" : "Hide") + "</button>" +
+								'<button class="btn" data-vis="' + esc(p.id) + '" data-hidden="' + !!p.hidden + '" data-sensitive="' + !p.sensitive + '" title="Media behind a content warning">' + (p.sensitive ? "Not sensitive" : "Sensitive") + "</button>" : "") +
+							(can("setPostNotice") || can("setPostCounts") ? '<button class="btn" data-edit="' + esc(p.id) + '">Edit</button>' : "") +
+							(can("deletePost") ? '<button class="btn danger" data-del="' + esc(p.id) + '">Delete</button>' : "") + "</div></td></tr>" +
 						'<tr data-editor="' + esc(p.id) + '" hidden><td colspan="4">' + postEditor(p) + "</td></tr>").join("") + "</table>"
 				: '<div class="empty">No posts match.</div>';
 			$("#list").querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => {
@@ -833,7 +902,8 @@ const RENDER = {
 			$("#list").querySelectorAll("[data-editor]").forEach((row) => {
 				const id = row.dataset.editor;
 				const val = (k) => row.querySelector('[data-k="' + k + '"]').value;
-				row.querySelector("[data-save-notice]").onclick = () => act(() => api("setPostNotice", { id, type: val("type"), text: val("text"), url: val("url") }), "Label saved").then(load);
+				const ns = row.querySelector("[data-save-notice]");
+				if (ns) ns.onclick = () => act(() => api("setPostNotice", { id, type: val("type"), text: val("text"), url: val("url") }), "Label saved").then(load);
 				const cs = row.querySelector("[data-save-counts]");
 				if (cs) cs.onclick = () => act(() => api("setPostCounts", { id, counts: Object.fromEntries(["likes", "replies", "reposts", "quotes", "bookmarks", "views"].map((k) => [k, val(k)])) }), "Counts saved").then(load);
 			});
@@ -878,17 +948,17 @@ const RENDER = {
 				'<label class="small dim">Uses each <input id="qu" type="number" min="1" max="100" style="width:70px" value="' + q.uses + '"></label>' +
 				'<label class="small dim">From account age (days) <input id="qa" type="number" min="0" max="3650" style="width:80px" value="' + q.min_age_days + '"></label>' +
 				(can("admin") ? '<button class="btn" id="qsave">Save</button>' : "") + "</div></div>" +
-			(can("admin") ? '<div class="box" style="margin-bottom:16px"><h2>Make invites</h2><div class="row">' +
+			(can("createInvite") ? '<div class="box" style="margin-bottom:16px"><h2>Make invites</h2><div class="row">' +
 				'<label class="small dim">How many <input id="n" type="number" min="1" max="50" value="1" style="width:70px"></label>' +
 				'<label class="small dim">Uses each <input id="u" type="number" min="1" value="1" style="width:80px"></label>' +
 				'<label class="small dim">Expires in days <input id="d" type="number" min="0" placeholder="never" style="width:90px"></label>' +
 				'<label class="small dim">Joins organisation <select id="o"><option value="">none</option>' + orgs.map((o) => '<option value="' + esc(o.id) + '">@' + esc(o.screen_name) + "</option>").join("") + "</select></label>" +
 				'<button class="btn primary" id="make">Make</button></div><div id="made"></div></div>' : "") +
 			'<div class="scroll"><table class="table"><tr><th>Code</th><th>State</th><th>Used</th><th>By</th><th>Made</th><th></th></tr>' +
-			invites.map((i) => '<tr><td class="code">' + esc(i.code) + (i.org ? ' <span class="dim small">→ @' + esc(i.org) + "</span>" : "") + "</td><td>" + esc(state(i)) + "</td><td>" + i.uses + "/" + i.max_uses +
+			invites.map((i) => '<tr><td class="code">' + (i.code ? esc(i.code) : '<span class="dim">hidden</span>') + (i.org ? ' <span class="dim small">→ @' + esc(i.org) + "</span>" : "") + "</td><td>" + esc(state(i)) + "</td><td>" + i.uses + "/" + i.max_uses +
 				(i.used_by.length ? '<div class="dim small">' + i.used_by.map((n) => "@" + esc(n)).join(", ") + "</div>" : "") + '</td><td class="small">' + (i.created_by ? "@" + esc(i.created_by) : '<span class="dim">script</span>') +
 				'</td><td class="small dim">' + esc(when(i.created_at)) + (i.expires_at ? "<br>until " + esc(when(i.expires_at)) : "") + "</td><td>" +
-				(can("admin") && state(i) === "open" ? '<button class="btn" data-copy="' + esc(i.code) + '">Copy link</button> <button class="btn danger" data-revoke="' + esc(i.code) + '">Revoke</button>' : "") + "</td></tr>").join("") +
+				(state(i) === "open" && i.code ? '<button class="btn" data-copy="' + esc(i.code) + '">Copy link</button>' + (can("revokeInvite") ? ' <button class="btn danger" data-revoke="' + esc(i.code) + '">Revoke</button>' : "") : "") + "</td></tr>").join("") +
 			"</table></div>";
 		bindTabs();
 		if ($("#qsave")) $("#qsave").onclick = () => act(() => api("saveInviteQuota", { enabled: $("#qon").checked, per_month: Number($("#qn").value), uses: Number($("#qu").value), min_age_days: Number($("#qa").value) }), "Saved").then(route);
@@ -1038,19 +1108,19 @@ const RENDER = {
 	async automod(main) {
 		main.innerHTML = '<h1>Automod</h1><p class="dim">New posts and profiles are checked as they\'re written. This looks through what was there before: visible posts, newest first, and every profile. Nothing happens to what it finds until you act. Settings &gt; Automod holds the strike ladder.</p>' +
 			'<div class="bar"><button class="btn primary" id="scan">Scan</button><span class="dim small" id="scanState"></span></div><div id="hits"></div>' +
-			'<h2>Held after deletion</h2><p class="dim small">When a suspended account is deleted, its handles, email and recent addresses stay here, so nobody can take the handle or a look-alike of it, and sign-ups from that email or those addresses are refused. Handles of suspended accounts that still exist are held without being listed.</p><div id="held"></div>';
+			(can("heldIdentities") ? '<h2>Held after deletion</h2><p class="dim small">When a suspended account is deleted, its handles, email and recent addresses stay here, so nobody can take the handle or a look-alike of it, and sign-ups from that email or those addresses are refused. Handles of suspended accounts that still exist are held without being listed.</p><div id="held"></div>' : "");
 		const drawHeld = async () => {
 			const { held } = await api("heldIdentities");
 			$("#held").innerHTML = held.length
 				? '<div class="scroll"><table class="table"><tr><th>Kind</th><th>Value</th><th>Why</th><th></th></tr>' + held.map((h, i) => "<tr><td>" + esc(h.kind) + '</td><td class="code">' + esc(h.value) + '</td><td class="small dim">' + esc(h.reason) + " · " + esc(when(h.created_at)) + "</td><td>" +
-					(can("admin") ? '<button class="btn" data-release="' + i + '">Release</button>' : "") + "</td></tr>").join("") + "</table></div>"
+					(can("releaseIdentity") ? '<button class="btn" data-release="' + i + '">Release</button>' : "") + "</td></tr>").join("") + "</table></div>"
 				: '<div class="empty">Nothing held.</div>';
 			$("#held").querySelectorAll("[data-release]").forEach((b) => b.onclick = () => {
 				const h = held[Number(b.dataset.release)];
 				act(() => api("releaseIdentity", { kind: h.kind, value: h.value }), "Released").then(drawHeld);
 			});
 		};
-		drawHeld();
+		if (can("heldIdentities")) drawHeld();
 		const found = [];
 		let next = null, scanned = 0;
 		const draw = () => {
@@ -1084,7 +1154,7 @@ const RENDER = {
 	async audit(main, filter = {}) {
 		const { entries } = await api("audit", filter);
 		main.innerHTML = '<h1>Audit log</h1><div class="bar"><input id="auditWho" placeholder="@handle" value="' + esc(filter.target || "") + '">' +
-			'<select id="auditAction"><option value="">Every action</option>' + ["automod_strike", "automod_second_chance", "escalate", "expire_sanction", "auto_suspend_name", "temporary_status", "set_status", "bulk_status", "send_staff_message", "revoke_strike", "resolve_appeal", "save_automod"]
+			'<select id="auditAction"><option value="">Every action</option>' + ["automod_strike", "automod_second_chance", "escalate", "expire_sanction", "auto_suspend_name", "temporary_status", "set_status", "bulk_status", "send_staff_message", "revoke_strike", "resolve_appeal", "save_automod", "set_role", "set_staff_permissions"]
 				.map((a) => '<option value="' + a + '"' + (filter.action === a ? " selected" : "") + ">" + a.replace(/_/g, " ") + "</option>").join("") + "</select>" +
 			'<label class="row"><input type="checkbox" id="auditAuto"' + (filter.automatic ? " checked" : "") + '> Automatic only</label><button class="btn" id="auditGo">Filter</button></div><div class="scroll">' + (entries.length
 			? '<table class="table"><tr><th>When</th><th>Who</th><th>Did</th><th>To</th><th>Details</th></tr>' +
@@ -1133,75 +1203,75 @@ async function renderUser(main, id) {
 	main.innerHTML =
 		'<p><a href="#users">← Users</a></p>' + person(u) +
 		'<p class="dim small">Joined ' + esc(when(u.created_at)) + " · last sign-in " + esc(when(u.last_seen_at)) + " · " + u.posts + " posts · " + u.followers + " followers · " + u.sessions + " active sessions" +
-		(u.invite_code ? " · invite " + '<span class="code">' + esc(u.invite_code) + "</span>" + (u.invited_by ? " from @" + esc(u.invited_by) : "") : "") +
+		(u.invite_code ? " · invite " + '<span class="code">' + esc(u.invite_code) + "</span>" : u.invited_by ? " · invited" : "") + (u.invited_by ? " from @" + esc(u.invited_by) : "") +
 		(u.org ? " · affiliate of @" + esc(u.org) : "") + ' · <a href="/' + esc(u.screen_name) + '" target="_blank">open profile</a></p>' +
 		'<div class="grid2">' +
 		// profile
 		'<div class="box"><h2>Profile</h2>' +
 		[["name", "Name", u.name], ["screen_name", "Handle", u.screen_name], ["location", "Location", u.location], ["website", "Website", u.website]]
-			.map(([k, l, v]) => '<div class="field"><label>' + l + '</label><input data-f="' + k + '" value="' + esc(v) + '"' + (can("admin") ? "" : " disabled") + "></div>").join("") +
-		'<div class="field"><label>Bio</label><textarea data-f="bio"' + (can("admin") ? "" : " disabled") + ">" + esc(u.bio) + "</textarea></div>" +
-		'<div class="field"><label>Account based in (About this account; blank shows the detected region' + (u.country ? ", " + esc(u.country) : "") + ')</label><input data-f="based_in" maxlength="50" value="' + esc(u.based_in_override ?? "") + '"' + (can("admin") ? "" : " disabled") + "></div>" +
-		(can("admin") ? '<button class="btn primary" id="save">Save profile</button>' : "") +
-		(can("admin") ? '<h2 style="margin-top:20px">Shown counts</h2><p class="dim small">Blank shows the real number. Only the number on the profile changes, not the lists.</p><div class="row">' +
+			.map(([k, l, v]) => '<div class="field"><label>' + l + '</label><input data-f="' + k + '" value="' + esc(v) + '"' + (can("updateUser") ? "" : " disabled") + "></div>").join("") +
+		'<div class="field"><label>Bio</label><textarea data-f="bio"' + (can("updateUser") ? "" : " disabled") + ">" + esc(u.bio) + "</textarea></div>" +
+		'<div class="field"><label>Account based in (About this account; blank shows the detected region' + (u.country ? ", " + esc(u.country) : "") + ')</label><input data-f="based_in" maxlength="50" value="' + esc(u.based_in_override ?? "") + '"' + (can("updateUser") ? "" : " disabled") + "></div>" +
+		(can("updateUser") ? '<button class="btn primary" id="save">Save profile</button>' : "") +
+		(can("setUserCounts") ? '<h2 style="margin-top:20px">Shown counts</h2><p class="dim small">Blank shows the real number. Only the number on the profile changes, not the lists.</p><div class="row">' +
 			["followers", "following"].map((k) => '<label class="small" style="flex:1">' + k + '<input data-count="' + k + '" type="number" min="0" value="' + ((u.count_overrides || {})[k] ?? "") + '"></label>').join("") +
 			'</div><button class="btn" id="saveCounts" style="margin-top:8px">Save counts</button>' : "") + "</div>" +
 		// badges
-		'<div class="box"><h2>Badge and flag</h2><div class="field"><label>Verification badge</label><select id="badge"' + (can("admin") ? "" : " disabled") + ">" +
+		'<div class="box"><h2>Badge and flag</h2><div class="field"><label>Verification badge</label><select id="badge"' + (can("setBadge") ? "" : " disabled") + ">" +
 		[["", "none"], ["blue", "blue"], ["business", "gold (organisation)"], ["government", "grey (government organisation)"], ["government_individual", "grey (government official)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.verified_type ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
-		'</select></div><div class="field"><label>Translator badge (a globe after the verification badge)</label><select id="translator"' + (can("admin") ? "" : " disabled") + ">" +
+		'</select></div><div class="field"><label>Translator badge (a globe after the verification badge)</label><select id="translator"' + (can("setTranslator") ? "" : " disabled") + ">" +
 		[["", "none"], ["translator", "blue (translator)"], ["moderator", "gold (translator moderator)"], ["approver", "yellow (approver)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.translator ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
-		'</select></div><div class="field"><label>Profile label (under the name, where X shows "Parody account"; <a href="#badges">make one</a>)</label><select id="plabel"' + (can("admin") ? "" : " disabled") + ">" +
+		'</select></div><div class="field"><label>Profile label (under the name, where X shows "Parody account"; <a href="#badges">make one</a>)</label><select id="plabel"' + (can("setProfileLabel") ? "" : " disabled") + ">" +
 		[["None", "none"], ["Parody", "Parody account"], ["Commentary", "Commentary account"], ["Fan", "Fan account"]].concat(labels.map((l) => [l.id, l.text])).map(([v, l]) => '<option value="' + esc(v) + '"' + ((u.label_id || u.parody_label || "None") === v ? " selected" : "") + ">" + esc(l) + "</option>").join("") +
 		'</select></div><div class="field"><label>Pride flag</label><div class="flags" id="flags">' +
-		[{ id: "", name: "none" }].concat(flags).map((f) => '<button type="button" title="' + esc(f.name) + '" data-flag="' + esc(f.id) + '" class="' + ((u.flag ?? "") === f.id ? "on" : "") + '"' + (can("admin") ? "" : " disabled") + ">" +
+		[{ id: "", name: "none" }].concat(flags).map((f) => '<button type="button" title="' + esc(f.name) + '" data-flag="' + esc(f.id) + '" class="' + ((u.flag ?? "") === f.id ? "on" : "") + '"' + (can("setFlag") ? "" : " disabled") + ">" +
 			(f.id ? '<img alt="" src="/public/flag-' + esc(f.id) + '.svg">' : "none") + "</button>").join("") + "</div></div>" +
 		'<div class="field"><label>Custom badges, in the order they show (<a href="#badges">make one</a>)</label>' +
 		(u.badge_ids.length ? '<div class="list">' + u.badge_ids.map((bid, i) => {
 			const b = badges.find((x) => x.id === bid);
 			return '<div class="row" style="margin-bottom:6px"><img alt="" src="/public/badge-' + esc(bid) + '.png" width="20" height="20" style="border-radius:3px"><span style="flex:1">' + esc(b?.name ?? "?") + "</span>" +
-				(can("admin") ? (i ? '<button class="btn" data-up="' + i + '" title="Show earlier"><span class="icon">arrow_upward</span></button>' : "") + '<button class="btn" data-drop="' + i + '" title="Remove"><span class="icon">close</span></button>' : "") + "</div>";
+				(can("setBadges") ? (i ? '<button class="btn" data-up="' + i + '" title="Show earlier"><span class="icon">arrow_upward</span></button>' : "") + '<button class="btn" data-drop="' + i + '" title="Remove"><span class="icon">close</span></button>' : "") + "</div>";
 		}).join("") + "</div>" : '<p class="dim small" style="margin:0">None.</p>') +
-		(can("admin") && badges.some((b) => !u.badge_ids.includes(b.id)) ? '<select id="addBadge"><option value="">Add a badge…</option>' + badges.filter((b) => !u.badge_ids.includes(b.id)).map((b) => '<option value="' + esc(b.id) + '">' + esc(b.name) + "</option>").join("") + "</select>" : "") +
+		(can("setBadges") && badges.some((b) => !u.badge_ids.includes(b.id)) ? '<select id="addBadge"><option value="">Add a badge…</option>' + badges.filter((b) => !u.badge_ids.includes(b.id)).map((b) => '<option value="' + esc(b.id) + '">' + esc(b.name) + "</option>").join("") + "</select>" : "") +
 		'<p class="dim small" style="margin:4px 0 0">The first one fills X\'s badge slot (after an organisation\'s badge, if any); the rest and the flag follow it.</p></div>' +
-		(isOrg ? '<div class="field"><label>Badge its affiliates wear</label><select id="orgBadge"' + (can("admin") ? "" : " disabled") + ">" + badgeOptions(u.org_badge_id, "its profile picture") + "</select></div>" : "") +
+		(isOrg ? '<div class="field"><label>Badge its affiliates wear</label><select id="orgBadge"' + (can("setOrgBadge") ? "" : " disabled") + ">" + badgeOptions(u.org_badge_id, "its profile picture") + "</select></div>" : "") +
 		"</div>" +
 		// standing
 		'<div class="box"><h2>Standing</h2><p class="dim small">Now: <b>' + esc(u.status) + "</b>" + (u.status_until ? " until " + esc(when(u.status_until)) : "") + "</p>" +
 		'<p class="dim small">Active strikes: <b>' + strikes + "</b>. The next strike " + (next_step < 0 ? "suspends for good" : next_step > 0 ? "suspends for " + next_step + " hours" : "is a warning") + ".</p>" +
 		'<div class="field"><label>Reason (kept in the audit log)</label><input id="reason" placeholder="optional"></div>' +
-		'<div class="field"><label>For</label><select id="for"' + (!can("moderator") || self ? " disabled" : "") + '><option value="">until lifted</option><option value="1">1 hour</option><option value="24">1 day</option><option value="168">1 week</option><option value="720">30 days</option></select></div><div class="row">' +
+		'<div class="field"><label>For</label><select id="for"' + (!can("setTemporaryStatus") || self ? " disabled" : "") + '><option value="">until lifted</option><option value="1">1 hour</option><option value="24">1 day</option><option value="168">1 week</option><option value="720">30 days</option></select></div><div class="row">' +
 		[["active", "Reinstate", ""], ["restricted", "Restrict", "Can read, can't post"], ["limited", "Limit", "Only followers see their posts"], ["suspended", "Suspend", "Signed out, hidden everywhere"]]
-			.map(([s, l, t]) => '<button class="btn' + (s === "suspended" ? " danger" : "") + '" data-status="' + s + '" title="' + esc(t) + '"' + (u.status === s || !can("moderator") || self ? " disabled" : "") + ">" + l + "</button>").join("") +
+			.map(([s, l, t]) => '<button class="btn' + (s === "suspended" ? " danger" : "") + '" data-status="' + s + '" title="' + esc(t) + '"' + (u.status === s || !can("setStatus") || self ? " disabled" : "") + ">" + l + "</button>").join("") +
 		'</div><p class="dim small">Restrict: can read, can\'t post. Limit: only followers see their posts. Suspend: signed out and hidden everywhere.</p></div>' +
 		// access
-		'<div class="box"><h2>Access</h2><div class="row"><button class="btn" id="reset">Reset password</button><button class="btn" id="signout">Sign out everywhere</button></div><div id="secret"></div>' +
-		'<label class="row" style="margin-top:14px"><input type="checkbox" id="notes-access"' + (u.notes_writer ? " checked" : "") + (can("admin") ? "" : " disabled") + '>Community Notes writing access</label>' +
+		'<div class="box"><h2>Access</h2><div class="row">' + (can("resetPassword") ? '<button class="btn" id="reset">Reset password</button>' : "") + (can("signOut") ? '<button class="btn" id="signout">Sign out everywhere</button>' : "") + '</div><div id="secret"></div>' +
+		'<label class="row" style="margin-top:14px"><input type="checkbox" id="notes-access"' + (u.notes_writer ? " checked" : "") + (can("setNotesAccess") ? "" : " disabled") + '>Community Notes writing access</label>' +
 		(can("admin") ? '<div class="field" style="margin-top:14px"><label>Staff role</label><select id="role"><option value="">none</option>' + ["support", "moderator", "admin"].map((r) => '<option' + (u.role === r ? " selected" : "") + ">" + r + "</option>").join("") + "</select></div>" : "") +
-		(can("admin") && !self ? '<div class="field" style="margin-top:14px"><label>Delete account (type @' + esc(u.screen_name) + ' to confirm)</label><div class="row"><input id="confirm" placeholder="' + esc(u.screen_name) + '"><button class="btn danger" id="delete">Delete forever</button></div></div>' : "") +
+		(can("deleteUser") && !self ? '<div class="field" style="margin-top:14px"><label>Delete account (type @' + esc(u.screen_name) + ' to confirm)</label><div class="row"><input id="confirm" placeholder="' + esc(u.screen_name) + '"><button class="btn danger" id="delete">Delete forever</button></div></div>' : "") +
 		"</div>" +
 		// messages, private notes, sessions
 		'<div class="box"><h2>Messages to the account</h2><p class="dim small">They arrive in its notifications. A warning or strike can be appealed.</p>' +
 		(messages.length ? '<div class="list" style="margin-bottom:12px">' + messages.map((m) => '<p><span class="pill' + (m.kind === "strike" ? " suspended" : m.kind === "warning" ? " restricted" : "") + '">' + esc(m.kind) + "</span> " +
 			(m.revoked_at ? '<s class="dim">' + esc(m.body) + "</s>" : esc(m.body)) + '<br><span class="dim small">' + (m.actor ? "@" + esc(m.actor) + " · " : "") + esc(when(m.created_at)) + (m.read_at ? " · read" : "") + (m.revoked_at ? " · withdrawn" : "") + "</span>" +
-			(m.kind === "strike" && !m.revoked_at && can("moderator") ? ' <button class="btn" data-unstrike="' + esc(m.id) + '">Withdraw</button>' : "") + "</p>").join("") + "</div>" : "") +
-		(can("moderator") && !self ? '<div class="field"><select id="msgKind"><option value="message">Message</option><option value="warning">Warning</option><option value="strike">Strike</option></select></div>' +
+			(m.kind === "strike" && !m.revoked_at && can("revokeStrike") ? ' <button class="btn" data-unstrike="' + esc(m.id) + '">Withdraw</button>' : "") + "</p>").join("") + "</div>" : "") +
+		(can("sendStaffMessage") && !self ? '<div class="field"><select id="msgKind"><option value="message">Message</option><option value="warning">Warning</option><option value="strike">Strike</option></select></div>' +
 			'<div class="field"><textarea id="msgBody" maxlength="2000" placeholder="What they\'ll read"></textarea></div><label class="row" style="margin:6px 0"><input type="checkbox" id="msgEscalate" checked> A strike counts toward suspension</label><button class="btn primary" id="send">Send</button>' : "") + "</div>" +
 		'<div class="box"><h2>Staff notes</h2><p class="dim small">Only staff see these.</p>' +
 		(notes.length ? '<div class="list" style="margin-bottom:12px">' + notes.map((n) => '<p style="white-space:pre-wrap">' + esc(n.body) + '<br><span class="dim small">@' + esc(n.actor ?? "?") + " · " + esc(when(n.created_at)) + "</span></p>").join("") + "</div>" : "") +
-		'<div class="field"><textarea id="noteBody" maxlength="2000" placeholder="Context for other staff"></textarea></div><button class="btn primary" id="addNote">Add note</button></div>' +
+		(can("addStaffNote") ? '<div class="field"><textarea id="noteBody" maxlength="2000" placeholder="Context for other staff"></textarea></div><button class="btn primary" id="addNote">Add note</button>' : "") + "</div>" +
 		(handles.length ? '<div class="box"><h2>Handle history</h2><div class="list">' + handles.map((h) => "<p>@" + esc(h.old_name) + " → @" + esc(h.new_name) + ' <span class="dim small">' + esc(when(h.changed_at)) + "</span></p>").join("") + "</div></div>" : "") +
 		'<div class="box"><h2>Sessions</h2>' + (sessions === null ? '<p class="dim small">Hidden: this account is staff at your level or above.</p>'
 			: sessions.length ? '<div class="list">' + sessions.slice(0, 10).map((s) => "<p>" + esc(browser(s.user_agent)) + (s.current ? ' <span class="pill staff">you, now</span>' : "") +
 				'<br><span class="dim small">' + (s.ip ? esc(s.ip) + " · " : "") + "signed in " + esc(when(s.created_at)) + " · last active " + esc(when(s.last_seen_at)) + "</span>" +
-				(s.current ? "" : ' <button class="btn" data-session="' + esc(s.id) + '">Sign out</button>') + "</p>").join("") +
+				(s.current || !can("revokeSession") ? "" : ' <button class="btn" data-session="' + esc(s.id) + '">Sign out</button>') + "</p>").join("") +
 				(sessions.length > 10 ? '<p class="dim small">and ' + (sessions.length - 10) + ' older (Access → Sign out everywhere ends them all)</p>' : "") + "</div>"
 			: '<p class="dim small">Not signed in anywhere.</p>') + "</div>" +
 		"</div>" +
 		// organisation
-		(isOrg ? '<h2>Affiliates</h2>' + (can("admin") ? '<div class="bar"><input id="aff" placeholder="@handle to add"><button class="btn primary" id="addaff">Add affiliate</button></div>' : "") +
-			(affiliates.length ? '<div class="scroll"><table class="table">' + affiliates.map((a) => '<tr><td>' + person(a) + "</td><td>" + (can("admin") ? '<button class="btn danger" data-unaff="' + esc(a.id) + '">Remove</button>' : "") + "</td></tr>").join("") + "</table></div>" : '<div class="empty">No affiliates yet.</div>') : "") +
-		(alts.length ? '<h2>Seen from the same addresses</h2><p class="dim small">Accounts that signed in from an address this one used in the last 90 days. Shared networks put strangers here too.</p><p>' + alts.map((a) => '<a href="#user/' + esc(a.id) + '">@' + esc(a.screen_name) + "</a>" + (a.status !== "active" ? ' <span class="pill ' + esc(a.status) + '">' + esc(a.status) + "</span>" : "")).join(", ") + "</p>" : "") +
+		(isOrg ? '<h2>Affiliates</h2>' + (can("addAffiliate") ? '<div class="bar"><input id="aff" placeholder="@handle to add"><button class="btn primary" id="addaff">Add affiliate</button></div>' : "") +
+			(affiliates.length ? '<div class="scroll"><table class="table">' + affiliates.map((a) => '<tr><td>' + person(a) + "</td><td>" + (can("removeAffiliate") ? '<button class="btn danger" data-unaff="' + esc(a.id) + '">Remove</button>' : "") + "</td></tr>").join("") + "</table></div>" : '<div class="empty">No affiliates yet.</div>') : "") +
+		(alts?.length ? '<h2>Seen from the same addresses</h2><p class="dim small">Accounts that signed in from an address this one used in the last 90 days. Shared networks put strangers here too.</p><p>' + alts.map((a) => '<a href="#user/' + esc(a.id) + '">@' + esc(a.screen_name) + "</a>" + (a.status !== "active" ? ' <span class="pill ' + esc(a.status) + '">' + esc(a.status) + "</span>" : "")).join(", ") + "</p>" : "") +
 		(invited.length ? "<h2>Invited</h2><p>" + invited.map((i) => '<a href="#user/' + esc(i.id) + '">@' + esc(i.screen_name) + "</a>").join(", ") + "</p>" : "") +
 		"<h2>History</h2>" + (log.length ? '<table class="table">' + log.map((e) => '<tr><td class="small dim">' + esc(when(e.created_at)) + "</td><td>" + (e.automatic ? "automod" : "@" + esc(e.actor ?? "?")) + " " + esc(e.action.replace(/_/g, " ")) + '</td><td class="small dim code">' + esc(e.detail ? JSON.stringify(e.detail) : "") + "</td></tr>").join("") + "</table>" : '<div class="empty">No staff actions yet.</div>');
 
@@ -1223,16 +1293,16 @@ async function renderUser(main, id) {
 			? api("setTemporaryStatus", { id, status: b.dataset.status, hours, reason: $("#reason").value })
 			: api("setStatus", { id, status: b.dataset.status, reason: $("#reason").value }), "Standing changed").then(again);
 	});
-	$("#reset").onclick = async () => {
+	if ($("#reset")) $("#reset").onclick = async () => {
 		if (!(await ask("Give @" + u.screen_name + " a new password and sign them out?"))) return;
 		act(async () => {
 			const r = await api("resetPassword", { id });
 			$("#secret").innerHTML = '<div class="secret">New password: <span class="code">' + esc(r.password) + '</span><br><span class="dim small">Shown once. They can sign in with it now.</span></div>';
 		});
 	};
-	$("#signout").onclick = () => act(() => api("signOut", { id }), "Signed out").then(again);
+	if ($("#signout")) $("#signout").onclick = () => act(() => api("signOut", { id }), "Signed out").then(again);
 	if ($("#role")) $("#role").onchange = () => act(() => api("setRole", { id, role: $("#role").value }), "Role set").then(again);
-	if (can("admin")) $("#notes-access").onchange = () => act(() => api("setNotesAccess", { id, enabled: $("#notes-access").checked }), "Notes access updated").then(again);
+	if (can("setNotesAccess")) $("#notes-access").onchange = () => act(() => api("setNotesAccess", { id, enabled: $("#notes-access").checked }), "Notes access updated").then(again);
 	if ($("#delete")) $("#delete").onclick = () => act(async () => { await api("deleteUser", { id, confirm: $("#confirm").value }); go("users"); }, "Account deleted");
 	if ($("#addaff")) $("#addaff").onclick = () => act(() => api("addAffiliate", { orgId: id, screen_name: $("#aff").value }), "Affiliate added").then(again);
 	const setBadges = (list) => act(() => api("setBadges", { id, badgeIds: list }), "Badges saved").then(again);
@@ -1248,7 +1318,7 @@ async function renderUser(main, id) {
 		if ($("#msgKind").value === "strike" && !(await ask("Give @" + u.screen_name + " a strike?"))) return;
 		act(() => api("sendStaffMessage", { id, kind: $("#msgKind").value, body: $("#msgBody").value, escalate: $("#msgEscalate").checked }), "Sent").then(again);
 	};
-	$("#addNote").onclick = () => act(() => api("addStaffNote", { id, body: $("#noteBody").value }), "Note added").then(again);
+	if ($("#addNote")) $("#addNote").onclick = () => act(() => api("addStaffNote", { id, body: $("#noteBody").value }), "Note added").then(again);
 	main.querySelectorAll("[data-unstrike]").forEach((b) => b.onclick = () => act(() => api("revokeStrike", { id: b.dataset.unstrike }), "Strike withdrawn").then(again));
 	main.querySelectorAll("[data-session]").forEach((b) => b.onclick = () => act(() => api("revokeSession", { sessionId: b.dataset.session }), "Signed out").then(again));
 	main.querySelectorAll("[data-unaff]").forEach((b) => b.onclick = () => act(() => api("removeAffiliate", { orgId: id, userId: b.dataset.unaff }), "Removed").then(again));
@@ -1262,7 +1332,7 @@ async function renderUser(main, id) {
 		$("#main").innerHTML = '<div class="empty">' + esc(e.message) + ' <a href="/home">Back to {{instance}}</a></div>';
 		return;
 	}
-	$("#nav").insertAdjacentHTML("beforeend", Object.entries(PAGES).filter(([, p]) => !p.role || can(p.role)).map(([k, p]) => '<button data-page="' + k + '"><span class="icon">' + p.icon + "</span>" + esc(p.title) + "</button>").join("") +
+	$("#nav").insertAdjacentHTML("beforeend", Object.entries(PAGES).filter(([, p]) => !p.needs || can(p.needs)).map(([k, p]) => '<button data-page="' + k + '"><span class="icon">' + p.icon + "</span>" + esc(p.title) + "</button>").join("") +
 		'<button onclick="location.href=\'/home\'"><span class="icon">arrow_back</span>Back to {{instance}}</button>' +
 		'<div class="who">@' + esc(me.screen_name) + " · " + esc(me.role) + "</div>");
 	document.querySelectorAll("nav [data-page]").forEach((b) => b.onclick = () => go(b.dataset.page));

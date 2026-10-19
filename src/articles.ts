@@ -174,15 +174,17 @@ async function load(id: string): Promise<ArticleRow | undefined> {
 	return row as ArticleRow | undefined;
 }
 
+const unseenAuthor = async (viewerId: string, userId: string) =>
+	(await sql`select 1 where ${userId}::bigint in ${protectedFor(viewerId)} or ${userId}::bigint in ${suspendedFor(viewerId)}
+		or ${userId}::bigint in (select blocker_id from blocks where blocked_id = ${viewerId}::bigint)`).length > 0;
+
 // an article the viewer may see: their own in any state, anyone's once published
 export async function getArticle(viewerId: string, id: string, withContent = true): Promise<ArticleEntity | undefined> {
 	const row = await load(id);
 	if (!row || (row.state !== "Published" && String(row.user_id) !== viewerId)) return undefined;
 	// hidden by staff: only its author and staff see it
 	if (row.hidden && String(row.user_id) !== viewerId && !(await sql`select 1 where ${staffViewer(viewerId)}`).length) return undefined;
-	const [unseen] = await sql`select 1 where ${row.user_id}::bigint in ${protectedFor(viewerId)} or ${row.user_id}::bigint in ${suspendedFor(viewerId)}
-		or ${row.user_id}::bigint in (select blocker_id from blocks where blocked_id = ${viewerId}::bigint)`;
-	if (unseen) return undefined;
+	if (await unseenAuthor(viewerId, String(row.user_id))) return undefined;
 	return entity(row, await userById(viewerId, String(row.user_id)), withContent);
 }
 
@@ -263,7 +265,7 @@ export async function deleteArticle(viewerId: string, id: string) {
 
 // the editor's lists of drafts and published articles, newest change first
 export async function slice(viewerId: string, userId: string, lifecycle: string, cursor: unknown, count = 20) {
-	if (userId !== viewerId && lifecycle !== "Published") return { items: [], next: undefined };
+	if (userId !== viewerId && (lifecycle !== "Published" || (await unseenAuthor(viewerId, userId)))) return { items: [], next: undefined };
 	const before = typeof cursor === "string" && isId(cursor) ? cursor : undefined;
 	const rows = await sql`select ${columns} from articles a where a.user_id = ${userId}::bigint and a.state = ${lifecycle === "Published" ? "Published" : "Draft"}
 		and (not a.hidden or a.user_id = ${viewerId}::bigint or ${staffViewer(viewerId)}) ${before ? sql`and a.id < ${before}::bigint` : sql``} order by a.id desc limit ${count}`;

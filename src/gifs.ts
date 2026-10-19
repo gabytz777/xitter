@@ -85,9 +85,48 @@ export async function gifProxy(url: URL): Promise<Response> {
 		return new Response("bad url", { status: 400 });
 	}
 	if (!/^https?:$/.test(target.protocol) || !gifHostAllowed(target.host)) return new Response("not allowed", { status: 403 });
-	const upstream = await fetch(target, { signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
+	// Providers may redirect between their API and CDN hosts. Validate each hop.
+	let upstream: Response | undefined;
+	for (let hop = 0; hop < 4; hop++) {
+		upstream = await fetch(target, { signal: AbortSignal.timeout(10_000), redirect: "manual" }).catch(() => undefined);
+		if (!upstream || ![301, 302, 303, 307, 308].includes(upstream.status)) break;
+		const location = upstream.headers.get("location");
+		let next: URL;
+		try {
+			next = new URL(location ?? "", target);
+		} catch {
+			return new Response("bad redirect", { status: 502 });
+		}
+		await upstream.body?.cancel();
+		if (next.protocol !== "https:" || !gifHostAllowed(next.host)) return new Response("redirect not allowed", { status: 403 });
+		target = next;
+	}
 	if (!upstream?.ok) return new Response("not found", { status: 404 });
 	const type = upstream.headers.get("content-type") ?? "";
-	if (!/^image\//.test(type)) return new Response("not an image", { status: 415 });
-	return new Response(upstream.body, { headers: { "content-type": type, "cache-control": "private, max-age=86400" } });
+	if (!/^image\/(gif|png|jpeg|webp)(?:\s*;|$)/i.test(type)) {
+		await upstream.body?.cancel();
+		return new Response("not an image", { status: 415 });
+	}
+	const maxBytes = 20 * 1024 * 1024;
+	const length = Number(upstream.headers.get("content-length"));
+	if (length > maxBytes) {
+		await upstream.body?.cancel();
+		return new Response("image too large", { status: 413 });
+	}
+	const reader = upstream.body?.getReader();
+	if (!reader) return new Response("not found", { status: 404 });
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			size += value.byteLength;
+			if (size > maxBytes) return new Response("image too large", { status: 413 });
+			chunks.push(value);
+		}
+	} finally {
+		await reader.cancel().catch(() => {});
+	}
+	return new Response(new Blob(chunks), { headers: { "content-type": type, "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff" } });
 }
