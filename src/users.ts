@@ -107,10 +107,6 @@ export async function isPinnedFollowee(followeeId: string, actorId?: string): Pr
 	if (!wanted.length) return false;
 	const [row] = await sql`select lower(screen_name) as handle, role from users where id = ${followeeId}::bigint`;
 	if (!row || !wanted.includes(row.handle)) return false;
-	if (actorId && actorId !== followeeId) {
-		const [actor] = await sql`select role from users where id = ${actorId}::bigint`;
-		if (actor?.role) return false;
-	}
 	return true;
 }
 
