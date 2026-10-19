@@ -6,6 +6,7 @@
 import { sql } from "./db";
 import { newId } from "./ids";
 import { staffViewer } from "./staff-access";
+import { isPinnedFollowee } from "./users";
 
 // accounts the viewer blocked or was blocked by
 export const blockedFor = (viewerId: string) =>
@@ -42,6 +43,8 @@ export const hasMutedWord = (viewerId: string, surface: Surface, postId: ReturnT
 
 export async function setBlock(blockerId: string, blockedId: string, on: boolean): Promise<boolean> {
 	if (blockerId === blockedId) return false;
+	// blocking a pinned follow would quietly drop it, so it's refused too
+	if (on && (await isPinnedFollowee(blockedId))) return;
 	if (!on) {
 		await sql`delete from blocks where blocker_id = ${blockerId}::bigint and blocked_id = ${blockedId}::bigint`;
 		return true;

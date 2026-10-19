@@ -92,9 +92,33 @@ export async function userById(viewerId: string, id: string): Promise<User | und
 	return rows[0] && toUser(rows[0]);
 }
 
+// Accounts every member of the instance follows and cannot drop (PINNED_FOLLOWS
+// in the environment, comma-separated handles). Nothing to configure when unset.
+const pinnedFollows = () =>
+	(process.env.PINNED_FOLLOWS ?? "")
+		.split(",")
+		.map((h) => h.trim().replace(/^@/, "").toLowerCase())
+		.filter(Boolean);
+
+// True when this account is pinned. Staff are exempt: PINNED_FOLLOWS is a
+// rule for members, not a rule the owners of the instance are trapped by.
+export async function isPinnedFollowee(followeeId: string, actorId?: string): Promise<boolean> {
+	const wanted = pinnedFollows();
+	if (!wanted.length) return false;
+	const [row] = await sql`select lower(screen_name) as handle, role from users where id = ${followeeId}::bigint`;
+	if (!row || !wanted.includes(row.handle)) return false;
+	if (actorId && actorId !== followeeId) {
+		const [actor] = await sql`select role from users where id = ${actorId}::bigint`;
+		if (actor?.role) return false;
+	}
+	return true;
+}
+
 // Following a protected account asks instead; unfollowing also withdraws a request.
 export async function setFollow(followerId: string, followeeId: string, on: boolean) {
 	if (followerId === followeeId) return;
+	// a pinned follow can't be dropped, by unfollow or by going private
+	if (!on && (await isPinnedFollowee(followeeId))) return;
 	if (on && (await isBlockedEitherWay(followerId, followeeId))) return;
 	if (on) {
 		const [target] = await sql`select protected from users where id = ${followeeId}::bigint`;
