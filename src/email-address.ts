@@ -92,8 +92,9 @@ export async function emailRoute(req: Request, url: URL, viewer: Viewer | undefi
 					if (!candidate) return;
 					const [user] = await tx`select id from users where id = ${candidate.user_id}::bigint for update`;
 					if (!user) return;
+					// Check actual time after the account lock, rather than transaction start.
 					const [confirmation] = await tx`select email from email_confirmations where token_hash = ${hash(token)}
-						and user_id = ${candidate.user_id}::bigint and not used and created_at > now() - interval '1 day' for update`;
+						and user_id = ${candidate.user_id}::bigint and not used and created_at > clock_timestamp() - interval '1 day' for update`;
 					if (!confirmation) return;
 					const changed = await tx`update users set email = ${confirmation.email}, email_verified = true where id = ${candidate.user_id}::bigint
 						and not exists (select 1 from users o where lower(o.email) = lower(${confirmation.email}) and o.id <> ${candidate.user_id}::bigint) returning id`;

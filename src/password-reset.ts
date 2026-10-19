@@ -39,7 +39,7 @@ export async function requestReset(usernameOrEmail: string): Promise<void> {
 async function valid(token: string): Promise<{ user_id: string } | undefined> {
 	if (!/^[0-9a-f]{64}$/.test(token)) return undefined;
 	const [row] = await sql`select user_id::text from password_resets
-		where token_hash = ${hash(token)} and not used and created_at > now() - interval '1 hour'`;
+		where token_hash = ${hash(token)} and not used and created_at > clock_timestamp() - interval '1 hour'`;
 	return row;
 }
 
@@ -72,8 +72,9 @@ export async function resetRoute(req: Request, url: URL): Promise<Response> {
 	const changed = await sql.begin(async (tx) => {
 		// Serialize resets for this account, including requests using different links.
 		await tx`select id from users where id = ${row.user_id}::bigint for update`;
+		// Transaction-start time must not extend a link's life while this waits.
 		const [claimed] = await tx`update password_resets set used = true
-			where token_hash = ${hash(token)} and not used and created_at > now() - interval '1 hour'
+			where token_hash = ${hash(token)} and not used and created_at > clock_timestamp() - interval '1 hour'
 			returning user_id`;
 		if (!claimed) return false;
 		await tx`update users set password_hash = ${passwordHash} where id = ${row.user_id}::bigint`;

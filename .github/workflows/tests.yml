@@ -54,6 +54,7 @@ jobs:
       - name: Database regression tests
         run: |
           bun scripts/test-password-reset-concurrency.ts
+          DB_POOL_MAX=1 bun scripts/test-proof-expiry-locks.ts
           bun scripts/test-login-concurrency.ts
           bun scripts/test-password-change-concurrency.ts
           bun scripts/test-two-factor-concurrency.ts

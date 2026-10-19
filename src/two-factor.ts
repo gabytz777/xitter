@@ -57,11 +57,11 @@ export async function answerChallenge(token: string, code: string): Promise<{ us
 	if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)) return { unknown: true };
 	// Reserve an attempt before checking the code, including parallel guesses.
 	const [c] = await sql`update login_challenges set attempts = attempts + 1
-		where token = ${token}::uuid and created_at > now() - interval '15 minutes' and attempts < 5
+		where token = ${token}::uuid and created_at > clock_timestamp() - interval '15 minutes' and attempts < 5
 		returning user_id::text`;
 	if (!c) {
 		const exhausted = await sql`select 1 from login_challenges where token = ${token}::uuid
-			and created_at > now() - interval '15 minutes' and attempts >= 5`;
+			and created_at > clock_timestamp() - interval '15 minutes' and attempts >= 5`;
 		return exhausted.length ? { error: "Too many wrong codes. Start signing in again." } : { unknown: true };
 	}
 	if (!hit("code", c.user_id).ok) return { error: "Too many codes tried for this account. Wait an hour." };
@@ -74,8 +74,9 @@ export async function answerChallenge(token: string, code: string): Promise<{ us
 		const [u] = await tx`select status, totp_enabled, deactivated_at,
 			deactivated_at > now() - interval '30 days' as returning
 			from users where id = ${c.user_id}::bigint for update`;
+		// Waiting for the account lock must not extend this challenge's lifetime.
 		const used = await tx`delete from login_challenges where token = ${token}::uuid
-			and created_at > now() - interval '15 minutes' returning token`;
+			and created_at > clock_timestamp() - interval '15 minutes' returning token`;
 		if (!used.length || !u?.totp_enabled) return { unknown: true };
 		if (u.returning) await tx`update users set status = 'active', deactivated_at = null where id = ${c.user_id}::bigint`;
 		else if (u.status === "suspended" || u.deactivated_at) return { error: "This account is suspended." };
