@@ -113,6 +113,7 @@ jobs:
           bun scripts/test-password-reset.ts
           bun scripts/test-account-settings.ts
           bun scripts/test-two-factor.ts
+          bun scripts/test-passkeys.ts
           bun scripts/test-chat.ts
           bun scripts/test-protected-media.ts
           bun -e 'import { createUser } from "./src/auth"; import { createPost } from "./src/posts"; import { sql } from "./src/db"; const id = await createUser("ci_api_a", "CI API A", "testpass123"); await createUser("ci_api_b", "CI API B", "testpass123"); await createPost(id, "CI baseline post"); await sql.close();'

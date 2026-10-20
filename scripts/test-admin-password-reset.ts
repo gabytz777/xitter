@@ -37,6 +37,7 @@ try {
  await sql`insert into password_resets(token_hash,user_id) values (${digest(resetToken)},${target.id}::bigint)`;
  await sql`insert into email_confirmations(token_hash,user_id,email) values (${digest(emailToken)},${target.id}::bigint,'unused@example.test')`;
  await sql`insert into login_challenges(token,user_id) values (${challenge}::uuid,${target.id}::bigint)`;
+ await sql`insert into passkeys(id,user_id,public_key,alg,name) values (${`pk${suffix}`},${target.id}::bigint,'fixture',-7,'fixture')`;
  const oldHash=(await sql`select password_hash from users where id=${target.id}::bigint`)[0].password_hash;
  // Force the last revocation step to fail, proving earlier hash/session/token
  // mutations roll back rather than leaving a partially reset account.
@@ -48,6 +49,7 @@ try {
  assert.equal((await sql`select count(*)::int n from sessions where user_id=${target.id}::bigint`)[0].n,1);
  assert.equal((await sql`select used from password_resets where user_id=${target.id}::bigint`)[0].used,false);
  assert.equal((await sql`select count(*)::int n from login_challenges where user_id=${target.id}::bigint`)[0].n,1);
+ assert.equal((await sql`select count(*)::int n from passkeys where user_id=${target.id}::bigint`)[0].n,1);
  assert.equal((await sql`select used from email_confirmations where user_id=${target.id}::bigint`)[0].used,false);
  await sql.unsafe(`drop trigger ${trigger} on email_confirmations`);
  await sql.unsafe(`drop function ${trigger}()`); triggerCreated=false;
@@ -68,6 +70,7 @@ try {
  assert.equal((await sql`select used from password_resets where user_id=${target.id}::bigint`)[0].used,true);
  assert.equal((await sql`select used from email_confirmations where user_id=${target.id}::bigint`)[0].used,true);
  assert.equal((await sql`select count(*)::int n from login_challenges where user_id=${target.id}::bigint`)[0].n,0);
+ assert.equal((await sql`select count(*)::int n from passkeys where user_id=${target.id}::bigint`)[0].n,0,"passkeys someone else added go with the reset");
  assert.equal(await login(target.name,"OriginalFixture123"),undefined);
  assert(await login(target.name,password),"only newly issued password works");
  assert.equal((await sql`select count(*)::int n from audit_log where actor_id=${actor.id}::bigint and target=${target.id} and action='reset_password'`)[0].n,1);

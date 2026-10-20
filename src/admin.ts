@@ -377,6 +377,7 @@ const ACTIONS: Record<string, Action> = {
 			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.count_overrides, u.decor, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
 				(select coalesce(json_agg(ub.badge_id::text order by ub.position), '[]') from user_badges ub where ub.user_id = u.id) as badge_ids,
 				(select count(*)::int from sessions s where s.user_id = u.id) as sessions,
+				(select count(*)::int from api_tokens t where t.user_id = u.id) as api_tokens,
 				(select c.screen_name from invites i join users c on c.id = i.created_by where i.code = u.invite_code) as invited_by
 				from users u where u.id = ${id}::bigint`;
 			if (!u) throw new AdminError("No such account.", 404);
@@ -519,6 +520,8 @@ const ACTIONS: Record<string, Action> = {
 				await tx`delete from api_tokens where user_id = ${id}::bigint`;
 				await tx`update password_resets set used = true where user_id = ${id}::bigint and not used`;
 				await tx`delete from login_challenges where user_id = ${id}::bigint`;
+				await tx`delete from passkeys where user_id = ${id}::bigint`;
+				await tx`delete from passkey_challenges where user_id = ${id}::bigint`;
 				await tx`update email_confirmations set used = true where user_id = ${id}::bigint and not used`;
 			});
 			await audit(a, "reset_password", id);
@@ -534,6 +537,18 @@ const ACTIONS: Record<string, Action> = {
 			const rows = await sql`delete from sessions where user_id = ${id}::bigint returning token`;
 			await audit(a, "sign_out", id, { sessions: rows.length });
 			return { sessions: rows.length };
+		},
+	},
+
+	// personal tokens and connected-app grants alike: a leaked token outlives a sign-out
+	revokeApiTokens: {
+		role: "support",
+		run: async (a, b) => {
+			const id = idOf(b.id);
+			await guard(a, id, true);
+			const rows = await sql`delete from api_tokens where user_id = ${id}::bigint returning id`;
+			await audit(a, "revoke_api_tokens", id, { tokens: rows.length });
+			return { tokens: rows.length };
 		},
 	},
 

@@ -28,6 +28,7 @@ import { badgeImage, expireSanctions } from "./moderation";
 import { appealRoute, noticesApi, noticesPage } from "./staff-notices";
 import { forgotRoute, resetRoute } from "./password-reset";
 import { twoFactorRoute } from "./two-factor";
+import { passkeySignInRoute, passkeysRoute } from "./passkeys";
 import { extraBadges, instanceCard } from "./badges";
 import { decorationFile, decorationsFor } from "./decorations";
 import { decorationRoute } from "./decoration-settings";
@@ -356,6 +357,8 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/i/flow/add_email") return Response.redirect("/account/email", 302);
 	// and X's automated-account flow (automation.ts)
 	if (p === "/i/flow/enable_automated_account") return Response.redirect("/account/automation", 302);
+	// and X's passkey settings and flows: ours is a page (passkeys.ts)
+	if (/^\/(settings|i\/flow)\/.*passkey/i.test(p)) return Response.redirect("/account/passkeys", 302);
 	// the built-in "All" list (lists.ts)
 	if (p === "/all") return Response.redirect("/i/lists/1", 302);
 	if (p === "/login" || p === "/signup" || p.startsWith("/i/flow/")) {
@@ -395,6 +398,11 @@ async function route(req: Request): Promise<Response | undefined> {
 	}
 	if (p === "/account/email" || p === "/account/email/confirm") return emailRoute(req, url, viewer);
 	if (p.startsWith("/account/2fa") && viewer) return twoFactorRoute(req, url, viewer);
+	if ((p === "/account/passkeys" || p.startsWith("/account/passkeys/")) && viewer && !viewer.instance) return passkeysRoute(req, url, viewer);
+	if (p === "/account/passkey" || p.startsWith("/account/passkey/")) {
+		const done = await passkeySignInRoute(req, p);
+		if (done) return done;
+	}
 	if (p === "/account/notices" && viewer) return noticesPage(req, viewer);
 	if (p === "/account/invites" && viewer) return memberInvitesRoute(req, viewer);
 	if (p === "/account/api" && viewer) return apiTokensRoute(req, viewer);
@@ -440,6 +448,8 @@ async function route(req: Request): Promise<Response | undefined> {
 	}
 	// signed out: X's own home page with its sign-in form, and the dialog
 	if (!viewer && p !== "/" && !p.startsWith("/i/jf/onboarding")) return Response.redirect("/", 302);
+	// maintenance: guests see the notice; ?staff=1 is the sign-in page, for staff
+	if (!viewer && p === "/" && settings().operations.maintenance && !url.searchParams.has("staff")) return maintenancePage(true);
 	const [communityRows, flagRows, links] = viewer
 		? await Promise.all([
 			sql`select 1 from community_members where user_id = ${viewer.id}::bigint limit 1`,

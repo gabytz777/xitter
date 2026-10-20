@@ -36,7 +36,7 @@ try {
 	check("a wrong current password is refused", (await s.post("/i/account/change_password.json", { current_password: "nope", new_password: "newpass456", password_confirmation: "newpass456" })).status === 403);
 	check("a short new password is refused", (await s.post("/i/account/change_password.json", { current_password: "testpass123", new_password: "short", password_confirmation: "short" })).status === 400);
 	check("mismatched confirmation is refused", (await s.post("/i/account/change_password.json", { current_password: "testpass123", new_password: "newpass456", password_confirmation: "different1" })).status === 400);
-	check("password change works", (await s.post("/i/account/change_password.json", { current_password: "testpass123", new_password: "newpass456", password_confirmation: "newpass456" })).ok);
+	check("password change works", (await s.post("/i/account/change_password.json", { current_password: "testpass123", password: "newpass456", password_confirmation: "newpass456" })).ok);
 	check("the old password no longer signs in", !(await signIn(name, "testpass123")));
 	check("the new one does", !!(await signIn(name, "newpass456")));
 	const kept = await fetch(`${origin}/i/api/1.1/account/settings.json`, { headers: s.headers });

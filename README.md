@@ -54,7 +54,10 @@ copy during setup, and it stays on that machine.
   settings (activity and new-message digests, sent while you're away), sessions
   list with revoke, account access history (each sign-in
   with its app and address), two-factor sign-in with an
-  authenticator app and backup codes, password reset by email
+  authenticator app and backup codes, passkeys (Settings > Passkeys; the
+  sign-in dialog offers them in the username field and with a button, and
+  `/account/passkey` has one too; changing or resetting the password removes
+  them), password reset by email
 - Reporting posts and accounts
 - Account analytics (Overview, Content and each post's page) from the
   instance's own counts
@@ -353,3 +356,9 @@ expiry, write paths and request limits against one.
 [AGPL-3.0](LICENSE). If you run a modified instance for other people, you must
 offer them its source; the signed-out home page links to it (`SOURCE_URL`, or the admin
 panel's Settings).
+
+## Stars
+
+[![GitHub stars](https://img.shields.io/github/stars/Xittered/xitter?style=for-the-badge&logo=github&label=stars)](https://github.com/Xittered/xitter/stargazers)
+
+[![Star history](https://api.star-history.com/svg?repos=Xittered/xitter&type=Date)](https://star-history.com/#Xittered/xitter&Date)

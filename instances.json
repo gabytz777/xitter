@@ -1,10 +1,17 @@
 {
 	"version": 1,
-	"sequence": 7,
+	"sequence": 13,
 	"instances": [
 		{
-			"id": "larp.jye.fyi",
-			"name": "larp",
+			"id": "giggleshitter.gay",
+			"name": "giggleshitter",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "IXb5UsVkUbxH0a_Rub1PEJumKBufBtwwNtM5RZffwB0",
+			"state": "active"
+		},
+		{
+			"id": "jr1.xitter.space",
+			"name": "jr1",
 			"source_url": "https://github.com/Xittered/xitter",
 			"public_key": "MtOOU2p-wazLBbp3goandZk5MLD_BPKT9IikJcIFm5c",
 			"state": "active"
@@ -31,10 +38,24 @@
 			"state": "active"
 		},
 		{
-			"id": "xit.chococat.lol",
-			"name": "Xit",
+			"id": "x.transfur.org",
+			"name": "Xitter",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "swH4RzAMdz0qh_yPtNxYG4yJnWAPTgvXyeGjZ8rVGdI",
+			"state": "active"
+		},
+		{
+			"id": "x12.area12.lol",
+			"name": "X12",
 			"source_url": null,
-			"public_key": "C_9Cz5GkJjtSvWngLyVhfSTscLdcYo6Omx_EpSzQU5w",
+			"public_key": "BxDn6ty57Wbfp6R8fEk8cGxO8ucUDNfGDiDanyIvUs8",
+			"state": "active"
+		},
+		{
+			"id": "xitt.flex.pm",
+			"name": "Xittor",
+			"source_url": "https://github.com/FlexKleks/xitter",
+			"public_key": "954Dw1wqqWqe4XIXEaMx9wmUUBRiChbbl_vPzahgxfY",
 			"state": "active"
 		},
 		{
@@ -42,6 +63,13 @@
 			"name": "Xitter",
 			"source_url": "https://github.com/Xittered/xitter",
 			"public_key": "FDWBt_uXkSyKKyM2J_9bYLfryG5N0bHFseMprag-Qv8",
+			"state": "active"
+		},
+		{
+			"id": "xitter.space",
+			"name": "Xit",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "C_9Cz5GkJjtSvWngLyVhfSTscLdcYo6Omx_EpSzQU5w",
 			"state": "active"
 		},
 		{

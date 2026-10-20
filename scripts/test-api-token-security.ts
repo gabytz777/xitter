@@ -75,6 +75,20 @@ try {
 		if (action === "change") assert.equal((await bearer(await token(f.cookie))).status, 200, "retained current session can issue replacement tokens");
 	}
 	console.log("ok: password change, password recovery and admin reset revoke old read/write API credentials");
+	{
+		const f = await fixture(), first = await token(f.cookie), second = await token(f.cookie, "read");
+		const revoke = (who: { cookie: string; session: { csrf: string } }) => fetch(`${origin}/admin/api/revokeApiTokens`, { method: "POST",
+			headers: { cookie: who.cookie, "x-csrf-token": who.session.csrf, "content-type": "application/json" }, body: JSON.stringify({ id: f.id }) });
+		assert.equal((await revoke(stranger)).status, 403, "non-staff revoked someone's tokens");
+		assert.equal((await bearer(first)).status, 200);
+		const res = await revoke(admin); assert.equal(res.status, 200);
+		assert.equal((await res.json()).tokens, 2);
+		assert.equal((await bearer(first)).status, 401); assert.equal((await bearer(second)).status, 401);
+		assert.equal((await fetch(`${origin}/account/api`, { headers: { cookie: f.cookie } })).status, 200, "revoking tokens signed the account out");
+		const [entry] = await sql`select detail from audit_log where action = 'revoke_api_tokens' and target = ${f.id} order by id desc limit 1`;
+		assert.equal(entry?.detail?.tokens, 2);
+	}
+	console.log("ok: staff revoke every API token of an account, keep its sessions, and it is audited");
 	// Transaction-start time must not extend a session's validity while its
 	// token request waits for another account mutation to release the row lock.
 	const expiring = await fixture(), locked = Promise.withResolvers<void>(), expire = Promise.withResolvers<void>();

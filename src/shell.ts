@@ -6,6 +6,7 @@ import { loadBuild } from "./build";
 import { feature, settings } from "./settings";
 import { postLimitFor } from "./textlen";
 import { STICKER_PICKER_CSS, STICKER_PICKER_SCRIPT } from "./sticker-picker";
+import { PASSKEY_SCRIPT } from "./passkeys";
 import { FORGOT_SCRIPT, FRESH_SCRIPT, type MenuLink, TIDY_SCRIPT, hideCss, tidyData } from "./tidy";
 import { POST_CONTEXT_SCRIPT } from "./post-context";
 import { ERROR_SCRIPT } from "./errors";
@@ -287,6 +288,7 @@ ${user ? ERROR_SCRIPT : ""}
 ${TIDY_SCRIPT}
 ${FRESH_SCRIPT}
 ${FORGOT_SCRIPT}
+${user ? "" : PASSKEY_SCRIPT}
 ${FLAG_PICKER_SCRIPT}
 ${user ? STICKER_PICKER_SCRIPT : ""}
 ${POST_CONTEXT_SCRIPT}

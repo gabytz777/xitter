@@ -108,7 +108,7 @@ export async function oauthAuthorize(req: Request, url: URL, viewer: Viewer | un
 	}
 	const hidden = Object.entries({ response_type: "code", client_id: request.clientId, redirect_uri: request.redirect, state: request.state, scope: request.scope, code_challenge: request.challenge, code_challenge_method: "S256", csrf: viewer.csrf })
 		.map(([key, val]) => `<input type="hidden" name="${key}" value="${esc(val)}">`).join("");
-	return accountPage({ req, viewer, title: "Connect an app", referrer: "no-referrer", body: `<h1>Connect ${esc(request.name)}?</h1>
+	return accountPage({ req, viewer, title: "Connect an app", referrer: "same-origin", body: `<h1>Connect ${esc(request.name)}?</h1>
 <p>Registered by @${esc(request.owner)}. After approval, the app will return to <code>${esc(request.redirect)}</code>.</p>
 <p>${request.scope === "write" ? "This app can read your account and post, like, follow, and upload as you." : "This app can read what your account can see."}</p>
 <p>You can remove access at <a href="/account/apps">Connected apps</a>. Access expires after 30 days.</p>

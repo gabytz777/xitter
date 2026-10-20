@@ -83,11 +83,13 @@ export async function resetRoute(req: Request, url: URL): Promise<Response> {
 		await tx`delete from sessions where user_id = ${row.user_id}::bigint`;
 		await tx`delete from api_tokens where user_id = ${row.user_id}::bigint`;
 		await tx`delete from login_challenges where user_id = ${row.user_id}::bigint`;
+		await tx`delete from passkeys where user_id = ${row.user_id}::bigint`;
+		await tx`delete from passkey_challenges where user_id = ${row.user_id}::bigint`;
 		await tx`update email_confirmations set used = true where user_id = ${row.user_id}::bigint and not used`;
 		return true;
 	});
 	if (!changed) return page(req, `<h1>Link expired</h1><p>This reset link is invalid or has been used. <a href="/">Back to sign in</a>, then ask for a new one.</p>`, 410);
-	return page(req, `<h1>Password changed</h1><p>You can now <a href="/">sign in</a> with it. Every device was signed out.</p>`);
+	return page(req, `<h1>Password changed</h1><p>You can now <a href="/">sign in</a> with it. Every device was signed out and your passkeys were removed.</p>`);
 }
 
 // the sign-in dialog's "Forgot password?" leads here

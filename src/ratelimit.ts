@@ -36,6 +36,8 @@ export const RULES = {
 	upload: { limit: 150, window: 15 * MIN },
 	// sign-in and sign-up screens, per address
 	auth: { limit: 40, window: 15 * MIN },
+	// passkey challenges, per address: the sign-in dialog asks for one each time it opens
+	passkey: { limit: 200, window: 15 * MIN },
 	// password tries on one account, from anywhere
 	password: { limit: 10, window: 15 * MIN },
 	// second-factor codes tried on one account, from anywhere: each right

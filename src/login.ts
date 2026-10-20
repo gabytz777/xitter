@@ -78,15 +78,16 @@ export async function handleLogin(req: Request): Promise<Response> {
 	return signedIn(session);
 }
 
-// shown to signed-in accounts while an admin has maintenance mode on
-export function maintenancePage(): Response {
+// shown while an admin has maintenance mode on: to signed-in accounts, and to
+// guests, who get a way to the sign-in form so staff can still get in
+export function maintenancePage(staffLink = false): Response {
 	return html(
 		layout(
 			"Maintenance",
 			`<form>
 	<img class="logo" src="/public/logo-dark.png" alt="${esc(settings().instance_name)}">
 	<h1>Back soon</h1>
-	<p class="rules">${esc(settings().operations.message)}</p>
+	<p class="rules">${esc(settings().operations.message)}</p>${staffLink ? `\n\t<p class="alt"><a href="/?staff=1">Staff sign in</a></p>` : ""}
 </form>`,
 		),
 		503,

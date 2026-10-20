@@ -1,7 +1,7 @@
 // Builds the objects the client expects. Field sets follow the captured
 // responses; fields for features we do not have are constants.
 
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { bioEntities, urlEntities as linkEntities } from "./links";
 import type { User } from "./auth";
@@ -120,7 +120,7 @@ export function badgeList(u: User): Badge[] {
 // X's one label slot: "Automated by @owner" for a bot, a profile label, else
 // the first badge. The client puts a parody, commentary or fan label there
 // before anything we send. When a label has it, every badge goes through the
-// page script (badges.ts).
+// page script (badges.ts). A bot's other labels go the same way (hiddenLabels).
 const hasParodyLabel = (u: User) => !!u.parody_label && u.parody_label !== "None";
 export const labelTakesSlot = (u: User) => !!u.automated_by || hasParodyLabel(u) || !!u.label;
 
@@ -142,7 +142,44 @@ function parodyMask(): string {
 	return mask;
 }
 
+// the same mask for a bot's extra label (badges.ts), which always wants one:
+// a fresh instance hasn't downloaded the svg yet, but the pinned main bundle
+// names it, and the server fetches it on first use. "" isn't kept, so a client
+// fetched later is found
+let bundleMask: string | undefined;
+function parodyMaskIcon(): string {
+	if (parodyMask()) return parodyMask();
+	if (bundleMask !== undefined) return bundleMask;
+	try {
+		const build = JSON.parse(readFileSync(join(CLIENT_DIR, "build.json"), "utf8"));
+		const main = (build.scripts as string[] | undefined)?.find((p) => /(?:^|\/)main\.\w+\.js$/.test(p));
+		if (!main) return "";
+		const found = readFileSync(join(CLIENT_DIR, "abs", main.replace(/^\//, "")), "utf8").match(/parody-mask\.\w+\.svg/);
+		bundleMask = found ? `${PUBLIC_ORIGIN}/abs/responsive-web/client-web/${found[0]}` : "";
+		return bundleMask;
+	} catch {
+		return "";
+	}
+}
+
 const PCF_TEXT: Record<string, string> = { Parody: "Parody account", Commentary: "Commentary account", Fan: "Fan account" };
+const parodyText = (u: User) => PCF_TEXT[u.parody_label!] ?? `${u.parody_label} account`;
+
+// labels the client's one slot hides when "Automated by @owner" takes it;
+// badges.ts draws each as its own badge on that row
+export function hiddenLabels(u: User): { text: string; url?: string; icon?: string }[] {
+	if (!u.automated_by) return [];
+	const out: { text: string; url?: string; icon?: string }[] = [];
+	if (hasParodyLabel(u)) {
+		const icon = parodyMaskIcon();
+		out.push({ text: parodyText(u), url: `${PUBLIC_ORIGIN}/rules`, ...(icon ? { icon } : {}) });
+	}
+	if (u.label) {
+		const icon = u.label.badge_id ? `${PUBLIC_ORIGIN}/public/badge-${u.label.badge_id}.png` : parodyMaskIcon();
+		out.push({ text: u.label.text, ...(u.label.url ? { url: u.label.url } : {}), ...(icon ? { icon } : {}) });
+	}
+	return out;
+}
 
 // a staff-made label, in the shape the client gives its parody label
 function profileLabel(l: NonNullable<User["label"]>) {
@@ -172,7 +209,7 @@ function badgeLabel(u: User) {
 	if (u.automated_by) return automatedLabel(u.automated_by);
 	// the profile reads parody_commentary_fan_label, but search results, lists
 	// and other user cells only ask for this slot: the label goes in both
-	if (hasParodyLabel(u)) return profileLabel({ text: PCF_TEXT[u.parody_label!] ?? `${u.parody_label} account`, badge_id: null, url: `${PUBLIC_ORIGIN}/rules` });
+	if (hasParodyLabel(u)) return profileLabel({ text: parodyText(u), badge_id: null, url: `${PUBLIC_ORIGIN}/rules` });
 	if (u.label) return profileLabel(u.label);
 	const [first] = badgeList(u);
 	if (!first) return {};
@@ -203,8 +240,8 @@ export function userResult(u: User) {
 		location: { location: u.location },
 		media_permissions: { can_media_tag: true },
 		notifications_settings: { notifications_enabled: !!u.stats?.notifying },
-		// "None": the label travels in affiliates_highlighted_label (badgeLabel),
-		// which user cells in search and lists show and this field's label isn't
+		// "None": the slot is affiliates_highlighted_label (badgeLabel); extras a
+		// bot hid go through badges.ts. this field's label isn't shown
 		parody_commentary_fan_label: "None",
 		pinned_items: u.pinned_post_id ? { tweet_ids_str: [u.pinned_post_id] } : {},
 		possibly_sensitive: false,
@@ -287,8 +324,8 @@ export function legacyUser(u: User) {
 		muting: u.stats?.muting ?? false,
 		has_graduated_access: true,
 		created_at: u.created_at.toISOString(),
-		// "None": the label travels in affiliates_highlighted_label (badgeLabel),
-		// which user cells in search and lists show and this field's label isn't
+		// "None": the slot is affiliates_highlighted_label (badgeLabel); extras a
+		// bot hid go through badges.ts. this field's label isn't shown
 		parody_commentary_fan_label: "None",
 		can_dm: false,
 	};

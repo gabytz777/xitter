@@ -86,6 +86,26 @@ create table if not exists login_challenges (
 	attempts int not null default 0,
 	created_at timestamptz not null default now()
 );
+-- passkeys (passkeys.ts): id is the credential id, public_key its SPKI, both base64url
+create table if not exists passkeys (
+	id text primary key,
+	user_id bigint not null references users (id) on delete cascade,
+	public_key text not null,
+	alg int not null,
+	sign_count bigint not null default 0,
+	name text not null,
+	transports text[] not null default '{}',
+	backed_up boolean not null default false,
+	created_at timestamptz not null default now(),
+	last_used_at timestamptz
+);
+create index if not exists passkeys_user on passkeys (user_id);
+-- one per sign-in or set-up, used once; user_id only when adding a passkey
+create table if not exists passkey_challenges (
+	challenge text primary key,
+	user_id bigint references users (id) on delete cascade,
+	created_at timestamptz not null default now()
+);
 -- who has been shown a post (other than its author), once each
 create table if not exists post_views (
 	post_id bigint not null references posts (id) on delete cascade,
@@ -1084,8 +1104,8 @@ create table if not exists retired_identities (
 
 -- Profile labels staff make in the admin panel, worn where X shows "Parody
 -- account": the text, a custom badge as its icon (the parody mask without
--- one) and an optional link. An account wears one label at most, and none
--- with a parody, commentary or fan label.
+-- one) and an optional link. Staff and parody/commentary/fan labels don't
+-- share an account; an automated account can wear either (hiddenLabels).
 create table if not exists account_labels (
 	id bigint primary key,
 	text text not null check (char_length(text) between 1 and 40),

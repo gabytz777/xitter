@@ -1265,7 +1265,8 @@ async function renderUser(main, id) {
 			.map(([s, l, t]) => '<button class="btn' + (s === "suspended" ? " danger" : "") + '" data-status="' + s + '" title="' + esc(t) + '"' + (u.status === s || !can("setStatus") || self ? " disabled" : "") + ">" + l + "</button>").join("") +
 		'</div><p class="dim small">Restrict: can read, can\'t post. Limit: only followers see their posts. Suspend: signed out and hidden everywhere.</p></div>' +
 		// access
-		'<div class="box"><h2>Access</h2><div class="row">' + (canHere("resetPassword") ? '<button class="btn" id="reset">Reset password</button>' : "") + (canHere("signOut") ? '<button class="btn" id="signout">Sign out everywhere</button>' : "") + '</div><div id="secret"></div>' +
+		'<div class="box"><h2>Access</h2><div class="row">' + (canHere("resetPassword") ? '<button class="btn" id="reset">Reset password</button>' : "") + (canHere("signOut") ? '<button class="btn" id="signout">Sign out everywhere</button>' : "") +
+			(canHere("revokeApiTokens") ? '<button class="btn danger" id="revoketokens"' + (u.api_tokens ? "" : " disabled") + ">Revoke API tokens (" + u.api_tokens + ")</button>" : "") + '</div><div id="secret"></div>' +
 		'<label class="row" style="margin-top:14px"><input type="checkbox" id="notes-access"' + (u.notes_writer ? " checked" : "") + (canHere("setNotesAccess") ? "" : " disabled") + '>Community Notes writing access</label>' +
 		'<label class="row" style="margin-top:8px"><input type="checkbox" id="never-sensitive"' + (u.never_sensitive ? " checked" : "") + (can("setNeverSensitive") ? "" : " disabled") + '>Never mark their posts as sensitive</label>' +
 		(canHere("admin") ? '<div class="field" style="margin-top:14px"><label>Staff role</label><select id="role"><option value="">none</option>' + ["support", "moderator", "admin"].map((r) => '<option' + (u.role === r ? " selected" : "") + ">" + r + "</option>").join("") + "</select></div>" : "") +
@@ -1326,6 +1327,10 @@ async function renderUser(main, id) {
 		});
 	};
 	if ($("#signout")) $("#signout").onclick = () => act(() => api("signOut", { id }), "Signed out").then(again);
+	if ($("#revoketokens")) $("#revoketokens").onclick = async () => {
+		if (!(await ask("Revoke all of @" + u.screen_name + "'s API tokens? Their scripts, bots and connected apps stop working."))) return;
+		act(() => api("revokeApiTokens", { id }), "API tokens revoked").then(again);
+	};
 	if ($("#role")) $("#role").onchange = () => act(() => api("setRole", { id, role: $("#role").value }), "Role set").then(again);
 	if (can("setNeverSensitive")) $("#never-sensitive").onchange = () => act(() => api("setNeverSensitive", { id, enabled: $("#never-sensitive").checked }), "Sensitive marking updated").then(again);
 	if (canHere("setNotesAccess")) $("#notes-access").onchange = () => act(() => api("setNotesAccess", { id, enabled: $("#notes-access").checked }), "Notes access updated").then(again);
