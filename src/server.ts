@@ -380,9 +380,13 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/appeal") return appealRoute(req, server.requestIP(req)?.address ?? "");
 	// maintenance: staff carry on, everyone else waits. Signed-out visitors see
 	// it too, so an instance that is down for maintenance doesn't look alive.
-	if (settings().operations.maintenance && !viewer?.role) {
+	// Guests get upstream's "Staff sign in" link (login.ts), and its /?staff=1
+	// escape hatch has to be let through here too: this check runs first, so
+	// without that exception the sign-in page is unreachable while maintenance
+	// is on — including for staff, who could not switch it back off.
+	if (settings().operations.maintenance && !viewer?.role && !url.searchParams.has("staff")) {
 		if (API_PREFIX.test(p) || req.method !== "GET") return apiError(503, 130, settings().operations.message);
-		return maintenancePage();
+		return maintenancePage(true);
 	}
 	if (p === "/oauth/authorize") return oauthAuthorize(req, url, viewer);
 	if (p === "/account/apps" && viewer) return connectedAppsRoute(req, viewer);
@@ -448,8 +452,9 @@ async function route(req: Request): Promise<Response | undefined> {
 	}
 	// signed out: X's own home page with its sign-in form, and the dialog
 	if (!viewer && p !== "/" && !p.startsWith("/i/jf/onboarding")) return Response.redirect("/", 302);
-	// maintenance: guests see the notice; ?staff=1 is the sign-in page, for staff
-	if (!viewer && p === "/" && settings().operations.maintenance && !url.searchParams.has("staff")) return maintenancePage(true);
+	// upstream also guards maintenance here, but our check above runs first and
+	// already covered guests, so this line would never fire. Kept as upstream
+	// wrote it, minus the duplicate, to keep merge conflicts small.
 	const [communityRows, flagRows, links] = viewer
 		? await Promise.all([
 			sql`select 1 from community_members where user_id = ${viewer.id}::bigint limit 1`,
