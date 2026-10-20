@@ -3,6 +3,7 @@ import { blockedFor, federatedHiddenFor, isBlockedEitherWay, mutedFor, outOfView
 import { staffViewer } from "./staff-access";
 import { sql } from "./db";
 import { INSTANCE_ID } from "./federation";
+import { settings } from "./settings";
 
 // an account's custom badges in order, as a json list of { id, name }
 export const badgesOf = (userId: unknown) => sql`(select json_agg(json_build_object('id', b.id::text, 'name', b.name) order by ub.position, b.name)
@@ -100,13 +101,14 @@ export async function userById(viewerId: string, id: string): Promise<User | und
 	return rows[0] && toUser(rows[0]);
 }
 
-// Accounts every member of the instance follows and cannot drop (PINNED_FOLLOWS
-// in the environment, comma-separated handles). Nothing to configure when unset.
+// Accounts every member of the instance follows and cannot drop. The admin
+// panel's Settings tab writes the `pinned_follows` setting; PINNED_FOLLOWS in
+// the environment is the default (see DEFAULTS in settings.ts), so an .env
+// written before this became a setting still works. An explicitly empty
+// setting means "none pinned" and is respected — that is how the panel clears
+// the list — so the env var is only consulted when no setting row exists.
 const pinnedFollows = () =>
-	(process.env.PINNED_FOLLOWS ?? "")
-		.split(",")
-		.map((h) => h.trim().replace(/^@/, "").toLowerCase())
-		.filter(Boolean);
+	[...new Set(settings().pinned_follows.map((h) => h.trim().replace(/^@/, "").toLowerCase()).filter(Boolean))];
 
 // True when this account is pinned. Staff are exempt: PINNED_FOLLOWS is a
 // rule for members, not a rule the owners of the instance are trapped by.

@@ -790,6 +790,14 @@ const ACTIONS: Record<string, Action> = {
 				await setSetting("default_follows", found.map((f: any) => f.screen_name));
 				changed.push("default_follows");
 			}
+			if (Array.isArray(b.pinned_follows)) {
+				const handles = [...new Set(b.pinned_follows.map((h: unknown) => String(h).trim().replace(/^@/, "")).filter(Boolean))] as string[];
+				const found = handles.length ? await sql`select screen_name from users where lower(screen_name) = any(${sql.array(handles.map((h) => h.toLowerCase()), "TEXT")})` : [];
+				const missing = handles.filter((h) => !found.some((f: any) => f.screen_name.toLowerCase() === h.toLowerCase()));
+				if (missing.length) throw new AdminError(`No account named ${missing.map((m) => `@${m}`).join(", ")}.`);
+				await setSetting("pinned_follows", found.map((f: any) => f.screen_name));
+				changed.push("pinned_follows");
+			}
 			if (typeof b.source_url === "string") {
 				const url = b.source_url.trim();
 				if (!/^https?:\/\/\S+$/.test(url)) throw new AdminError("The source link must be an http or https address.");

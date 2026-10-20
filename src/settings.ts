@@ -59,6 +59,13 @@ const DEFAULTS = {
 	announcement: { id: "", text: "", link: "" },
 	// handles every new account follows
 	default_follows: [] as string[],
+	// accounts nobody can unfollow or block, not even staff (see isPinnedFollowee).
+	// Seeded from PINNED_FOLLOWS, which still wins on startup, so an existing
+	// .env keeps working; the admin panel edits this from then on.
+	pinned_follows: (process.env.PINNED_FOLLOWS ?? "")
+		.split(",")
+		.map((h) => h.trim().replace(/^@/, ""))
+		.filter(Boolean) as string[],
 	// the instance's rules, shown at /rules and linked from sign-up
 	rules: "",
 	// AGPL-3.0: people using an instance can get its source here

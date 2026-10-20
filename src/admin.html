@@ -990,6 +990,8 @@ const RENDER = {
 		main.innerHTML = "<h1>Settings</h1>" + '<div class="grid2">' +
 			'<div class="box"><h2>Sign-up</h2>' +
 			Object.entries(modes).map(([k, v]) => '<label class="row" style="margin:6px 0"><input type="radio" name="mode" value="' + k + '"' + (s.signup_mode === k ? " checked" : "") + dis + "> " + esc(v) + "</label>").join("") +
+			'<div class="field" style="margin-top:12px"><label>Accounts nobody can unfollow or block (handles, comma separated)</label><input id="pinned" value="' + esc(s.pinned_follows.map((h) => "@" + h).join(", ")) + '"' + dis + "></div>" +
+			(admin ? '<button class="btn primary" id="savePinned">Save</button>' : "") +
 			'<div class="field" style="margin-top:12px"><label>New accounts follow (handles, comma separated)</label><input id="follows" value="' + esc(s.default_follows.map((h) => "@" + h).join(", ")) + '"' + dis + "></div>" +
 			(admin ? '<button class="btn primary" id="saveFollows">Save</button>' : "") + "</div>" +
 			'<div class="box"><h2>Name and source</h2><div class="field"><label>Instance name (page titles, text in the app, sign-in page, mail)</label><input id="name" maxlength="30" value="' + esc(s.instance_name) + '"' + dis + "></div>" +
@@ -1055,6 +1057,7 @@ const RENDER = {
 		main.querySelectorAll("[name=mode]").forEach((r) => r.onchange = () => act(() => api("setSignupMode", { mode: r.value }), "Sign-up mode saved"));
 		if (!admin) return;
 		$("#saveFollows").onclick = () => save({ default_follows: $("#follows").value.split(",").map((x) => x.trim()).filter(Boolean) }, "Saved");
+		$("#savePinned").onclick = () => save({ pinned_follows: $("#pinned").value.split(",").map((x) => x.trim()).filter(Boolean) }, "Saved");
 		$("#saveName").onclick = () => save({ instance_name: $("#name").value, source_url: $("#source").value }, "Saved");
 		$("#saveFeatures").onclick = () => {
 			const f = {};
