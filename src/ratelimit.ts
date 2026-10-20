@@ -178,7 +178,14 @@ async function readOperationTypes() {
 
         try {
                 const dir = join(CLIENT_DIR, "abs", "responsive-web", "client-web");
-                const files = (await readdir(dir)).filter((f) => f.endsWith(".js"));
+				let files: string[];
+				try {
+					files = (await readdir(dir)).filter((f) => f.endsWith(".js"));
+				} catch (error) {
+					// CI and a fresh install have no pinned client yet.
+					if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+					throw error;
+				}
 				
                 if (files.length === 0) return;
 

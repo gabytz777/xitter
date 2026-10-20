@@ -1,12 +1,33 @@
 {
 	"version": 1,
-	"sequence": 6,
+	"sequence": 7,
 	"instances": [
+		{
+			"id": "larp.jye.fyi",
+			"name": "larp",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "MtOOU2p-wazLBbp3goandZk5MLD_BPKT9IikJcIFm5c",
+			"state": "active"
+		},
+		{
+			"id": "nidus.fourteentrees.net",
+			"name": "Nidus",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "kgTDVqZmPWxdWqkSo_cuWcYYmkFnk-YqWMz2RYwKY4w",
+			"state": "active"
+		},
 		{
 			"id": "social.opsex.best",
 			"name": "Xitter",
 			"source_url": "https://github.com/gabytz777/xitter",
 			"public_key": "aE7RikVEmC2lKQPAkfVtNk1GpJtx87H7PYaLxHxbZTM",
+			"state": "active"
+		},
+		{
+			"id": "x.glitchprod.xyz",
+			"name": "Digital Circus",
+			"source_url": "https://github.com/MDCYT/xitter",
+			"public_key": "L2-aSa8he-ufDfTVKQdosl2vW0JyWZMiGae3qhTt1a8",
 			"state": "active"
 		},
 		{

@@ -56,10 +56,10 @@ try {
 	check(!!(await b.gql("BirdwatchDeleteNote", { note_id: noteId })).errors, "another user cannot delete");
 	check(!!(await b.gql("BirdwatchCreateRating", { note_id: noteId, data_v2: { helpfulness_level: "Bogus" } })).errors, "invalid rating rejected");
 	const voters = [b];
-	for(let i = 0; i < 2; i++) { const name = "nt" + Date.now().toString().slice(-9) + i; ids.push(await createUser(name, name, "testpass123")); voters.push(await session(name)); }
+	for(let i = 0; i < 4; i++) { const name = "nt" + Date.now().toString().slice(-9) + i; ids.push(await createUser(name, name, "testpass123")); voters.push(await session(name)); }
 	for(const voter of voters) await voter.gql("BirdwatchCreateRating", { note_id: noteId, data_v2: { helpfulness_level: "Helpful" } });
 	let note = (await context()).data.xitter_post_context[0].notes[0];
-	check(note.status === "Helpful" && note.ratings === 3, "threshold publishes helpful note");
+	check(note.status === "Helpful" && note.ratings === 5, "confidence threshold publishes helpful note");
 	const nativeNote = (await b.gql("BirdwatchFetchOneNote", { note_id: noteId })).data.birdwatch_note_by_rest_id;
 	check(nativeNote.rating_status === "CurrentlyRatedHelpful", "native status enum");
 	check(nativeNote.rating.data_v2.helpfulness_level === "Helpful", "native rating shape");
@@ -71,9 +71,10 @@ try {
 	await sql`update users set status = 'active' where id = ${ids[0]}::bigint`;
 	await b.gql("BirdwatchCreateRating", { note_id: noteId, data_v2: { helpfulness_level: "NotHelpful" } });
 	note = (await context()).data.xitter_post_context[0].notes[0];
-	check(note.status === "Helpful" && note.ratings === 3, "changing rating does not add vote");
+	check(note.status === "NeedsMoreRatings" && note.ratings === 5, "changing rating does not add vote or force weak consensus");
 	await voters[1].gql("BirdwatchCreateRating", { note_id: noteId, data_v2: { helpfulness_level: "NotHelpful" } });
-	check((await context()).data.xitter_post_context[0].notes[0].status === "NotHelpful", "status recalculated");
+	for (const voter of voters.slice(2)) await voter.gql("BirdwatchCreateRating", { note_id: noteId, data_v2: { helpfulness_level: "NotHelpful" } });
+	check((await context()).data.xitter_post_context[0].notes[0].status === "NotHelpful", "status recalculated after strong opposing consensus");
 	await b.gql("BirdwatchDeleteRating", { note_id: noteId });
 	check((await context()).data.xitter_post_context[0].notes[0].status === "NeedsMoreRatings", "removing rating hides context");
 	check((await b.gql("BirdwatchFetchOneNote", { note_id: noteId })).data.birdwatch_note_by_rest_id.rest_id === noteId, "emusks note lookup");

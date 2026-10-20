@@ -24,6 +24,7 @@ export const PERMISSIONS: Record<string, Permission> = {
 	delete_posts: { group: "Moderation", label: "Delete posts", role: "moderator", actions: ["deletePost"] },
 	post_visibility: { group: "Moderation", label: "Hide posts and articles, mark them sensitive, label them", role: "moderator", actions: ["setPostVisibility", "setPostNotice", "setArticleVisibility"] },
 	media: { group: "Moderation", label: "Delete uploaded media", role: "moderator", actions: ["deleteMedia"] },
+	decor: { group: "Moderation", label: "Reset profile decor", role: "moderator", actions: ["resetDecor"] },
 	automod_scan: { group: "Moderation", label: "Scan old posts and profiles with automod", role: "moderator", actions: ["automodScan"] },
 	release_identities: { group: "Moderation", label: "Release held handles, emails and addresses", role: "admin", actions: ["releaseIdentity"] },
 

@@ -49,6 +49,13 @@ export function apiDocsPage(req: Request): Promise<Response> {
 <p>Make a token at <a href="/account/api">/account/api</a>. A <span class="r">read</span> token can only look; a <span class="w">write</span> token can also post, like and follow. Send it with every request:</p>
 <pre>Authorization: Bearer xit_...</pre>
 <p>Changing or resetting your password revokes all API tokens. Make new tokens for your scripts and bots afterward.</p>
+<p>For an app used by other people, register a public client at <a href="/account/apps/developer">Developer apps</a>. Users review and revoke grants at <a href="/account/apps">Connected apps</a>.</p>
+<h3>OAuth 2 with PKCE</h3>
+<ol><li>Generate a random 43–128 character <code>code_verifier</code> and its SHA-256 base64url <code>code_challenge</code>. Generate a random <code>state</code>.</li>
+<li>Open <code>${esc(PUBLIC_ORIGIN)}/oauth/authorize</code> with <code>response_type=code</code>, your <code>client_id</code>, exact registered <code>redirect_uri</code>, <code>scope=read</code> or <code>write</code>, <code>state</code>, <code>code_challenge</code>, and <code>code_challenge_method=S256</code>.</li>
+<li>After consent, validate <code>state</code> and send the returned <code>code</code> with <code>grant_type=authorization_code</code>, <code>client_id</code>, <code>redirect_uri</code>, and <code>code_verifier</code> as a form POST to <code>${esc(PUBLIC_ORIGIN)}/oauth/token</code>.</li>
+<li>Use <code>access_token</code> as the Bearer token below. Codes work once for five minutes; access tokens expire after 30 days. Reauthorize to get a new one.</li></ol>
+<p>PKCE S256 is required. Clients have no shared secret. HTTPS redirects and HTTP loopback redirects are accepted; the redirect must match the registered URL exactly.</p>
 <p>Requests go to <code>${esc(base)}</code>. Bodies are JSON (or a form); answers are JSON with the result in <code>data</code>, or <code>{"error": "..."}</code> with a 4xx or 5xx status.</p>
 
 <h2>Endpoints</h2>

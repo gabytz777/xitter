@@ -5,6 +5,7 @@ import { sql } from "./db";
 import { newId } from "./ids";
 import type { Viewer } from "./auth";
 import * as thrift from "./thrift";
+import { exportHtml } from "./export-html";
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 
@@ -131,7 +132,7 @@ const entry = (r: any) => ({
 	id: r.id,
 	status: "COMPLETED",
 	created_at: new Date(r.created_at).toISOString(),
-	urls: [`/i/api/xitter/export/${r.id}`],
+	urls: [`/i/api/xitter/export/${r.id}`, `/i/api/xitter/export/${r.id}.html`],
 });
 
 export async function dataExportRoute(method: string, path: string, viewer: Viewer, req: Request): Promise<Response | undefined> {
@@ -154,13 +155,13 @@ export async function dataExportRoute(method: string, path: string, viewer: View
 		if (method === "PUT") return json({ status: "ok" });
 	}
 	if (path === "/1.1/account/personalization/email_your_data" && method === "POST") return json({ status: "ok" });
-	const m = /^\/xitter\/export\/(\d{1,19})$/.exec(path);
+	const m = /^\/xitter\/export\/(\d{1,19})(\.html)?$/.exec(path);
 	if (m && method === "GET") {
-		// formatted by the database, so the archive reaches us once, as text
-		const [row] = await sql`select jsonb_pretty(body) as body from data_exports where id = ${m[1]}::bigint and user_id = ${viewer.id}::bigint`;
+		const [row] = await sql`select ${m[2] ? sql`body` : sql`jsonb_pretty(body)`} as body from data_exports where id = ${m[1]}::bigint and user_id = ${viewer.id}::bigint`;
 		if (!row) return json({ errors: [{ code: 34, message: "Sorry, that page does not exist." }] }, 404);
-		return new Response(row.body, {
-			headers: { "content-type": "application/json", "content-disposition": `attachment; filename="${viewer.screen_name}-data.json"`, "cache-control": "no-store" },
+		const filename = viewer.screen_name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50) || "account";
+		return new Response(m[2] ? exportHtml(row.body as Record<string, unknown>) : row.body, {
+			headers: { "content-type": m[2] ? "text/html; charset=utf-8" : "application/json", "content-disposition": `attachment; filename="${filename}-data.${m[2] ? "html" : "json"}"`, "cache-control": "no-store", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" },
 		});
 	}
 	return undefined;

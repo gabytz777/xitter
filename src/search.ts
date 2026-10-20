@@ -1,6 +1,6 @@
 // Search: the query language of X's search box and advanced search form,
-// turned into SQL over posts and users. No index beyond Postgres's own; fine
-// for an instance of friends, the place to add one when that stops being true.
+// turned into SQL over posts and users. schema.sql installs trigram indexes
+// for substring and hashtag matches; short terms can still require a scan.
 //
 //   words, "exact phrase"            all must appear (case-insensitive)
 //   -word, -"phrase"                 must not appear
@@ -13,7 +13,7 @@
 //   filter:follows                   authors the viewer follows
 //   lang:xx, near:, other operators  accepted and ignored
 
-import { blockedFor, outOfView, protectedFor } from "./blocks";
+import { blockedFor, federatedHiddenFor, namesOtherInstance, outOfView, protectedFor } from "./blocks";
 import { sql } from "./db";
 import { settings } from "./settings";
 import { isId } from "./ids";
@@ -123,7 +123,8 @@ export async function searchPosts(
 	// loaded: the paging cursor is made of these ids.
 	const hidden = sql`and p.user_id not in ${blockedFor(opts.viewerId)} and p.user_id not in ${outOfView(opts.viewerId)}
 		and p.user_id not in (select id from users where status = 'suspended') and p.notice->>'type' is distinct from 'Fosnr'
-		and p.user_id not in ${protectedFor(opts.viewerId)} and (not p.hidden or ${staffViewer(opts.viewerId)})`;
+		and p.user_id not in ${protectedFor(opts.viewerId)} and (not p.hidden or ${staffViewer(opts.viewerId)})
+		${namesOtherInstance(query) ? sql`` : sql`and p.user_id not in ${federatedHiddenFor(opts.viewerId)}`}`;
 	if (opts.top) {
 		const rows = await sql`select p.id from (select p.id from posts p where ${cond} ${media} ${hidden} order by p.id desc limit ${TOP_POOL}) p
 			order by ((select count(*) from likes x where x.post_id = p.id) + 2 * (select count(*) from reposts x where x.post_id = p.id)
@@ -149,6 +150,7 @@ export async function searchUsers(viewerId: string, query: string, limit: number
 	const first = words[0];
 	const rows = await sql`select u.id from users u where ${cond}
 			and u.status <> 'suspended' and u.id not in ${outOfView(viewerId)} and u.id not in ${blockedFor(viewerId)}
+			${namesOtherInstance(query) ? sql`` : sql`and u.id not in ${federatedHiddenFor(viewerId)}`}
 		order by (lower(u.screen_name) = lower(${first})) desc, (u.screen_name ilike ${`${first.replace(/[\\%_]/g, "")}%`}) desc,
 			(select count(*) from follows f where f.followee_id = u.id) desc, u.id
 		limit ${limit} offset ${offset}`;

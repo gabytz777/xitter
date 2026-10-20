@@ -32,6 +32,11 @@ export const FLAGS: Record<string, Flag> = {
 
 export const isFlag = (id: unknown): id is string => typeof id === "string" && Object.hasOwn(FLAGS, id);
 
+export const MAX_FLAGS = 4;
+export const flagList = (v: unknown): string[] => (typeof v === "string" ? [...new Set(v.split(",").map((f) => f.trim()))].filter(isFlag).slice(0, MAX_FLAGS) : []);
+export const flagValue = (v: unknown): string | null => flagList(v).join(",") || null;
+export const unknownFlag = (v: unknown) => typeof v === "string" && v.split(",").some((f) => f.trim() && !isFlag(f.trim()));
+
 export function flagSvg(id: string): string | undefined {
 	const f = FLAGS[id];
 	if (!f) return undefined;

@@ -1,5 +1,7 @@
 import type { User } from "./auth";
+import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
+import { INSTANCE_ID } from "./federation";
 import { newId } from "./ids";
 import { hateIn } from "./hate";
 import { automodStrike } from "./moderation";
@@ -7,9 +9,9 @@ import { hasBlockedPhrase } from "./settings";
 import { postLimitFor, weightedLength } from "./textlen";
 import type { PostRow } from "./model";
 import { articlesByIds } from "./articles";
-import { blockedFor, hasMutedWord, isBlockedEitherWay, mutedFor, outOfView, protectedFor, replyLimited, suspendedFor } from "./blocks";
+import { blockedFor, federatedHiddenFor, hasMutedWord, isBlockedEitherWay, mutedFor, outOfView, protectedFor, replyLimited, suspendedFor } from "./blocks";
 import { staffViewer } from "./staff-access";
-import { fetchPreview, linkCard, linksIn, previewable, previewsFor } from "./links";
+import { fetchPreview, linkCard, linksIn, previewable, previewsFor, statusLinkOf } from "./links";
 import { mediaForPosts } from "./media";
 import { communityObjects } from "./community-model";
 import { webSource } from "./platforms";
@@ -17,11 +19,13 @@ import { pollCard, pollsByIds } from "./polls";
 import { toUser, userCols, usersByIds } from "./users";
 import { lookupRemoteUser } from "./federation-sync";
 import { saveMentions } from "./mentions";
+import { cleanText } from "./text-clean";
+import { noteStatus } from "./note-score";
 
 const NO_LIMIT = "9223372036854775807";
 
 // accounts whose likes, reposts and replies no longer count for anyone
-const SUSPENDED = sql`(select id from users where status = 'suspended')`;
+const SUSPENDED = sql`(select id from users where status = 'suspended' or instance_blocked)`;
 
 // every post query starts from this; callers append where/order/limit
 const select = (viewerId: string) => sql`
@@ -95,11 +99,13 @@ async function hydrate(viewerId: string, posts: PostRow[], quotes = true): Promi
 	const media = await mediaForPosts(posts.map((p) => p.id));
 	for (const p of posts) p.media = (media.get(p.id) ?? []).map((m) => (p.never_sensitive ? { ...m, sensitive_warning: null } : m));
 	if (posts.length) {
-		const notes = await sql`select n.id::text, n.post_id::text, n.text from community_notes n join users author on author.id = n.author_id and author.status <> 'suspended'
+		const notes = await sql`select n.id::text, n.post_id::text, n.text, count(*)::int as ratings,
+			count(*) filter(where r.rating = 'Helpful')::int as helpful, count(*) filter(where r.rating = 'NotHelpful')::int as not_helpful
+			from community_notes n join users author on author.id = n.author_id and author.status <> 'suspended'
 			join community_note_ratings r on r.note_id = n.id join users voter on voter.id = r.user_id and voter.status = 'active'
 			where n.post_id = any(${sql.array(posts.map(p => p.id), "INT8")}) and n.classification = 'Misleading' and n.author_id not in ${blockedFor(viewerId)}
-			group by n.id having count(*) >= 3 and count(*) filter(where r.rating = 'Helpful') * 3 >= count(*) * 2 order by n.id desc`;
-		for (const p of posts) { const note = notes.find((n: any) => n.post_id === p.id); if (note) p.communityNote = { id: note.id, text: note.text }; }
+			group by n.id order by n.id desc`;
+		for (const p of posts) { const note = notes.find((n: any) => n.post_id === p.id && noteStatus(n.ratings, n.helpful, n.not_helpful) === "Helpful"); if (note) p.communityNote = { id: note.id, text: note.text }; }
 		const mentions = await sql`select m.post_id, u.id, u.screen_name, u.name from post_mentions m join users u on u.id = m.user_id
 			where m.post_id = any(${sql.array(posts.map((p) => p.id), "INT8")})`;
 		for (const p of posts) p.mentions = mentions.filter((m: any) => String(m.post_id) === p.id).map((m: any) => ({ id: String(m.id), screen_name: m.screen_name, name: m.name }));
@@ -112,7 +118,24 @@ async function hydrate(viewerId: string, posts: PostRow[], quotes = true): Promi
 			if (poll) p.poll = pollCard(poll);
 		}
 	}
-	const linkOf = (p: PostRow) => (p.poll || p.quote_id || p.article_id || p.media?.length ? undefined : linksIn(p.text).filter((l) => previewable(l.url)).at(-1)?.url);
+	const statusLinks = posts.flatMap((p) => linksIn(p.text).flatMap((l) => {
+		const at = statusLinkOf(l.url);
+		return at ? [{ post: p, url: l.url, ...at }] : [];
+	}));
+	if (statusLinks.length) {
+		const copies = await sql`select instance, remote_id::text, local_id::text from federated_objects where kind = 'post'
+			and (instance, remote_id) in (select * from unnest(${sql.array(statusLinks.map((l) => l.host), "TEXT")}::text[], ${sql.array(statusLinks.map((l) => l.id), "TEXT")}::bigint[]))`;
+		const localOf = (l: (typeof statusLinks)[number]) => (l.host === INSTANCE_ID ? l.id : copies.find((c: any) => c.instance === l.host && c.remote_id === l.id)?.local_id);
+		const linked = await postsByIds(viewerId, [...new Set(statusLinks.map(localOf).filter((id): id is string => !!id))], false);
+		for (const l of statusLinks) {
+			const target = linked.get(localOf(l) ?? "");
+			if (!target) continue;
+			l.post.localLinks ??= new Map();
+			l.post.localLinks.set(l.url, `${PUBLIC_ORIGIN}/${target.author.screen_name}/status/${target.id}`);
+			if (quotes && !l.post.quote_id && !l.post.poll && !l.post.article_id && !l.post.media?.length && target.id !== l.post.id) l.post.quoted = target;
+		}
+	}
+	const linkOf = (p: PostRow) => (p.poll || p.quote_id || p.quoted || p.article_id || p.media?.length ? undefined : linksIn(p.text).filter((l) => previewable(l.url)).at(-1)?.url);
 	const previews = await previewsFor(posts.map(linkOf).filter((u): u is string => !!u));
 	for (const p of posts) {
 		const preview = previews.get(linkOf(p) ?? "");
@@ -179,7 +202,8 @@ export async function refuseHate(userId: string, text: string, where: Parameters
 	throw new PostError("Your post wasn't published: it contains a slur or hate speech this instance doesn't allow.", 186);
 }
 
-export async function editPost(userId: string, postId: string, text: string): Promise<void> {
+export async function editPost(userId: string, postId: string, input: string): Promise<void> {
+	const text = cleanText(input, { blankLines: 2 });
 	// the length first: the checks below scan the whole text
 	await checkLength(userId, text);
 	await refuseHate(userId, text);
@@ -245,6 +269,7 @@ export const homeHidden = (viewerId: string) => sql`f.author_id not in ${blocked
 	and f.author_id not in ${outOfView(viewerId)} and ${originalAuthor()} not in ${outOfView(viewerId)}
 	and f.author_id not in ${protectedFor(viewerId)} and ${originalAuthor()} not in ${protectedFor(viewerId)}
 	and f.author_id not in ${mutedFor(viewerId)} and ${originalAuthor()} not in ${mutedFor(viewerId)}
+	and f.author_id not in ${federatedHiddenFor(viewerId)} and ${originalAuthor()} not in ${federatedHiddenFor(viewerId)}
 	and not ${hasMutedWord(viewerId, "home_timeline", sql`f.post_id`)}
 	and (f.reposter_id is null or f.reposter_id not in (select target_id from repost_mutes where user_id = ${viewerId}::bigint))`;
 // posts of a community show outside it only to its members (f is feed_items)
@@ -322,7 +347,7 @@ export async function ancestors(viewerId: string, replyToId: string): Promise<Po
 
 export async function replies(viewerId: string, id: string, limit = 100): Promise<PostRow[]> {
 	const rows = await sql`${select(viewerId)} where p.reply_to_id = ${id}::bigint and p.reply_hidden_at is null
-		and p.user_id not in ${blockedFor(viewerId)} and p.user_id not in ${outOfView(viewerId)}
+		and p.user_id not in ${blockedFor(viewerId)} and p.user_id not in ${outOfView(viewerId)} and p.user_id not in ${federatedHiddenFor(viewerId)}
 		and not ${hasMutedWord(viewerId, "tweet_replies", sql`p.id`)} order by p.id asc limit ${limit}`;
 	return hydrate(viewerId, rows.map(toRow));
 }
@@ -335,7 +360,7 @@ export async function repliesBelow(viewerId: string, id: string, limit = 1000): 
 				select x.id, t.depth + 1 from posts x join tree t on x.reply_to_id = t.id where t.depth < 40
 			) select id from tree limit ${limit})
 		and p.reply_hidden_at is null and p.user_id not in ${blockedFor(viewerId)} and p.user_id not in ${outOfView(viewerId)}
-		and not ${hasMutedWord(viewerId, "tweet_replies", sql`p.id`)}`;
+		and p.user_id not in ${federatedHiddenFor(viewerId)} and not ${hasMutedWord(viewerId, "tweet_replies", sql`p.id`)}`;
 	return rows.map(toRow);
 }
 
@@ -414,8 +439,9 @@ export async function likedPosts(viewerId: string, userId: string, limit = 100):
 export const seenBy = (userId: string) =>
 	sql`(u.id = ${userId}::bigint or ((not p.hidden or ${staffViewer(userId)}) and u.id not in ${protectedFor(userId)} and u.id not in ${suspendedFor(userId)}))`;
 
-export async function createPost(userId: string, text: string, opts: { replyToId?: string; quoteId?: string; articleId?: string; source?: string; communityId?: string; placeId?: string; replyPolicy?: string; db?: typeof sql; skipPreview?: boolean } = {}): Promise<string> {
+export async function createPost(userId: string, input: string, opts: { replyToId?: string; quoteId?: string; articleId?: string; source?: string; communityId?: string; placeId?: string; replyPolicy?: string; db?: typeof sql; skipPreview?: boolean } = {}): Promise<string> {
 	const db = opts.db ?? sql;
+	const text = cleanText(input, { blankLines: 2 });
 	const [author] = await db`select status, deactivated_at from users where id = ${userId}::bigint`;
 	if (!author || author.status === "restricted" || author.status === "suspended" || author.deactivated_at) throw new PostError("Your account can't post right now.", 326);
 	await checkLength(userId, text, db);

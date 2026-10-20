@@ -9,7 +9,7 @@ import { accountsRoute } from "./accounts";
 import type { Viewer } from "./auth";
 import { addKeyword, mutedKeywords, removeKeywords, setBlock, setMute, updateKeyword } from "./blocks";
 import { sql } from "./db";
-import { isFlag } from "./flags";
+import { flagValue, unknownFlag } from "./flags";
 import { isId } from "./ids";
 import { isVerified, legacyUser } from "./model";
 import { markSeen } from "./notifications";
@@ -27,6 +27,7 @@ import { loginHistory } from "./login-history";
 import { emailInfo, resendConfirmation } from "./email-address";
 import { pushSettingsRoute } from "./push";
 import { answerRequest, pendingRequests, setFollow, setProtected, suggestedUsers, updateFriendship, userById, userByName, usersByIds } from "./users";
+import { cleanText, oneLine } from "./text-clean";
 
 // friendships/show's shape, from the viewer's side (source) and the other account's (target)
 async function relationship(viewer: Viewer, targetId: string) {
@@ -78,7 +79,7 @@ async function profileRoute(path: string, viewer: Viewer, req: Request): Promise
 		const changes: Record<string, string> = {};
 		for (const [field, [column, max]] of Object.entries(limits)) {
 			if (!(field in f)) continue;
-			const value = f[field].trim();
+			const value = field === "description" ? cleanText(f[field], { lines: 6 }) : oneLine(f[field]);
 			if ([...value].length > max) return profileError(`${field} is limited to ${max} characters.`);
 			if (field === "name" && !value) return profileError("Name can't be blank.");
 			if (field === "url" && value && !/^https?:\/\/\S+$/.test(value)) return profileError("Website must be an http or https address.");
@@ -100,8 +101,8 @@ async function profileRoute(path: string, viewer: Viewer, req: Request): Promise
 		return changedUser(viewer);
 	}
 	if (m[1] === "update_flag") {
-		const flag = f.flag || null;
-		if (flag !== null && !isFlag(flag)) return profileError("Unknown flag.");
+		if (unknownFlag(f.flag)) return profileError("Unknown flag.");
+		const flag = flagValue(f.flag);
 		await sql`update users set flag = ${flag} where id = ${viewer.id}::bigint`;
 		return changedUser(viewer);
 	}

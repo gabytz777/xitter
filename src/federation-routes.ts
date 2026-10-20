@@ -1,15 +1,18 @@
 import { FEDERATION_ON, INSTANCE_ID, keyFor, loadRegistry, refreshRegistry, verifyIncoming, wellKnown } from "./federation";
 import { federationApi, startFederationSync } from "./federation-sync";
 import { hit, limitedResponse } from "./ratelimit";
-import { emergencyApi, pollEmergencies } from "./superadmin";
+import { emergencyApi, endSuperadminVisits, pollEmergencies } from "./superadmin";
 import { SUPERADMINS } from "./superadmins";
+
+let ready = false;
 
 export async function federationRoute(req: Request, url: URL): Promise<Response | undefined> {
 	const p = url.pathname;
 	if (p === "/.well-known/xitter") return wellKnown();
 	if (!p.startsWith("/federation/v1/")) return undefined;
+	if (!ready) return Response.json({ error: "Starting up, try again in a moment." }, { status: 503, headers: { "retry-after": "5" } });
 	const path = `${p}${url.search}`;
-	const incoming = await verifyIncoming(req, path, { allowSuperadminHome: p === "/federation/v1/emergency" });
+	const incoming = await verifyIncoming(req, path, { allowSuperadminHome: p === "/federation/v1/emergency", allowListed: p === "/federation/v1/emergencies" });
 	if (incoming instanceof Response) return incoming;
 	const h = hit("federation", incoming.from);
 	if (!h.ok) return limitedResponse(h);
@@ -18,6 +21,7 @@ export async function federationRoute(req: Request, url: URL): Promise<Response 
 
 export async function startFederation() {
 	await loadRegistry();
+	ready = true;
 	if (!FEDERATION_ON) return;
 	void refreshRegistry();
 	setInterval(() => void refreshRegistry(), 5 * 60_000).unref();
@@ -26,4 +30,5 @@ export async function startFederation() {
 	void meetHomes();
 	setInterval(() => void meetHomes(), 10 * 60_000).unref();
 	setInterval(() => void pollEmergencies().catch(() => {}), 60_000).unref();
+	setInterval(() => void endSuperadminVisits().catch(() => {}), 60_000).unref();
 }

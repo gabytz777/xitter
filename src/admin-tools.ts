@@ -119,6 +119,21 @@ export const toolActions: Record<string, Action> = {
 			return {};
 		},
 	},
+	// takes off everything an account wears from Steam (decor.ts): theme,
+	// background, frame; what it wore goes in the audit log
+	resetDecor: {
+		role: "moderator",
+		run: async (a, b) => {
+			const id = idOf(b.id);
+			await guard(a, id, true);
+			const [u] = await sql`select decor from users where id = ${id}::bigint`;
+			if (!u?.decor) return {};
+			await sql`update users set decor = null where id = ${id}::bigint`;
+			const d = u.decor;
+			await audit(a, "reset_decor", id, { theme: d.theme ?? null, background: d.background?.name ?? null, frame: d.frame?.name ?? null, profile: d.profile?.name ?? null });
+			return {};
+		},
+	},
 	// an account's profile label: X's Parody, Commentary or Fan, a staff-made one, or None
 	setProfileLabel: {
 		role: "admin",

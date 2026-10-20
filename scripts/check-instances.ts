@@ -89,7 +89,7 @@ if (baseFile && data) {
 			}
 			before.delete(i.id);
 		}
-		for (const id of before.keys()) notes.push(`removed ${id}. Setting its state to blocked keeps it blocked everywhere, while removing it only stops federation`);
+		for (const id of before.keys()) notes.push(`removed ${id}. Every instance stops syncing with it and hides the accounts and posts it already has from it`);
 	}
 }
 

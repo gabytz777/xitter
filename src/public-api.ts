@@ -44,7 +44,7 @@ export async function createToken(userId: string, name: string, scope: "read" | 
 				and (expires_at is null or expires_at > clock_timestamp())`;
 			if (!session) throw new ApiError(401, "Sign in again to make an API token.");
 		}
-		const [{ n }] = await tx`select count(*)::int as n from api_tokens where user_id = ${userId}::bigint`;
+		const [{ n }] = await tx`select count(*)::int as n from api_tokens where user_id = ${userId}::bigint and client_id is null`;
 		if (n >= MAX_TOKENS) throw new ApiError(400, `You can have up to ${MAX_TOKENS} tokens. Delete one first.`);
 		await tx`insert into api_tokens (id, user_id, name, token_hash, scope) values (${newId()}::bigint, ${userId}::bigint, ${name}, ${hash(token)}, ${scope})`;
 	});
@@ -56,14 +56,15 @@ async function tokenViewer(req: Request): Promise<{ viewer: Viewer; scope: strin
 	if (!token) return undefined;
 	const [row] = await sql`
 		select u.id::text, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.status, u.role, u.protected, u.language, u.created_at,
-			t.scope, t.id::text as token_id, t.last_used_at
-		from api_tokens t join users u on u.id = t.user_id
-		where t.token_hash = ${hash(token)} and u.status <> 'suspended' and u.deactivated_at is null`;
+			t.scope, t.id::text as token_id, t.last_used_at, c.name as app_name
+		from api_tokens t join users u on u.id = t.user_id left join oauth_clients c on c.id = t.client_id
+		where t.token_hash = ${hash(token)} and u.status <> 'suspended' and u.deactivated_at is null
+			and (t.expires_at is null or t.expires_at > now()) and (t.client_id is null or c.revoked = false)`;
 	if (!row) return undefined;
 	if (!row.last_used_at || Date.now() - row.last_used_at.getTime() > 60_000) await sql`update api_tokens set last_used_at = now() where id = ${row.token_id}::bigint`;
-	const { scope, token_id: _id, last_used_at: _used, ...user } = row;
+	const { scope, token_id: _id, last_used_at: _used, app_name, ...user } = row;
 	// staff tokens are limited like anyone's: the exemption is for the panel
-	return { viewer: { ...user, role: null, csrf: "", token: "", postSource: "Xitter API" } as Viewer, scope };
+	return { viewer: { ...user, role: null, csrf: "", token: "", postSource: app_name ? `App: ${app_name}` : "Xitter API" } as Viewer, scope };
 }
 
 // ---- shapes
@@ -371,7 +372,7 @@ export async function publicApi(req: Request, url: URL): Promise<Response> {
 	const path = url.pathname.slice("/api/v1".length) || "/";
 	if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 	const auth = await tokenViewer(req);
-	if (!auth) return withCors(fail(401, "Send a personal token from /account/api as Authorization: Bearer xit_..."));
+	if (!auth) return withCors(fail(401, "Send a personal or connected-app token as Authorization: Bearer xit_..."));
 	const { viewer, scope } = auth;
 	let route: Route | undefined;
 	let match: RegExpExecArray | null = null;
@@ -415,7 +416,7 @@ function withCors(res: Response) {
 // ---- /account/api: the account's tokens
 
 async function tokensView(req: Request, v: Viewer, fresh = "", error = "", status = 200) {
-	const tokens = await sql`select id::text, name, scope, created_at, last_used_at from api_tokens where user_id = ${v.id}::bigint order by created_at desc`;
+	const tokens = await sql`select id::text, name, scope, created_at, last_used_at from api_tokens where user_id = ${v.id}::bigint and client_id is null order by created_at desc`;
 	const when = (d: Date | null) => (d ? new Date(d).toUTCString().replace(/:\d\d GMT$/, " UTC") : "never");
 	return accountPage({
 		req,
@@ -449,7 +450,7 @@ export async function apiTokensRoute(req: Request, v: Viewer): Promise<Response>
 	const f = await req.formData().catch(() => new FormData());
 	if (f.get("do") === "delete") {
 		const id = String(f.get("id") ?? "");
-		if (isId(id)) await sql`delete from api_tokens where id = ${id}::bigint and user_id = ${v.id}::bigint`;
+		if (isId(id)) await sql`delete from api_tokens where id = ${id}::bigint and user_id = ${v.id}::bigint and client_id is null`;
 		return tokensView(req, v);
 	}
 	const name = String(f.get("name") ?? "").trim();

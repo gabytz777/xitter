@@ -62,6 +62,8 @@ jobs:
           bun scripts/test-poll-visibility.ts
           bun scripts/test-list-visibility-races.ts
           bun scripts/test-search-operators.ts
+          bun scripts/test-note-appeals.ts
+          bun scripts/test-search-indexing.ts
           bun scripts/test-federated-search.ts
           bun scripts/test-public-api-input.ts
           bun scripts/test-data-export.ts
@@ -73,6 +75,7 @@ jobs:
           bun scripts/test-password-reset-issuance.ts
           bun scripts/test-admin-password-reset.ts
           bun scripts/test-api-token-security.ts
+          bun scripts/test-oauth.ts
           bun scripts/test-scheduled-threads.ts
           bun scripts/test-scheduled-quota.ts
           bun scripts/test-scheduled-mentions.ts

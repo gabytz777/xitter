@@ -38,7 +38,7 @@ export const ALL_ID = "1";
 const fixed = () => new PostError("This list can't be changed.", 150);
 
 async function allRow(viewerId: string): Promise<ListRow | undefined> {
-	const [r] = await sql`select (select id::text from users where role = 'admin' order by created_at, id limit 1) as owner_id,
+	const [r] = await sql`select (select id::text from users where role = 'admin' and instance is null order by created_at, id limit 1) as owner_id,
 		(select count(*)::int from users where status <> 'suspended') as members,
 		coalesce((select (preferences->>'all_tab_hidden')::boolean from users where id = ${viewerId}::bigint), false) as hidden`;
 	if (!r?.owner_id) return undefined;

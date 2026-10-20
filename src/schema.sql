@@ -12,6 +12,10 @@ create table if not exists users (
 	created_at timestamptz not null default now()
 );
 create unique index if not exists users_screen_name_key on users (lower(screen_name));
+create extension if not exists pg_trgm;
+create index if not exists users_handle_trgm_idx on users using gin (screen_name gin_trgm_ops);
+create index if not exists users_name_trgm_idx on users using gin (name gin_trgm_ops);
+create index if not exists users_bio_trgm_idx on users using gin (bio gin_trgm_ops);
 
 create table if not exists sessions (
 	token text primary key,
@@ -37,6 +41,9 @@ alter table posts add column if not exists reply_to_user_id bigint;
 create index if not exists posts_user_idx on posts (user_id, id desc);
 -- trends read the last days' posts; without it every refresh read the whole table
 create index if not exists posts_created_idx on posts (created_at);
+-- The search box uses ILIKE %term% and regex hashtag matches. Trigram GIN
+-- supports both without changing the search language or result ordering.
+create index if not exists posts_text_trgm_idx on posts using gin (text gin_trgm_ops);
 -- replies to an account's posts, newest first (notifications.ts)
 create index if not exists posts_reply_user_idx on posts (reply_to_user_id, created_at) where reply_to_user_id is not null;
 
@@ -183,6 +190,17 @@ create table if not exists community_note_ratings (
 );
 create index if not exists community_note_ratings_user_idx on community_note_ratings(user_id);
 alter table community_note_ratings add column if not exists data_v2 jsonb not null default '{}';
+create table if not exists community_note_appeals (
+	note_id bigint primary key references community_notes(id) on delete cascade,
+	author_id bigint not null references users(id) on delete cascade,
+	reason text not null check (char_length(reason) between 20 and 1000),
+	status text not null default 'open' check (status in ('open', 'accepted', 'rejected')),
+	created_at timestamptz not null default now(),
+	reviewed_by bigint references users(id) on delete set null,
+	reviewed_at timestamptz,
+	resolution text
+);
+create index if not exists community_note_appeals_open_idx on community_note_appeals (created_at) where status = 'open';
 create table if not exists community_note_requests (
 	post_id bigint not null references posts(id) on delete cascade,
 	user_id bigint not null references users(id) on delete cascade,
@@ -387,7 +405,18 @@ create table if not exists affiliations (
 	created_at timestamptz not null default now(),
 	primary key (org_id, user_id)
 );
-create unique index if not exists affiliations_user_idx on affiliations (user_id);
+drop index if exists affiliations_user_idx;
+create index if not exists affiliations_user_created_idx on affiliations (user_id, created_at);
+create or replace function affiliations_cap() returns trigger language plpgsql as $$
+begin
+	perform 1 from users where id = new.user_id for update;
+	if (select count(*) from affiliations where user_id = new.user_id) >= 4 then
+		raise exception 'affiliation_limit' using errcode = 'P0001';
+	end if;
+	return new;
+end $$;
+drop trigger if exists affiliations_cap on affiliations;
+create trigger affiliations_cap before insert on affiliations for each row execute function affiliations_cap();
 -- instance-wide settings as key/value (sign-up mode, ...)
 create table if not exists settings (
 	key text primary key,
@@ -932,6 +961,30 @@ create table if not exists api_tokens (
 	last_used_at timestamptz
 );
 create index if not exists api_tokens_user_idx on api_tokens (user_id);
+-- Public OAuth clients use authorization-code + PKCE. They never receive a
+-- client secret; users can revoke grants independently of personal tokens.
+create table if not exists oauth_clients (
+	id bigint primary key,
+	owner_id bigint not null references users(id) on delete cascade,
+	name text not null check (char_length(name) between 1 and 80),
+	redirect_uri text not null,
+	revoked boolean not null default false,
+	created_at timestamptz not null default now()
+);
+create index if not exists oauth_clients_owner_idx on oauth_clients(owner_id);
+create table if not exists oauth_codes (
+	code_hash text primary key,
+	client_id bigint not null references oauth_clients(id) on delete cascade,
+	user_id bigint not null references users(id) on delete cascade,
+	redirect_uri text not null,
+	scope text not null check (scope in ('read', 'write')),
+	code_challenge text not null,
+	expires_at timestamptz not null
+);
+create index if not exists oauth_codes_expires_idx on oauth_codes(expires_at);
+alter table api_tokens add column if not exists client_id bigint references oauth_clients(id) on delete cascade;
+alter table api_tokens add column if not exists expires_at timestamptz;
+create index if not exists api_tokens_client_idx on api_tokens(client_id, user_id) where client_id is not null;
 
 -- Branded hashtags (X's hashflags): for a while, posts with the hashtag get a
 -- custom like animation (Lottie JSON), and the hashtag an emoji after it.
@@ -1242,6 +1295,7 @@ create table if not exists federation_blocks (
 	by_name text,
 	created_at timestamptz not null default now()
 );
+alter table federation_blocks add column if not exists kept_local jsonb;
 create table if not exists federation_state (key text primary key, value jsonb not null, updated_at timestamptz not null default now());
 create table if not exists federation_emergencies (
 	seq bigint primary key,
@@ -1305,12 +1359,13 @@ begin
 	return new;
 end $$;
 create or replace trigger federation_user_insert after insert on users for each row execute function federation_user_changed();
-create or replace trigger federation_user_update after update of screen_name, name, bio, location, website, avatar_url, banner_url, protected, status, deactivated_at, verified_type, translator, flag, parody_label, count_overrides on users for each row
+alter table users add column if not exists decoration jsonb;
+create or replace trigger federation_user_update after update of screen_name, name, bio, location, website, avatar_url, banner_url, protected, status, deactivated_at, verified_type, translator, flag, parody_label, count_overrides, decoration on users for each row
 	when (old.screen_name is distinct from new.screen_name or old.name is distinct from new.name or old.bio is distinct from new.bio or old.location is distinct from new.location or old.website is distinct from new.website
 		or old.avatar_url is distinct from new.avatar_url or old.banner_url is distinct from new.banner_url or old.protected is distinct from new.protected
 		or old.status is distinct from new.status or old.deactivated_at is distinct from new.deactivated_at or old.verified_type is distinct from new.verified_type
 		or old.translator is distinct from new.translator or old.flag is distinct from new.flag or old.parody_label is distinct from new.parody_label
-		or old.count_overrides is distinct from new.count_overrides)
+		or old.count_overrides is distinct from new.count_overrides or old.decoration is distinct from new.decoration)
 	execute function federation_user_changed();
 create or replace function federation_badges_changed() returns trigger language plpgsql as $$
 begin
@@ -1348,7 +1403,7 @@ end $$;
 
 create or replace function blocks_spare_admins() returns trigger language plpgsql as $$
 begin
-	if exists (select 1 from users b join users t on t.id = new.blocked_id where b.id = new.blocker_id and b.instance is null and t.role = 'admin') then
+	if exists (select 1 from users b join users t on t.id = new.blocked_id where b.id = new.blocker_id and b.instance is null and t.role = 'admin' and t.instance is null) then
 		return null;
 	end if;
 	return new;
@@ -1357,11 +1412,14 @@ drop trigger if exists blocks_spare_admins on blocks;
 create trigger blocks_spare_admins before insert on blocks for each row execute function blocks_spare_admins();
 create or replace function admins_unblocked() returns trigger language plpgsql as $$
 begin
-	if new.role = 'admin' and old.role is distinct from 'admin' then
+	if new.role = 'admin' and old.role is distinct from 'admin' and new.instance is null then
 		delete from blocks bl using users b where bl.blocked_id = new.id and b.id = bl.blocker_id and b.instance is null;
 	end if;
 	return new;
 end $$;
 drop trigger if exists users_admins_unblocked on users;
 create trigger users_admins_unblocked after update of role on users for each row execute function admins_unblocked();
-delete from blocks bl using users b, users t where b.id = bl.blocker_id and t.id = bl.blocked_id and b.instance is null and t.role = 'admin';
+delete from blocks bl using users b, users t where b.id = bl.blocker_id and t.id = bl.blocked_id and b.instance is null and t.role = 'admin' and t.instance is null;
+
+-- profile decor for gold-check accounts, from the Steam Points Shop (decor.ts)
+alter table users add column if not exists decor jsonb;

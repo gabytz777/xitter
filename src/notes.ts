@@ -1,4 +1,5 @@
 import type { Viewer } from "./auth";
+import { shownSource } from "./platforms";
 import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { blockedFor, isBlockedEitherWay, outOfView, protectedFor } from "./blocks";
@@ -6,6 +7,7 @@ import { staffViewer } from "./staff-access";
 import { getPost, postsByIds, PostError, refuseHate } from "./posts";
 import { noteText, tweetEntry, tweetResult } from "./model";
 import { feature } from "./settings";
+import { noteStatus } from "./note-score";
 
 function id(value: unknown): string {
 	if (!isId(value)) throw new PostError("Invalid note or post id.", 144);
@@ -27,12 +29,14 @@ async function membership(v: Viewer) {
 async function profile(v: Viewer, alias?: string) {
 	const [user] = await sql`select id::text, notes_alias, notes_writer from users where ${alias === undefined ? sql`id = ${v.id}::bigint` : sql`notes_alias = ${alias}`}`;
 	if (!user || await isBlockedEitherWay(v.id, user.id)) return null;
-	const [counts] = await sql`select count(*) filter(where ratings < 3 or (helpful * 3 < ratings * 2 and not_helpful * 3 < ratings * 2))::int as awaiting_more_ratings,
-		count(*) filter(where ratings >= 3 and helpful * 3 >= ratings * 2)::int as currently_rated_helpful,
-		count(*) filter(where ratings >= 3 and not_helpful * 3 >= ratings * 2)::int as currently_rated_not_helpful from (
-		select n.id, count(voter.id) as ratings, count(voter.id) filter(where r.rating = 'Helpful') as helpful, count(voter.id) filter(where r.rating = 'NotHelpful') as not_helpful
+	const scores = await sql`select n.id, count(voter.id) as ratings, count(voter.id) filter(where r.rating = 'Helpful') as helpful, count(voter.id) filter(where r.rating = 'NotHelpful') as not_helpful
 		from community_notes n left join community_note_ratings r on r.note_id = n.id left join users voter on voter.id = r.user_id and voter.status = 'active'
-		where n.author_id = ${user.id}::bigint group by n.id) scores`;
+		where n.author_id = ${user.id}::bigint group by n.id`;
+	const counts = { awaiting_more_ratings: 0, currently_rated_helpful: 0, currently_rated_not_helpful: 0 };
+	for (const score of scores) {
+		const status = noteStatus(Number(score.ratings), Number(score.helpful), Number(score.not_helpful));
+		counts[status === "Helpful" ? "currently_rated_helpful" : status === "NotHelpful" ? "currently_rated_not_helpful" : "awaiting_more_ratings"]++;
+	}
 	return { alias: user.notes_alias, can_write_notes: (!!user.notes_writer || feature("notes_everyone")) && v.status === "active", user_enrollment: { enrollment_state: user.notes_writer || feature("notes_everyone") ? "EarnedIn" : "NewUser", writing_impact: 0, rating_impact: 0 },
 		notes_count: { ...counts, last_updated_at: Date.now() }, ratings_count: { last_updated_at: Date.now(), successful: {}, unsuccessful: {} },
 		notification_settings: { needs_your_help_frequency: "Never" }, user_settings: { show_in_app_navigation: true }, is_top_writer: false, is_api_contributor: false,
@@ -46,18 +50,18 @@ export async function notesFor(v: Viewer, postId: string) {
 
 async function notesMany(v: Viewer, postIds: string[], noteIds?: string[]) {
 	if (!postIds.length) return new Map<string, any[]>();
-	const rows = await sql`select n.id::text, n.post_id::text, n.author_id::text, n.text, n.classification, n.created_at, n.data_v1, u.notes_alias as alias,
+	const rows = await sql`select n.id::text, n.post_id::text, n.author_id::text, n.text, n.classification, n.created_at, n.data_v1, u.notes_alias as alias, a.status as appeal_status,
 		count(r.user_id)::int as ratings, count(r.user_id) filter(where r.rating = 'Helpful')::int as helpful,
 		count(r.user_id) filter(where r.rating = 'NotHelpful')::int as not_helpful,
 		max(r.rating) filter(where r.user_id = ${v.id}::bigint) as viewer_rating,
 		(jsonb_agg(r.data_v2) filter(where r.user_id = ${v.id}::bigint))->0 as viewer_data
 		from community_notes n left join (select x.* from community_note_ratings x join users voter on voter.id = x.user_id and voter.status = 'active') r on r.note_id = n.id
-		join users u on u.id = n.author_id and u.status <> 'suspended'
-		where n.post_id = any(${sql.array(postIds, "INT8")}) and ${noteIds ? sql`n.id = any(${sql.array(noteIds, "INT8")})` : sql`true`} and n.author_id not in ${blockedFor(v.id)} group by n.id, u.notes_alias order by n.id desc`;
+		join users u on u.id = n.author_id and u.status <> 'suspended' left join community_note_appeals a on a.note_id = n.id
+		where n.post_id = any(${sql.array(postIds, "INT8")}) and ${noteIds ? sql`n.id = any(${sql.array(noteIds, "INT8")})` : sql`true`} and n.author_id not in ${blockedFor(v.id)} group by n.id, u.notes_alias, a.status order by n.id desc`;
 	const result = new Map<string, any[]>();
 	for (const n of rows) {
 		const list = result.get(n.post_id) ?? [];
-		if (list.length < 100 || n.author_id === v.id) list.push({ ...n, own: n.author_id === v.id, status: n.ratings >= 3 && n.helpful / n.ratings >= 2 / 3 ? "Helpful" : n.ratings >= 3 && n.not_helpful / n.ratings >= 2 / 3 ? "NotHelpful" : "NeedsMoreRatings" });
+		if (list.length < 100 || n.author_id === v.id) list.push({ ...n, own: n.author_id === v.id, status: noteStatus(n.ratings, n.helpful, n.not_helpful) });
 		result.set(n.post_id, list);
 	}
 	return result;
@@ -70,7 +74,7 @@ const entity = (n: any, post?: any) => ({
 	data_v1: { ...n.data_v1, summary: noteText(n.text), classification: n.classification === "Misleading" ? "MisinformedOrPotentiallyMisleading" : "NotMisleading" },
 	rating: n.viewer_rating ? { __typename: "BirdwatchNoteRating", data_v2: { ...n.viewer_data, helpfulness_level: n.viewer_rating } } : null,
 	birdwatch_profile: { alias: n.alias, notes_count: { awaiting_more_ratings: 0, currently_rated_helpful: 0, currently_rated_not_helpful: 0, last_updated_at: Date.now() }, ratings_count: { last_updated_at: Date.now(), successful: {}, unsuccessful: {} } },
-	above_pcrh_threshold: false, appeal_status: "NotAppealed", can_appeal: false, decided_by: "XitterLocalRatings", fully_visible_model: true,
+	above_pcrh_threshold: false, appeal_status: n.appeal_status === "open" ? "Appealed" : n.appeal_status === "accepted" ? "AppealAccepted" : n.appeal_status === "rejected" ? "AppealRejected" : "NotAppealed", can_appeal: n.own && n.status === "NotHelpful" && !n.appeal_status, decided_by: "XitterLocalRatings", fully_visible_model: true,
 	is_api_author: false, is_community_note_translatable: false, is_media_note: false, language: "en", helpful_tags: [],
 	grok_translated_community_note_with_availability: { is_available: false },
 	...(post ? { tweet_results: { result: tweetResult(post) } } : {}),
@@ -104,13 +108,14 @@ export const noteHandlers = {
 	XitterPostContext: async (v: Viewer, vars: any) => {
 		const ids = [...new Set((Array.isArray(vars.ids) ? vars.ids : []).filter(isId))].slice(0, 20) as string[];
 		if (!ids.length) return { data: { xitter_post_context: [] } };
-		const posts = await sql`select id::text, source from posts where id = any(${sql.array(ids, "INT8")}) and (not hidden or ${staffViewer(v.id)}) and user_id not in ${blockedFor(v.id)} and user_id not in ${outOfView(v.id)} and user_id not in ${protectedFor(v.id)}`;
+		const posts = await sql`select p.id::text, p.source, u.instance from posts p join users u on u.id = p.user_id where p.id = any(${sql.array(ids, "INT8")}) and (not p.hidden or ${staffViewer(v.id)}) and p.user_id not in ${blockedFor(v.id)} and p.user_id not in ${outOfView(v.id)} and p.user_id not in ${protectedFor(v.id)}`;
+		for (const p of posts) p.source = shownSource(p.source, p.instance);
 		const visibleIds = posts.map((p: any) => p.id);
 		const notes = await notesMany(v, visibleIds);
 		const requests = visibleIds.length ? await sql`select post_id::text, count(*)::int as count, bool_or(user_id = ${v.id}::bigint) as own from community_note_requests where post_id = any(${sql.array(visibleIds, "INT8")}) group by post_id` : [];
 		const byPost = new Map(requests.map((r: any) => [r.post_id, r]));
 		const canWrite = await membership(v);
-		return { data: { xitter_post_context: posts.map((p: any) => ({ ...p, can_write_notes: canWrite, notes: (notes.get(p.id) ?? []).map(({ author_id, ...n }: any) => n), requests: byPost.get(p.id)?.count ?? 0, requested: !!byPost.get(p.id)?.own })) } };
+		return { data: { xitter_post_context: posts.map(({ instance, ...p }: any) => ({ ...p, can_write_notes: canWrite, notes: (notes.get(p.id) ?? []).map(({ author_id, ...n }: any) => n), requests: byPost.get(p.id)?.count ?? 0, requested: !!byPost.get(p.id)?.own })) } };
 	},
 	BirdwatchCreateNote: async (v: Viewer, vars: any) => {
 		await visible(v, vars.tweet_id, true);

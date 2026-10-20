@@ -80,6 +80,23 @@ by an older version, run:
 bun scripts/drop-remote-media.ts
 ```
 
+## What people see
+
+A post from another instance names it after its time, for example
+`Xitter for Web - xit.example.org`.
+
+Accounts from other instances wear a globe after their name. Clicking it opens a
+card about their instance: its name, whether it's on the list, how many of its
+accounts are here, and links to its rules, its source code and the setting that
+hides it.
+
+Anyone can hide accounts and organisations from all other instances, or only
+from the instances they pick, for themselves in Settings > Other instances
+(`/account/instances`). They then stay
+out of that person's timelines, replies, search and suggestions, except accounts
+they follow. The same page can also mute their notifications. Searching a full handle such as `@name@example.org` still finds
+them.
+
 ## Moderating
 
 Each instance moderates its own people, and what you remove from your instance
@@ -91,9 +108,14 @@ posts disappear from yours and nothing more comes from it until you federate
 again. You can also delete everything you got from it.
 
 A few people listed in `src/superadmins.ts` can act on every instance in an
-emergency, including defederating a bad instance everywhere at once.
+emergency, including defederating a bad instance everywhere at once. Only a
+superadmin can lift an emergency block, and lifting it keeps any block your
+own admins had made. A superadmin's own instance can't be blocked this way.
+The list's maintainers stop it by marking it `blocked` in `instances.json`,
+which also ends its superadmins' access.
 
 ## Leaving
 
 Set `FEDERATION=off` to stop federating, and open a pull request that removes
-your entry from `instances.json`.
+your entry from `instances.json`. Turning federation off also stops superadmins
+from signing in to your instance.

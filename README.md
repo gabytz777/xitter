@@ -31,6 +31,8 @@ copy during setup, and it stays on that machine.
 - Search with X's operators, including full federated handles, trends, Explore;
   trends by location (Explore settings: worldwide, a country, or yours with
   "Trends for you")
+- PostgreSQL trigram indexes for post text and account search; startup installs
+  the `pg_trgm` extension and builds the indexes on existing data once
 - News and sports cards at the top of Explore, written by staff (Admin >
   Explore cards); sports cards are scoreboards you update as the game goes
 - Topics: staff define them with keywords; people follow them from "Topics to
@@ -45,7 +47,8 @@ copy during setup, and it stays on that machine.
   when mail is set up; Settings > Email changes it by a confirmation link), pride flag badges, organisations
   with affiliates, several signed-in accounts
 - Account settings: password change, username change, language, deactivation
-  (reactivates on sign-in within 30 days), data archive (including drafts,
+  (reactivates on sign-in within 30 days), downloadable JSON and offline HTML
+  data archives (including drafts,
   scheduled posts, polls, media metadata, bookmark folders and visible encrypted
   chat history without decryption keys), email notification
   settings (activity and new-message digests, sent while you're away), sessions
@@ -74,6 +77,10 @@ copy during setup, and it stays on that machine.
   retry support; `/api` documents it. Pending uploads expire after one hour and
   are lost if the server restarts. Changing or resetting a password revokes all
   of that account's API tokens.
+- Connected apps: developers register a public client at `/account/apps/developer`,
+  users approve read or read-and-write access with OAuth 2 authorization code
+  and mandatory PKCE, and revoke access at `/account/apps`. Tokens expire after
+  30 days; `/api` documents the flow.
 - An admin panel at `/admin`: users, standing (restrict, limit, suspend),
   badges (blue, gold organisation, grey government organisation or official),
   translator globes (blue translator, gold translator moderator, yellow approver),
@@ -85,8 +92,7 @@ copy during setup, and it stays on that machine.
   and who sees IP addresses, email addresses, invite codes and server errors
   (`src/staff-permissions.ts`; `bun scripts/test-staff-permissions.ts` checks it)
 
-Not built yet: Spaces and live video, Moments, signing in other apps (Connected
-apps stays empty). Email is sent over SMTP to your own mail server when
+Not built yet: Spaces and live video, Moments. Email is sent over SMTP to your own mail server when
 `SMTP_URL` is set, or through [Resend](https://resend.com) when
 `RESEND_API_KEY` is (with both, Resend catches what SMTP refused); Admin >
 Email sends a test mail (it shows the server's answer) and lists every mail
@@ -268,10 +274,13 @@ own notes. Requests and ratings are deduplicated. Authors can delete their notes
 admins and moderators can remove notes, with staff removals recorded in the audit
 log. Blocked accounts cannot interact through notes.
 
-The current local scoring rule needs at least three ratings, with two thirds
-Helpful, before a misleading-post note is displayed as native context. Ratings
-from suspended accounts are excluded. This is not X's matrix-factorization scoring
-system. Media-match notes, automated translation and appeals are not implemented.
+The local scoring rule needs at least five active ratings and a 95% Wilson
+lower bound above 50% before a misleading-post note is displayed as native
+context. Ratings from suspended accounts are excluded. Authors can appeal a
+Not Helpful note at `/account/notes/appeals`; admins and moderators review
+appeals there, with decisions recorded in the audit log. A staff decision does
+not change the reader score. This is not X's matrix-factorization scoring
+system. Media-match notes and automated translation are not implemented.
 
 Run `bun scripts/test-notes.ts` against the development server with the existing
 `pozo`/`goldcorp` test accounts. It creates temporary posts, tokens and voters,

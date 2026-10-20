@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { accountPage, esc } from "./account-page";
 import { type Viewer, sessionCookies } from "./auth";
 import { sql } from "./db";
-import { INSTANCE_ID, type Incoming, b64url, baseUrl, keyFor, liftBlock, listed, open, seal, setBlock, signedAnswer, signedFetch } from "./federation";
+import { FEDERATION_ON, INSTANCE_ID, type Incoming, b64url, baseUrl, keyFor, liftBlock, listed, listedInstance, open, seal, setBlock, signedAnswer, signedFetch } from "./federation";
 import { newId } from "./ids";
 import { hit, limitedResponse } from "./ratelimit";
 import { SUPERADMINS, isSuperadminHome, superadminOf } from "./superadmins";
@@ -41,6 +41,8 @@ async function auditHome(actorId: string, action: string, target: string, detail
 }
 
 const targets = () => listed().filter((i) => i.id !== INSTANCE_ID);
+
+const activeHome = (instance: string) => isSuperadminHome(instance) && listedInstance(instance)?.state !== "blocked";
 
 function homePage(req: Request, viewer: Viewer, message = "") {
 	const options = targets()
@@ -100,6 +102,7 @@ export async function superadminHomeRoute(req: Request, url: URL, viewer: Viewer
 		const action = form.get("action") === "lift" ? "lift" : "block";
 		const reason = String(form.get("reason") ?? "").trim().slice(0, 500);
 		if (!reason) return homePage(req, viewer, "Give a reason.");
+		if (isSuperadminHome(instance)) return homePage(req, viewer, "A superadmin's home can't be defederated in an emergency. Mark it blocked in instances.json instead.");
 		const seq = Date.now();
 		const envelope = seal({ typ: "xitter-emergency-v1", iss: INSTANCE_ID, seq, instance, action, reason, by: viewer.screen_name, at: new Date(seq).toISOString() });
 		await sql`insert into federation_emergencies (seq, instance, action, reason, by_name, issuer, envelope)
@@ -110,11 +113,16 @@ export async function superadminHomeRoute(req: Request, url: URL, viewer: Viewer
 		const results = await Promise.all(
 			listed()
 				.filter((i) => i.id !== INSTANCE_ID && i.id !== instance && i.state === "active")
-				.map(async (i) => `${i.id}: ${(await signedFetch(i.id, "POST", "/federation/v1/emergency", envelope).catch(() => undefined))?.status ?? "unreachable"}`),
+				.map(async (i) => `${i.id}: ${(await signedFetch(i.id, "POST", "/federation/v1/emergency", envelope, undefined, { anyListed: true }).catch(() => undefined))?.status ?? "unreachable"}`),
 		);
 		return homePage(req, viewer, `Sent. ${results.join(", ") || "No other instance to tell."} Instances that missed it pick it up within a minute.`);
 	}
 	return new Response("not found", { status: 404 });
+}
+
+export async function endSuperadminVisits() {
+	await sql`update users set role = null where instance is not null and role is not null
+		and not exists (select 1 from sessions s where s.user_id = users.id and s.superadmin and s.expires_at > now())`;
 }
 
 type Emergency = { typ: string; iss: string; seq: number; instance: string; action: "block" | "lift"; reason: string; by: string; at: string };
@@ -122,13 +130,13 @@ type Emergency = { typ: string; iss: string; seq: number; instance: string; acti
 async function applyEmergency(envelope: unknown): Promise<boolean> {
 	const e = envelope as { payload?: string; key_id?: string };
 	const issuer = typeof e?.key_id === "string" ? e.key_id : "";
-	if (!isSuperadminHome(issuer)) return false;
+	if (!activeHome(issuer)) return false;
 	const key = await keyFor(issuer);
 	const notice = key ? (open(envelope, key) as Emergency | undefined) : undefined;
 	if (!notice || notice.typ !== "xitter-emergency-v1" || notice.iss !== issuer || !Number.isSafeInteger(notice.seq) || notice.seq > Date.now() + 5 * 60_000) return false;
-	if (typeof notice.instance !== "string" || notice.instance === issuer || !["block", "lift"].includes(notice.action) || !SUPERADMINS.some((s) => s.instance === issuer && s.screen_name === notice.by))
+	if (typeof notice.instance !== "string" || isSuperadminHome(notice.instance) || !["block", "lift"].includes(notice.action) || !SUPERADMINS.some((s) => s.instance === issuer && s.screen_name === notice.by))
 		return false;
-	const [newer] = await sql`select 1 from federation_emergencies where instance = ${notice.instance} and seq >= ${notice.seq}`;
+	const [newer] = await sql`select 1 from federation_emergencies where instance = ${notice.instance} and issuer = ${issuer} and seq >= ${notice.seq}`;
 	if (newer) return true;
 	await sql`insert into federation_emergencies (seq, instance, action, reason, by_name, issuer, envelope)
 		values (${notice.seq}, ${notice.instance}, ${notice.action}, ${String(notice.reason).slice(0, 500)}, ${notice.by}, ${issuer}, ${JSON.stringify(envelope)}::text::jsonb) on conflict (seq) do nothing`;
@@ -140,7 +148,7 @@ async function applyEmergency(envelope: unknown): Promise<boolean> {
 
 export async function emergencyApi(incoming: Incoming, method: string, path: string): Promise<Response | undefined> {
 	if (method === "POST" && path === "/federation/v1/emergency") {
-		if (!isSuperadminHome(incoming.from)) return signedAnswer(incoming, 403, { error: "Only a superadmin's home sends these." });
+		if (!activeHome(incoming.from)) return signedAnswer(incoming, 403, { error: "Only a superadmin's home sends these." });
 		return signedAnswer(incoming, (await applyEmergency(incoming.json())) ? 200 : 400, {});
 	}
 	if (method === "GET" && path === "/federation/v1/emergencies") {
@@ -153,7 +161,7 @@ export async function emergencyApi(incoming: Incoming, method: string, path: str
 
 export async function pollEmergencies() {
 	for (const s of new Set(SUPERADMINS.map((x) => x.instance))) {
-		if (s === INSTANCE_ID) continue;
+		if (s === INSTANCE_ID || !activeHome(s)) continue;
 		const r = await signedFetch(s, "GET", "/federation/v1/emergencies").catch(() => undefined);
 		if (r?.status !== 200) continue;
 		const list = r.json()?.emergencies;
@@ -177,7 +185,8 @@ export async function acceptTicket(req: Request, ip: string): Promise<Response> 
 		return refuse("That ticket isn't readable.", 400);
 	}
 	const issuer = typeof envelope?.key_id === "string" ? envelope.key_id : "";
-	if (!isSuperadminHome(issuer)) return refuse("That ticket wasn't issued by a superadmin's home instance.");
+	if (!FEDERATION_ON) return refuse("This instance doesn't federate.", 404);
+	if (!activeHome(issuer)) return refuse("That ticket wasn't issued by a superadmin's home instance.");
 	const key = await keyFor(issuer);
 	const t = key ? (open(envelope, key) as Ticket | undefined) : undefined;
 	const now = Math.floor(Date.now() / 1000);

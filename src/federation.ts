@@ -136,7 +136,9 @@ export async function reloadBlocks() {
 }
 
 async function syncRegistryBlocks() {
-	const off = registry.instances.filter((i) => i.state !== "active").map((i) => i.id);
+	const active = registry.instances.filter((i) => i.state === "active").map((i) => i.id);
+	const known = (await sql`select distinct instance from users where instance is not null`).map((r: any) => r.instance as string);
+	const off = [...new Set([...registry.instances.filter((i) => i.state !== "active").map((i) => i.id), ...known.filter((i: string) => !active.includes(i))])];
 	await sql`delete from federation_blocks where source = 'registry' and not (instance = any(${sql.array(off, "TEXT")}))`;
 	if (off.length)
 		await sql`insert into federation_blocks (instance, source, reason)
@@ -148,14 +150,25 @@ export const isBlocked = (instance: string) => blocked.has(instance);
 
 export async function setBlock(instance: string, source: "local" | "emergency", reason: string, by: { id?: string | null; name?: string | null }) {
 	await sql`insert into federation_blocks (instance, source, reason, by_id, by_name) values (${instance}, ${source}, ${reason.slice(0, 500)}, ${by.id ?? null}::bigint, ${by.name ?? null})
-		on conflict (instance) do update set source = case when federation_blocks.source = 'emergency' then 'emergency' else excluded.source end,
-			reason = excluded.reason, by_id = excluded.by_id, by_name = excluded.by_name, created_at = now()`;
+		on conflict (instance) do update set
+			kept_local = case
+				when federation_blocks.source = 'emergency' and excluded.source = 'local' then jsonb_build_object('reason', excluded.reason, 'by_id', excluded.by_id::text, 'by_name', excluded.by_name)
+				when federation_blocks.source = 'local' and excluded.source = 'emergency' then jsonb_build_object('reason', federation_blocks.reason, 'by_id', federation_blocks.by_id::text, 'by_name', federation_blocks.by_name)
+				else federation_blocks.kept_local end,
+			source = case when federation_blocks.source = 'emergency' then 'emergency' else excluded.source end,
+			reason = case when federation_blocks.source = 'emergency' and excluded.source = 'local' then federation_blocks.reason else excluded.reason end,
+			by_id = case when federation_blocks.source = 'emergency' and excluded.source = 'local' then federation_blocks.by_id else excluded.by_id end,
+			by_name = case when federation_blocks.source = 'emergency' and excluded.source = 'local' then federation_blocks.by_name else excluded.by_name end,
+			created_at = case when federation_blocks.source = 'emergency' and excluded.source = 'local' then federation_blocks.created_at else now() end`;
 	await reloadBlocks();
 }
 
 export async function liftBlock(instance: string, source: "local" | "emergency") {
+	if (source === "emergency")
+		await sql`update federation_blocks set source = 'local', reason = coalesce(kept_local->>'reason', ''), by_id = (kept_local->>'by_id')::bigint,
+			by_name = kept_local->>'by_name', kept_local = null, created_at = now() where instance = ${instance} and source = 'emergency' and kept_local is not null`;
 	await sql`delete from federation_blocks where instance = ${instance} and source = ${source}`;
-	await reloadBlocks();
+	await syncRegistryBlocks();
 }
 
 export const listBlocks = async () => (await sql`select instance, source, reason, by_name, created_at from federation_blocks order by created_at desc`) as Block[];
@@ -239,8 +252,8 @@ const responseText = (from: string, to: string, nonce: string, status: number, b
 
 export class FederationError extends Error {}
 
-export async function signedFetch(to: string, method: "GET" | "POST", path: string, body?: unknown, max = MAX_BODY): Promise<{ status: number; body: Uint8Array; json: () => any }> {
-	if (!isPeer(to) && !isSuperadminHome(to)) throw new FederationError(`${to} isn't an instance this one federates with`);
+export async function signedFetch(to: string, method: "GET" | "POST", path: string, body?: unknown, max = MAX_BODY, opts: { anyListed?: boolean } = {}): Promise<{ status: number; body: Uint8Array; json: () => any }> {
+	if (!isPeer(to) && !(isSuperadminHome(to) && listedInstance(to)?.state !== "blocked") && !(opts.anyListed && listedInstance(to)?.state === "active" && FEDERATION_ON)) throw new FederationError(`${to} isn't an instance this one federates with`);
 	const bytes = body === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(body));
 	const ts = String(Date.now());
 	const nonce = b64url(randomBytes(16));
@@ -273,7 +286,7 @@ setInterval(() => {
 
 export type Incoming = { from: string; nonce: string; body: Uint8Array; json: () => any };
 
-export async function verifyIncoming(req: Request, path: string, opts: { allowSuperadminHome?: boolean } = {}): Promise<Incoming | Response> {
+export async function verifyIncoming(req: Request, path: string, opts: { allowSuperadminHome?: boolean; allowListed?: boolean } = {}): Promise<Incoming | Response> {
 	const fail = (status: number, error: string) => Response.json({ error }, { status });
 	const from = req.headers.get("x-xitter-from") ?? "";
 	const to = req.headers.get("x-xitter-to") ?? "";
@@ -283,7 +296,8 @@ export async function verifyIncoming(req: Request, path: string, opts: { allowSu
 	if (!FEDERATION_ON) return fail(404, "Federation is off here.");
 	if (to !== INSTANCE_ID) return fail(421, "This request is for another instance.");
 	if (!ID_RE.test(from) || !/^\d{13}$/.test(ts) || !/^[A-Za-z0-9_-]{22}$/.test(nonce)) return fail(400, "Malformed federation headers.");
-	if (!isPeer(from) && !(opts.allowSuperadminHome && isSuperadminHome(from) && listedInstance(from)?.state !== "blocked")) return fail(403, `${INSTANCE_ID} doesn't federate with ${from}.`);
+	if (!isPeer(from) && !(opts.allowSuperadminHome && isSuperadminHome(from) && listedInstance(from)?.state !== "blocked") && !(opts.allowListed && listedInstance(from)?.state === "active"))
+		return fail(403, `${INSTANCE_ID} doesn't federate with ${from}.`);
 	if (Math.abs(Date.now() - Number(ts)) > CLOCK_SKEW_MS) return fail(401, "The request's clock is too far off.");
 	const declared = Number(req.headers.get("content-length") ?? "0");
 	if (declared > MAX_BODY) return fail(413, "The request is too large.");

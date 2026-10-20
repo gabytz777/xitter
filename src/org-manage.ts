@@ -8,6 +8,8 @@ import { accountPage, esc } from "./account-page";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
 
+export const AFFILIATION_LIMIT = 4;
+
 type Org = { id: string; screen_name: string; name: string; self: boolean };
 
 const isOrg = (u: unknown) => sql`(${u}.verified_type in ('business', 'government') or exists (select 1 from affiliations x where x.org_id = ${u}.id))`;
@@ -16,7 +18,8 @@ const isOrg = (u: unknown) => sql`(${u}.verified_type in ('business', 'governmen
 async function managedOrg(viewer: Viewer): Promise<Org | undefined> {
 	const [org] = await sql`select u.id::text, u.screen_name, u.name, u.id = ${viewer.id}::bigint as self from users u
 		where ${isOrg(sql`u`)} and (u.id = ${viewer.id}::bigint
-			or u.id = (select org_id from affiliations where user_id = ${viewer.id}::bigint and manager))`;
+			or u.id in (select org_id from affiliations where user_id = ${viewer.id}::bigint and manager))
+		order by u.id = ${viewer.id}::bigint desc, u.id limit 1`;
 	return org as Org | undefined;
 }
 
@@ -27,7 +30,8 @@ const form = (action: string, fields: Record<string, string>, label: string, cls
 
 async function view(req: Request, viewer: Viewer, error = "", notice = "") {
 	const org = await managedOrg(viewer);
-	const [mine] = await sql`select o.screen_name, a.manager from affiliations a join users o on o.id = a.org_id where a.user_id = ${viewer.id}::bigint`;
+	const mine = await sql`select o.id::text, o.screen_name, o.name from affiliations a join users o on o.id = a.org_id where a.user_id = ${viewer.id}::bigint order by a.created_at, a.org_id`;
+	const full = mine.length >= AFFILIATION_LIMIT;
 	const asked = await sql`select o.id::text, o.screen_name, o.name from affiliation_requests r join users o on o.id = r.org_id
 		where r.user_id = ${viewer.id}::bigint and ${isOrg(sql`o`)} order by r.created_at`;
 	let body = `<h1>Organisation</h1>${notice ? `<p>${esc(notice)}</p>` : ""}${error ? `<p class="error">${esc(error)}</p>` : ""}`;
@@ -35,13 +39,15 @@ async function view(req: Request, viewer: Viewer, error = "", notice = "") {
 	if (asked.length)
 		body += `<h2>Requests for you</h2>${asked
 			.map(
-				(o: any) => `<div class="card split"><span><b>${esc(o.name)}</b> <a href="/${esc(o.screen_name)}">@${esc(o.screen_name)}</a> asked to add you as an affiliate: their badge would show next to your name.${mine && mine.screen_name !== o.screen_name ? ` You'd leave @${esc(mine.screen_name)}.` : ""}</span>
-<span class="row">${form("accept", { org: o.id }, "Accept", "")}${form("decline", { org: o.id }, "Decline")}</span></div>`,
+				(o: any) => `<div class="card split"><span><b>${esc(o.name)}</b> <a href="/${esc(o.screen_name)}">@${esc(o.screen_name)}</a> asked to add you as an affiliate: their badge would show next to your name.${full ? ` You can wear ${AFFILIATION_LIMIT} at most, so leave one first.` : ""}</span>
+<span class="row">${full ? "" : form("accept", { org: o.id }, "Accept", "")}${form("decline", { org: o.id }, "Decline")}</span></div>`,
 			)
 			.join("")}`;
 
-	if (mine && !org)
-		body += `<p>You are an affiliate of <a href="/${esc(mine.screen_name)}">@${esc(mine.screen_name)}</a>.</p>${form("leave", {}, "Leave the organisation", "danger")}`;
+	if (mine.length)
+		body += `<h2>Your organisations</h2><p class="dim">Their badges show next to your name in this order. You can be an affiliate of up to ${AFFILIATION_LIMIT}.</p>${mine
+			.map((o: any) => `<div class="card split"><span><b>${esc(o.name)}</b> <a href="/${esc(o.screen_name)}">@${esc(o.screen_name)}</a></span>${form("leave", { org: o.id }, "Leave", "danger")}</div>`)
+			.join("")}`;
 
 	if (org) {
 		const people = await sql`select u.id::text, u.screen_name, u.name, a.manager from affiliations a join users u on u.id = a.user_id
@@ -68,7 +74,7 @@ async function view(req: Request, viewer: Viewer, error = "", notice = "") {
 		}`;
 	}
 
-	if (!org && !mine && !asked.length) body += '<p class="dim">This page is for organisations (accounts with the gold or grey government badge) and the people they add.</p>';
+	if (!org && !mine.length && !asked.length) body += '<p class="dim">This page is for organisations (accounts with the gold or grey government badge) and the people they add.</p>';
 	return accountPage({ req, viewer, title: "Organisation", body });
 }
 
@@ -83,18 +89,20 @@ export async function orgRoute(req: Request, viewer: Viewer): Promise<Response> 
 	if (action === "accept" || action === "decline") {
 		const orgId = field("org");
 		if (!isId(orgId)) return view(req, viewer, "No such request.");
+		if (action === "accept" && (await sql`select count(*)::int as n from affiliations where user_id = ${viewer.id}::bigint`)[0].n >= AFFILIATION_LIMIT)
+			return view(req, viewer, `You're already an affiliate of ${AFFILIATION_LIMIT} organisations. Leave one first.`);
 		const [r] = await sql`delete from affiliation_requests r using users o
 			where r.org_id = ${orgId}::bigint and r.user_id = ${viewer.id}::bigint and o.id = r.org_id and ${isOrg(sql`o`)} returning o.screen_name`;
 		if (!r) return view(req, viewer, "That request is gone.");
 		if (action === "decline") return view(req, viewer, "", `You declined @${r.screen_name}.`);
-		// one organisation per person; accepting moves them
-		await sql`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${viewer.id}::bigint)
-			on conflict (user_id) do update set org_id = excluded.org_id, manager = false, created_at = now()`;
+		await sql`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${viewer.id}::bigint) on conflict do nothing`;
 		return view(req, viewer, "", `You are now an affiliate of @${r.screen_name}.`);
 	}
 	if (action === "leave") {
-		await sql`delete from affiliations where user_id = ${viewer.id}::bigint`;
-		return view(req, viewer, "", "You left the organisation.");
+		const orgId = field("org");
+		if (!isId(orgId)) return view(req, viewer, "Choose an organisation.");
+		const [left] = await sql`delete from affiliations a using users o where a.user_id = ${viewer.id}::bigint and a.org_id = ${orgId}::bigint and o.id = a.org_id returning o.screen_name`;
+		return left ? view(req, viewer, "", `You left @${left.screen_name}.`) : view(req, viewer, "You're not an affiliate of that organisation.");
 	}
 
 	const org = await managedOrg(viewer);

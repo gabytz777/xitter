@@ -106,17 +106,27 @@ function profilePreview(a: Author): Response {
 	});
 }
 
+const handleIn = (pathname: string) => {
+	const raw = /^\/([^/]{1,320})\/?$/.exec(pathname)?.[1];
+	try {
+		const name = raw && decodeURIComponent(raw);
+		return name && /^[^\s\p{C}/\\?#@%,:]{1,50}(?:@[a-z0-9.:-]{1,260})?$/iu.test(name) ? name : undefined;
+	} catch {
+		return undefined;
+	}
+};
+
 // a signed-out page request: the preview page, or undefined to carry on as before
 export async function linkPreview(pathname: string): Promise<Response | undefined> {
 	if (!feature("link_previews")) return undefined;
-	const status = /^\/(\w{1,15}(?:@[a-z0-9.:-]{1,260})?)\/status\/(\d{1,19})(?:\/(?:photo|video)\/\d)?\/?$/i.exec(pathname);
+	const status = /^\/([^/]{1,320})\/status\/(\d{1,19})(?:\/(?:photo|video)\/\d)?\/?$/i.exec(pathname);
 	if (status) {
 		const post = await publicPost(status[2]);
 		return post ? postPreview(post) : undefined;
 	}
-	const profile = /^\/(\w{1,15}(?:@[a-z0-9.:-]{1,260})?)\/?$/i.exec(pathname);
+	const profile = handleIn(pathname);
 	if (profile) {
-		const author = await publicAuthor(sql`lower(screen_name) = lower(${profile[1]})`);
+		const author = await publicAuthor(sql`lower(screen_name) = lower(${profile})`);
 		return author ? profilePreview(author) : undefined;
 	}
 	return undefined;
@@ -160,10 +170,10 @@ export async function oembed(url: URL): Promise<Response> {
 		return none;
 	}
 	if (target.origin !== PUBLIC_ORIGIN) return none;
-	const status = /^\/\w{1,15}(?:@[a-z0-9.:-]{1,260})?\/status\/(\d{1,19})/i.exec(target.pathname);
+	const status = /^\/[^/]{1,320}\/status\/(\d{1,19})/i.exec(target.pathname);
 	const author = status
 		? (await publicPost(status[1]))?.author
-		: await publicAuthor(sql`lower(screen_name) = lower(${/^\/(\w{1,15}(?:@[a-z0-9.:-]{1,260})?)\/?$/i.exec(target.pathname)?.[1] ?? ""})`);
+		: await publicAuthor(sql`lower(screen_name) = lower(${handleIn(target.pathname) ?? ""})`);
 	if (!author) return none;
 	return Response.json(
 		{

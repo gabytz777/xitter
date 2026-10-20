@@ -14,7 +14,7 @@ import { FEDERATION_ON, ID_RE, INSTANCE_ID, acceptKeyChange, isBlocked as isFede
 import { dropRemoteMedia, pullFrom, savedRemoteMedia, storesRemoteMedia } from "./federation-sync";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
-import { isFlag } from "./flags";
+import { flagValue, unknownFlag } from "./flags";
 import { isId, newId } from "./ids";
 import { createInvite, staffHandleProblem } from "./invites";
 import { retireAccount } from "./held";
@@ -31,6 +31,7 @@ import { toolActions } from "./admin-tools";
 import { stickerActions } from "./stickers";
 import { hashflagActions } from "./hashflags";
 import { switchActions } from "./feature-switches";
+import { AFFILIATION_LIMIT } from "./org-manage";
 import { staffGate } from "./staff-access";
 import { GRANTABLE, PERMISSIONS, RANK, type Role, allows, mayRun, permissionOf, rolePermissions } from "./staff-permissions";
 
@@ -68,7 +69,7 @@ async function userRow(id: string) {
 // change the owner's account, the owner can change theirs. Admins otherwise
 // can't touch each other, except that whoever gave an account its staff role
 // can still act on it, while they still rank as high as it (not once demoted).
-const ownerId = async () => (await sql`select id::text from users where role = 'admin' order by created_at, id limit 1`)[0]?.id as string | undefined;
+const ownerId = async () => (await sql`select id::text from users where role = 'admin' and instance is null order by created_at, id limit 1`)[0]?.id as string | undefined;
 const rankOf = (role: string | null, isOwner: boolean) => (isOwner ? 4 : role ? RANK[role as Role] : 0);
 
 export async function guard(actor: Viewer, targetId: string, localOnly = false) {
@@ -91,13 +92,17 @@ const randomPassword = () => {
 	return [...crypto.getRandomValues(new Uint8Array(14))].map((b) => alphabet[b % alphabet.length]).join("");
 };
 
+// the Users and Organisations lists: "local" is this instance's own accounts,
+// "remote" the copies of accounts from other instances, anything else both
+const homeFilter = (home: unknown) => (home === "local" ? sql`and u.instance is null` : home === "remote" ? sql`and u.instance is not null` : sql``);
+
 const like = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const userListCols = sql`u.id::text as id, u.screen_name, u.name, u.avatar_url, u.verified_type, u.translator, u.flag, u.status, u.role,
 	u.created_at, u.last_seen_at,
 	(select count(*)::int from posts p where p.user_id = u.id) as posts,
 	(select count(*)::int from follows f where f.followee_id = u.id) as followers,
-	(select o.screen_name from affiliations af join users o on o.id = af.org_id where af.user_id = u.id) as org,
+	(select string_agg(o.screen_name, ', ' order by af.created_at) from affiliations af join users o on o.id = af.org_id where af.user_id = u.id) as org,
 	(select count(*)::int from affiliations af where af.org_id = u.id) as affiliates`;
 
 const instanceOf = (v: unknown) => {
@@ -169,6 +174,7 @@ const ACTIONS: Record<string, Action> = {
 	federationPurge: { role: "admin", run: async (a, b) => {
 		const id = instanceOf(b.instance);
 		if (!isFederationBlocked(id)) throw new AdminError("Defederate the instance before deleting what came from it.");
+		await dropRemoteMedia(id);
 		const gone = await sql`delete from users where instance = ${id} returning id`;
 		await sql`delete from federated_objects where instance = ${id}`;
 		await sql`update federation_peers set cursor = 0 where instance = ${id}`;
@@ -353,9 +359,10 @@ const ACTIONS: Record<string, Action> = {
 			const q = String(b.q ?? "").trim().replace(/^@/, "");
 			const status = ["active", "restricted", "limited", "suspended"].includes(b.status) ? b.status : null;
 			const staff = !!b.staff;
+			const home = homeFilter(b.home);
 			const match = sql`(${q} = '' or u.screen_name ilike ${like(q)} or u.name ilike ${like(q)})
 					and (${status}::text is null or u.status = ${status})
-					and (not ${staff} or u.role is not null)`;
+					and (not ${staff} or u.role is not null) ${home}`;
 			const rows = await sql`select ${userListCols} from users u where ${match}
 				order by u.created_at desc, u.id desc limit ${Math.min(Math.max(Number(b.limit) || 50, 1), 500)} offset ${Math.max(Number(b.offset) || 0, 0)}`;
 			const [{ total }] = await sql`select count(*)::int as total from users u where ${match}`;
@@ -367,7 +374,7 @@ const ACTIONS: Record<string, Action> = {
 		role: "support",
 		run: async (a, b) => {
 			const id = idOf(b.id);
-			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.count_overrides, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
+			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.count_overrides, u.decor, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
 				(select coalesce(json_agg(ub.badge_id::text order by ub.position), '[]') from user_badges ub where ub.user_id = u.id) as badge_ids,
 				(select count(*)::int from sessions s where s.user_id = u.id) as sessions,
 				(select c.screen_name from invites i join users c on c.id = i.created_by where i.code = u.invite_code) as invited_by
@@ -450,8 +457,8 @@ const ACTIONS: Record<string, Action> = {
 		role: "admin",
 		run: async (a, b) => {
 			const id = idOf(b.id);
-			const flag = b.flag || null;
-			if (flag !== null && !isFlag(flag)) throw new AdminError("Unknown flag.");
+			if (unknownFlag(b.flag)) throw new AdminError("Unknown flag.");
+			const flag = flagValue(b.flag);
 			await guard(a, id, true);
 			await sql`update users set flag = ${flag} where id = ${id}::bigint`;
 			await audit(a, "set_flag", id, { flag });
@@ -481,7 +488,7 @@ const ACTIONS: Record<string, Action> = {
 			const role = b.role || null;
 			if (role !== null && !(role in RANK)) throw new AdminError("Unknown role.");
 			if (id === a.id && role !== "admin") {
-				const [{ n }] = await sql`select count(*)::int as n from users where role = 'admin'`;
+				const [{ n }] = await sql`select count(*)::int as n from users where role = 'admin' and instance is null`;
 				if (n <= 1) throw new AdminError("You are the last admin.");
 			}
 			// nobody demotes staff at or above their own rank, the owner included
@@ -546,8 +553,8 @@ const ACTIONS: Record<string, Action> = {
 
 	orgs: {
 		role: "support",
-		run: async () => ({
-			orgs: await sql`select ${userListCols} from users u where u.verified_type in ('business', 'government') or exists (select 1 from affiliations af where af.org_id = u.id) order by u.name`,
+		run: async (_a, b) => ({
+			orgs: await sql`select ${userListCols} from users u where (u.verified_type in ('business', 'government') or exists (select 1 from affiliations af where af.org_id = u.id)) ${homeFilter(b.home)} order by u.name`,
 		}),
 	},
 
@@ -585,9 +592,9 @@ const ACTIONS: Record<string, Action> = {
 			const [u] = await sql`select id::text as id from users where lower(screen_name) = lower(${String(b.screen_name ?? "").replace(/^@/, "")})`;
 			if (!u) throw new AdminError("No account with that handle.");
 			await guard(a, u.id, true);
-			// one organisation per person; adding moves them
-			await sql`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${u.id}::bigint)
-				on conflict (user_id) do update set org_id = excluded.org_id, created_at = now()`;
+			await sql`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${u.id}::bigint) on conflict do nothing`.catch((e) => {
+				throw /affiliation_limit/.test(String(e?.message)) ? new AdminError(`That account is already an affiliate of ${AFFILIATION_LIMIT} organisations.`) : e;
+			});
 			await audit(a, "add_affiliate", u.id, { org: orgId });
 			return {};
 		},

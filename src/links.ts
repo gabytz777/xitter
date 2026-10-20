@@ -33,10 +33,35 @@ const displayOf = (url: string) => {
 	return [...bare].length > 26 ? `${[...bare].slice(0, 25).join("")}…` : bare;
 };
 
-export const urlEntities = (text: string, upTo = Number.POSITIVE_INFINITY) =>
+export const PEER_STATUS = /^\/[^/]{1,320}\/status\/(\d{1,19})\/?$/;
+
+export function statusLinkOf(url: string): { host: string; id: string } | undefined {
+	try {
+		const u = new URL(url);
+		const id = PEER_STATUS.exec(u.pathname)?.[1];
+		const host = u.host.toLowerCase();
+		return id && /^https?:$/.test(u.protocol) && (host === OWN_HOST || isPeer(host)) ? { host, id } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function homeLink(url: string, local?: Map<string, string>): string {
+	const known = local?.get(url);
+	if (known) return known;
+	try {
+		const u = new URL(url);
+		const name = /^\/(\w{1,50})\/?$/.exec(u.pathname)?.[1];
+		return name && !u.search && isPeer(u.host.toLowerCase()) ? `${PUBLIC_ORIGIN}/${name}@${u.host.toLowerCase()}` : url;
+	} catch {
+		return url;
+	}
+}
+
+export const urlEntities = (text: string, upTo = Number.POSITIVE_INFINITY, local?: Map<string, string>) =>
 	linksIn(text)
 		.filter((l) => l.end <= upTo)
-		.map((l) => ({ display_url: displayOf(l.url), expanded_url: l.url, url: l.url, indices: [l.start, l.end] }));
+		.map((l) => ({ display_url: displayOf(l.url), expanded_url: homeLink(l.url, local), url: l.url, indices: [l.start, l.end] }));
 
 const BARE_DOMAIN = /(?<![\w@#/.:-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|dev|app|zip|lol|me|co|gg|xyz|tv|fm|ai|sh|so|to|cc|ly|is|it|de|fr|uk|eu|es|pt|br|nl|be|ch|at|pl|se|no|fi|dk|cz|ru|jp|kr|cn|in|au|ca|us|info|link|site|online|page|blog|art|moe|social|cafe|club|space|live|tech|codes|systems|computer|neocities|garden|gay|lgbt|wtf|fun|win|pw|nu|ee|lt|lv|ro|hu|gr|tr|il|nz|za|mx|ar|cl)(?:\/[^\s<>"]*)?(?![\w-])/gi;
 

@@ -6,7 +6,7 @@ import { hateInName } from "./hate";
 import { handleHeld } from "./held";
 import { blockedNameIn } from "./names";
 import { sql } from "./db";
-import { isFlag } from "./flags";
+import { flagValue } from "./flags";
 import { newId } from "./ids";
 import { superadminNameHere } from "./superadmins";
 import { getSetting, settings } from "./settings";
@@ -123,7 +123,7 @@ export async function signUp(
 	f: Omit<SignupForm, "password"> & { password?: string; passwordHash?: string; emailVerified?: boolean; source?: string | null; country?: string | null },
 ): Promise<string> {
 	const { email, screenName, name } = await checkSignup({ ...f, password: f.passwordHash ? "--------" : (f.password ?? "") });
-	const flag = isFlag(f.flag) ? f.flag : null;
+	const flag = flagValue(f.flag);
 	const mode = await getSetting("signup_mode");
 	const hash = f.passwordHash ?? (await Bun.password.hash(f.password ?? ""));
 	const code = normalizeCode(f.code);
