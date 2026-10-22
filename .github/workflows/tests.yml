@@ -67,6 +67,7 @@ jobs:
           bun scripts/test-federated-search.ts
           bun scripts/test-public-api-input.ts
           bun scripts/test-data-export.ts
+          bun scripts/test-archive-import.ts
           DB_POOL_MAX=1 bun scripts/test-data-export-chat.ts
           bun scripts/test-scheduled-validation.ts
           bun scripts/test-bookmark-pagination.ts
@@ -82,6 +83,7 @@ jobs:
           bun scripts/test-scheduled-post-cost.ts
           bun scripts/test-scheduled-single-connection.ts
           bun scripts/test-scheduled-media.ts
+          DB_POOL_MAX=1 bun scripts/test-conversation-scheduled.ts
       - name: Media privacy and chunked upload regression tests
         run: |
           bun scripts/test-embed-privacy.ts
@@ -119,8 +121,11 @@ jobs:
           bun -e 'import { createUser } from "./src/auth"; import { createPost } from "./src/posts"; import { sql } from "./src/db"; const id = await createUser("ci_api_a", "CI API A", "testpass123"); await createUser("ci_api_b", "CI API B", "testpass123"); await createPost(id, "CI baseline post"); await sql.close();'
           bun scripts/test-api.ts ci_api_a ci_api_b testpass123 public/logo-light.png
           bun scripts/test-media.ts ci_api_a testpass123 public/logo-light.png
+          bun scripts/test-conversation-live.ts public/logo-light.png
           bun scripts/test-polls.ts ci_api_a ci_api_b testpass123
           bun scripts/test-scheduled.ts ci_api_a testpass123
+          bun scripts/test-theme-api.ts ci_api_a testpass123
+          bun scripts/test-theme-share-api.ts ci_api_a testpass123
       - name: Server log on failure
         if: failure()
         run: cat server.log 2>/dev/null || true

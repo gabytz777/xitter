@@ -15,18 +15,19 @@ const viewer=newId(),local=newId(),remote=newId(),second=newId(),users=[viewer,l
 const name=`a${local.slice(-10)}`,remoteHandle=`${name}@peer.invalid:8443`,secondHandle=`${name}@second.invalid`,ownAlias=`${name}@localhost:${port}`;
 const needle=`q${viewer}`;
 const posts=Array.from({length:9},()=>newId());const [localPost,remotePost,secondPost,toRemote,toLocal,mentionRemote,mentionLocal,mentionSecond,unrelated]=posts;
-const server=Bun.spawn([process.execPath,"src/server.ts"],{cwd:join(import.meta.dir,".."),env:{...process.env,DATABASE_URL:database.href,PORT:String(port),PUBLIC_ORIGIN:origin,MEDIA_DIR:dir,RATE_LIMITS:"off"},stdout:"ignore",stderr:"pipe"});
+const server=Bun.spawn([process.execPath,"src/server.ts"],{cwd:join(import.meta.dir,".."),env:{...process.env,DATABASE_URL:database.href,PORT:String(port),PUBLIC_ORIGIN:origin,MEDIA_DIR:dir,RATE_LIMITS:"off",FEDERATION:"off"},stdout:"ignore",stderr:"pipe"});
 const diagnostics=new Response(server.stderr).text();
 let succeeded=false;
 try {
+ const ready=Date.now()+15000;
+ while(true){try{if((await fetch(`${origin}/account/forgot`)).status===200)break;}catch{}assert(Date.now()<ready,"Application server failed to start");await Bun.sleep(30);}
+ while(true){if((await fetch(`${origin}/federation/v1/ping`)).status!==503)break;assert(Date.now()<ready,"Federation startup did not finish");await Bun.sleep(30);}
  await sql`insert into users(id,screen_name,name,password_hash,instance) values
   (${viewer}::bigint,${`v${viewer.slice(-10)}`},'Search viewer','!',null),
   (${local}::bigint,${name},'Local collision','!',null),
   (${remote}::bigint,${remoteHandle},'Remote collision','!','peer.invalid:8443'),
   (${second}::bigint,${secondHandle},'Other remote collision','!','second.invalid')`;
  const session=await startSession(viewer);const headers={cookie:`auth_token=${session.token}; ct0=${session.csrf}`,"x-csrf-token":session.csrf};
- const ready=Date.now()+15000;
- while(true){try{if((await fetch(`${origin}/account/forgot`)).status===200)break;}catch{}assert(Date.now()<ready,"Application server failed to start");await Bun.sleep(30);}
  await sql`insert into posts(id,user_id,text,conversation_id,reply_to_id) values
   (${localPost}::bigint,${local}::bigint,${`${needle} local #café`},${localPost}::bigint,null),
   (${remotePost}::bigint,${remote}::bigint,${`${needle} remote #café`},${remotePost}::bigint,null),

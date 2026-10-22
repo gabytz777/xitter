@@ -36,7 +36,9 @@ async function heldNames(): Promise<Held[]> {
 		union all
 		select c.old_name, u.id::text from username_changes c join users u on u.id = c.user_id where u.status = 'suspended' and u.deactivated_at is null and u.role is null
 		union all
-		select value, user_id::text from retired_identities where kind = 'handle'`;
+		select value, user_id::text from retired_identities where kind = 'handle'
+		union all
+		select u.screen_name, u.id::text from users u where u.instance is null`;
 	const held = rows.map((r: any) => ({
 		skeleton: skeleton(r.name),
 		userId: r.user_id,

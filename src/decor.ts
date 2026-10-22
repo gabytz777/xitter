@@ -13,26 +13,20 @@ import type { Viewer } from "./auth";
 import { sql } from "./db";
 import { MEDIA_DIR } from "./media";
 import { STAFF_HANDLE } from "./invites";
+import { RELATION_BUTTON } from "./x-selectors";
+import { FILE_RE, fileUrl, rewardPage, shopBrowserScript, steamItem, steamProfile, type Item, type Kind } from "./steam-items";
 
-const SHOP = "https://api.steampowered.com/ILoyaltyRewardsService/QueryRewardItems/v1/";
 const FILES = "https://shared.akamai.steamstatic.com/community_assets/images/items";
 const THUMBS = "https://community.akamai.steamstatic.com/economy/profilebackground/items";
 const STEAM_DIR = join(MEDIA_DIR, "steam");
-const FILE_RE = /^[0-9a-f]{40}\.(png|jpg|gif|webm|mp4)$/;
 const MAX_FILE = 40 * 1024 * 1024;
+
+export type { Item, Kind };
 
 // who may wear it: gold checks and both grey ones
 export const DECOR_CHECKS = ["business", "government", "government_individual"];
 const mayWear = (v: { verified_type: string | null }) => DECOR_CHECKS.includes(v.verified_type ?? "");
 
-// community_item_class in the Points Shop
-const CLASSES = { background: 3, frame: 14, profile: 8 } as const;
-type Kind = keyof typeof CLASSES;
-
-// image is the still picture; an animated frame moves in anim (Steam's "small"
-// file, an animated PNG), an animated background in movie/mp4, and preview is
-// that video made small for the shop
-export type Item = { appid: number; defid: number; name: string; image: string; anim?: string; movie?: string; mp4?: string; preview?: string };
 // profile: the game profile the rest came from, if it did
 export type Decor = { theme?: string; background?: Item; frame?: Item; profile?: Item };
 
@@ -68,29 +62,6 @@ export const THEMES: Record<string, { name: string } & Palette> = {
 export const themeBackground = (t: Palette) =>
 	`radial-gradient(farthest-side at top right,${t.right},transparent 500px),radial-gradient(farthest-corner at top left,${t.left},transparent 600px),` +
 	`radial-gradient(farthest-corner at bottom right,${t.bgRight},transparent 500px),radial-gradient(farthest-corner at bottom left,${t.bgLeft},transparent 600px),${t.bg}`;
-
-const fileUrl = (appid: number, file: string) => `/public/steam/${appid}/${file}`;
-
-function toItem(d: any): Item | undefined {
-	const data = d?.community_item_data;
-	const appid = Number(d?.appid);
-	const defid = Number(d?.defid);
-	const image = data?.item_image_large;
-	if (!Number.isSafeInteger(appid) || !Number.isSafeInteger(defid) || typeof image !== "string" || !FILE_RE.test(image)) return undefined;
-	const item: Item = { appid, defid, name: String(data.item_title || data.item_name || "").slice(0, 100), image };
-	if (typeof data.item_movie_webm === "string" && FILE_RE.test(data.item_movie_webm)) item.movie = data.item_movie_webm;
-	if (typeof data.item_movie_mp4 === "string" && FILE_RE.test(data.item_movie_mp4)) item.mp4 = data.item_movie_mp4;
-	if (typeof data.item_movie_webm_small === "string" && FILE_RE.test(data.item_movie_webm_small)) item.preview = data.item_movie_webm_small;
-	if (d.community_item_class === CLASSES.frame && data.animated && typeof data.item_image_small === "string" && FILE_RE.test(data.item_image_small) && data.item_image_small !== image)
-		item.anim = data.item_image_small;
-	return item;
-}
-
-async function shop(params: URLSearchParams): Promise<any> {
-	const r = await fetch(`${SHOP}?${params}`, { signal: AbortSignal.timeout(10_000) });
-	if (!r.ok) throw new Error(`Steam answered ${r.status}`);
-	return (await r.json())?.response ?? {};
-}
 
 // Every app with items in the shop, named by the community API, for browsing
 // without a search: Steam's own events (sales, Lunar New Year, Steam 3000 and
@@ -168,13 +139,13 @@ async function catalogPage(kind: Kind, f: Filter, cursor: string): Promise<{ ite
 	const key = `${kind}|${f.q}|${f.app}|${f.event}|${f.animated}|${cursor}`;
 	const hit = pages.get(key);
 	if (hit && Date.now() - hit.at < 10 * 60_000) return hit.value;
-	const params = new URLSearchParams({ "community_item_classes[0]": String(CLASSES[kind]), count: "48" });
-	if (f.app) params.set("appids[0]", f.app);
+	const appids: number[] = [];
+	if (f.app) appids.push(Number(f.app));
 	else if (f.event) {
 		const { events } = await steamApps();
 		const ids = f.event === "all" ? events.map((e) => e.appid) : events.filter((e) => String(e.appid) === f.event).map((e) => e.appid);
 		if (!ids.length) return { items: [], next: null };
-		ids.forEach((a, i) => params.set(`appids[${i}]`, String(a)));
+		appids.push(...ids);
 	} else if (f.q) {
 		// Steam's shop can't search names, but it filters by game: the store's
 		// search turns the words into games
@@ -183,20 +154,9 @@ async function catalogPage(kind: Kind, f: Filter, cursor: string): Promise<{ ite
 			.catch(() => ({ items: [] }));
 		const ids = (found.items ?? []).filter((a: any) => Number.isSafeInteger(a?.id)).slice(0, 10);
 		if (!ids.length) return { items: [], next: null };
-		ids.forEach((a: any, i: number) => params.set(`appids[${i}]`, String(a.id)));
+		for (const a of ids) appids.push(a.id);
 	}
-	// Steam can't filter what moves: up to six of its pages make one of ours
-	const found: any[] = [];
-	let next: string | null = cursor || null;
-	for (let i = 0; i < (f.animated ? 6 : 1); i++) {
-		if (next) params.set("cursor", next);
-		const r = await shop(params);
-		const defs: any[] = r.definitions ?? [];
-		found.push(...(f.animated ? defs.filter((d) => d?.community_item_data?.animated) : defs));
-		next = defs.length >= 48 && r.next_cursor ? String(r.next_cursor) : null;
-		if (!next || found.length >= 48) break;
-	}
-	const value = { items: found.map(toItem).filter(Boolean) as Item[], next };
+	const value = await rewardPage(kind, { appids, animated: f.animated, cursor });
 	if (pages.size > 500) pages.clear();
 	pages.set(key, { at: Date.now(), value });
 	return value;
@@ -230,34 +190,6 @@ export async function decorShop(url: URL): Promise<Response> {
 	}
 }
 
-// items as Steam has them now, so a pick can't name files of its own; the
-// pieces of a game profile aren't sold alone, so those are asked for too
-async function steamDefs(defids: number[]): Promise<any[]> {
-	const params = new URLSearchParams({ include_direct_purchase_disabled: "true" });
-	defids.slice(0, 20).forEach((d, i) => params.set(`definitionids[${i}]`, String(d)));
-	return (await shop(params)).definitions ?? [];
-}
-async function steamItem(kind: Kind, defid: number): Promise<Item | undefined> {
-	const d = (await steamDefs([defid]))[0];
-	return d?.community_item_class === CLASSES[kind] ? toItem(d) : undefined;
-}
-
-// a game profile: Steam's bundle of a background and an avatar frame (and a
-// mini profile and an animated avatar, which have no place here), with its theme
-async function steamProfile(defid: number): Promise<{ profile: Item; theme?: string; background?: Item; frame?: Item } | undefined> {
-	const d = (await steamDefs([defid]))[0];
-	if (d?.community_item_class !== CLASSES.profile) return undefined;
-	const profile = toItem(d);
-	if (!profile) return undefined;
-	const parts = Array.isArray(d.bundle_defids) ? await steamDefs(d.bundle_defids.filter((x: unknown) => Number.isSafeInteger(x))) : [];
-	const of = (kind: Kind) => {
-		const part = parts.find((x) => x.community_item_class === CLASSES[kind]);
-		return part ? toItem(part) : undefined;
-	};
-	const id = d.community_item_data?.profile_theme_id;
-	return { profile, theme: typeof id === "string" && THEMES[id] ? id : undefined, background: of("background"), frame: of("frame") };
-}
-
 // /public/steam/<appid>/<file>: a Steam item's file. Worn items are seen by
 // everyone, so they're kept on disk once fetched; anything else is only passed
 // through, for a signed-in account browsing the shop (?thumb=1 is a small
@@ -268,7 +200,15 @@ export async function steamFile(req: Request, appid: string, file: string, thumb
 	const type = { png: "image/png", jpg: "image/jpeg", gif: "image/gif", webm: "video/webm", mp4: "video/mp4" }[file.split(".")[1]!]!;
 	const cache = "public, max-age=31536000, immutable";
 	const path = join(STEAM_DIR, appid, file);
-	const worn = async () => (await sql`select 1 from users where decor is not null and strpos(decor::text, ${`${file}"`}) > 0 limit 1`).length > 0;
+	const worn = async () =>
+		(
+			await sql`select 1 from users
+				where (decor is not null and strpos(decor::text, ${file + '"'}) > 0)
+					or preferences #>> '{theme,background,steam,image}' = ${file}
+					or preferences #>> '{theme,background,steam,movie}' = ${file}
+					or preferences #>> '{theme,background,steam,mp4}' = ${file}
+				limit 1`
+		).length > 0;
 	if (thumb || (!existsSync(path) && !(await worn()))) {
 		if (!signedIn) return new Response("not found", { status: 404 });
 		// a shop preview video plays in pieces, so the range goes along
@@ -329,7 +269,7 @@ const clean = (d: unknown): Decor => {
 
 // what the page script draws: the files as our addresses
 const forClient = (d: Decor) => ({
-	theme: d.theme ? { id: d.theme, background: themeBackground(THEMES[d.theme]!), header: THEMES[d.theme]!.header, button: THEMES[d.theme]!.btn, buttonHover: THEMES[d.theme]!.btnHover, outline: THEMES[d.theme]!.outline } : null,
+	theme: d.theme ? { id: d.theme, background: themeBackground(THEMES[d.theme]!), header: THEMES[d.theme]!.header, button: THEMES[d.theme]!.btn, buttonHover: THEMES[d.theme]!.btnHover, outline: THEMES[d.theme]!.outline, glass: `color-mix(in srgb,rgb(from ${THEMES[d.theme]!.bg} r g b) 30%,rgb(0 0 0 / .45))` } : null,
 	background: d.background
 		? { image: fileUrl(d.background.appid, d.background.image), movie: d.background.movie ? fileUrl(d.background.appid, d.background.movie) : null, mp4: d.background.mp4 ? fileUrl(d.background.appid, d.background.mp4) : null }
 		: null,
@@ -399,7 +339,7 @@ async function page(req: Request, viewer: Viewer, d: Decor, error = "") {
 	<div id="shop" class="shop" data-csrf="${esc(viewer.csrf)}" data-avatar="${esc(viewer.avatar_url ?? "")}"></div>
 	<button type="button" id="more" class="secondary" hidden>Load more</button>
 	<p class="dim">Items and art belong to Valve and the games' makers, shown from Steam.</p>
-	<script>${SHOP_SCRIPT}</script>`
+	<script>${shopBrowserScript()}</script>`
 		: `<h1>Profile decor</h1><p class="dim">Profile themes, backgrounds and avatar frames from Steam are for gold and grey check accounts.</p>`;
 	return accountPage({ req, viewer, title: "Profile decor", status: error ? 400 : 200, body, css: PAGE_CSS });
 }
@@ -430,110 +370,6 @@ const PAGE_CSS = `
 .games button{font-weight:500}
 `;
 
-const SHOP_SCRIPT = String.raw`(function(){
-	var shop=document.getElementById("shop"),more=document.getElementById("more"),search=document.getElementById("search");
-	var cats=document.getElementById("cats"),sub=document.getElementById("sub");
-	var avatar=shop.getAttribute("data-avatar")||"/public/default-avatar.png";
-	// what's shown: a kind of item, and a category (new, animated, Steam events,
-	// one event, one game, or a search)
-	var kind="frame",cat="new",app="",event="",q="",next=null,busy=0,catalog=null,letter="A";
-	function el(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text)e.textContent=text;return e}
-	function chip(label,on,click){var b=el("button","small"+(on?"":" secondary"),label);b.type="button";b.setAttribute("aria-pressed",String(!!on));b.addEventListener("click",click);return b}
-	function tile(i){
-		var b=el("button");b.type="button";b.title=i.name;
-		if(kind==="frame"){
-			var f=el("div","framed"),a=el("img","pfp"),r=el("img","ring");
-			a.src=avatar;a.alt="";r.src=i.thumb;r.alt="";r.loading="lazy";
-			f.appendChild(a);f.appendChild(r);b.appendChild(f);
-		}else{var g=el("img","bg");g.src=i.thumb;g.alt="";g.loading="lazy";b.appendChild(g)}
-		b.appendChild(el("span","",i.name+(i.moving?" · animated":"")));
-		if(i.moving){
-			var still=b.querySelector(".ring,.bg"),clip;
-			var play=function(){
-				if(kind==="frame"){still.src=i.moving;return}
-				if(clip)return;
-				clip=el("video","bg");clip.muted=true;clip.loop=true;clip.autoplay=true;clip.playsInline=true;clip.src=i.moving;
-				still.replaceWith(clip);
-			};
-			var stop=function(){
-				if(kind==="frame"){still.src=i.thumb;return}
-				if(clip){clip.replaceWith(still);clip=null}
-			};
-			b.addEventListener("mouseenter",play);b.addEventListener("focus",play);
-			b.addEventListener("mouseleave",stop);b.addEventListener("blur",stop);
-		}
-		b.addEventListener("click",function(){
-			var f=document.createElement("form");f.method="post";f.action="/account/decor";
-			[["csrf",shop.getAttribute("data-csrf")],["kind",kind],["defid",String(i.defid)]].forEach(function(p){var x=document.createElement("input");x.type="hidden";x.name=p[0];x.value=p[1];f.appendChild(x)});
-			document.body.appendChild(f);f.submit();
-		});
-		return b;
-	}
-	function load(reset){
-		var ticket=++busy;
-		if(reset){shop.textContent="";next=null}
-		shop.className="shop"+(kind==="frame"?"":" wide");
-		more.hidden=true;
-		var url="/i/api/xitter/decor/shop?kind="+kind+
-			(cat==="animated"?"&animated=1":"")+(cat==="events"&&event?"&event="+event:"")+(cat==="game"&&app?"&app="+app:"")+(cat==="search"?"&q="+encodeURIComponent(q):"")+
-			(next?"&cursor="+encodeURIComponent(next):"");
-		fetch(url,{credentials:"same-origin"}).then(function(r){return r.json()}).then(function(d){
-			if(ticket!==busy)return;
-			if(d.error){shop.appendChild(el("p","error",d.error));return}
-			d.items.forEach(function(i){shop.appendChild(tile(i))});
-			if(!shop.children.length)shop.appendChild(el("p","dim",{frame:"No avatar frames here. Try Backgrounds.",background:"No backgrounds here. Try Avatar frames.",profile:"No game profiles here."}[kind]));
-			next=d.next;more.hidden=!next;
-		}).catch(function(){});
-	}
-	// the games, by first letter: picking one lists its items
-	function games(){
-		shop.textContent="";more.hidden=true;shop.className="games";
-		if(!catalog){shop.appendChild(el("p","dim","Loading games…"));return}
-		var list=catalog.games.filter(function(g){var c=g.name.charAt(0).toUpperCase();return letter==="#"?!/[A-Z]/.test(c):c===letter});
-		list.forEach(function(g){shop.appendChild(chip(g.name,false,function(){app=String(g.appid);sub.querySelectorAll("[data-game]").forEach(function(x){x.remove()});var back=chip("← "+g.name,true,function(){app="";draw()});back.setAttribute("data-game","");sub.prepend(back);load(true)}))});
-		if(!list.length)shop.appendChild(el("p","dim","No games under "+letter+"."));
-	}
-	function draw(){
-		cats.textContent="";sub.textContent="";
-		search.hidden=kind==="profile";
-		// game profiles are few: no categories
-		if(kind==="profile"){cat="new";load(true);return}
-		[["new","New"],["animated","Animated"],["events","Steam events"],["game","Games A–Z"]].forEach(function(c){
-			cats.appendChild(chip(c[1],cat===c[0],function(){cat=c[0];app="";event=cat==="events"?"all":"";draw()}));
-		});
-		if(cat==="search")cats.appendChild(chip("Search: "+q,true,function(){}));
-		if(cat==="events"){
-			var pick=el("select");pick.setAttribute("aria-label","Event");
-			var all=el("option","","All events");all.value="all";pick.appendChild(all);
-			(catalog?catalog.events:[]).forEach(function(e){var o=el("option","",e.name);o.value=String(e.appid);pick.appendChild(o)});
-			pick.value=event||"all";
-			pick.addEventListener("change",function(){event=pick.value;load(true)});
-			sub.appendChild(pick);
-			load(true);
-		}else if(cat==="game"){
-			"#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").forEach(function(l){sub.appendChild(chip(l,letter===l&&!app,function(){letter=l;app="";draw()}))});
-			if(app)load(true);else games();
-		}else load(true);
-	}
-	document.querySelectorAll(".tabsel button").forEach(function(b){
-		b.setAttribute("aria-pressed",String(b.getAttribute("data-kind")===kind));
-		b.addEventListener("click",function(){
-			kind=b.getAttribute("data-kind");
-			document.querySelectorAll(".tabsel button").forEach(function(o){var on=o===b;o.className="small"+(on?"":" secondary");o.setAttribute("aria-pressed",String(on))});
-			if(cat==="game"&&!app)cat="new";
-			draw();
-		});
-	});
-	search.addEventListener("submit",function(e){e.preventDefault();q=search.q.value.trim();cat=q?"search":"new";app="";event="";draw()});
-	more.addEventListener("click",function(){load(false)});
-	fetch("/i/api/xitter/decor/catalog",{credentials:"same-origin"}).then(function(r){return r.json()}).then(function(d){
-		if(!d||!Array.isArray(d.games))return;
-		catalog=d;
-		if(cat==="events"||(cat==="game"&&!app))draw();
-	}).catch(function(){});
-	draw();
-})();`;
-
 export async function decorRoute(req: Request, viewer: Viewer): Promise<Response> {
 	const [row] = await sql`select decor from users where id = ${viewer.id}::bigint`;
 	const d = clean(row?.decor);
@@ -557,7 +393,7 @@ export async function decorRoute(req: Request, viewer: Viewer): Promise<Response
 			d.profile = set.profile;
 			if (set.background) d.background = set.background;
 			if (set.frame) d.frame = set.frame;
-			if (set.theme) d.theme = set.theme;
+			if (set.theme && THEMES[set.theme]) d.theme = set.theme;
 			await sql`update users set decor = ${JSON.stringify(d)}::text::jsonb where id = ${viewer.id}::bigint`;
 			return new Response(null, { status: 303, headers: { location: "/account/decor" } });
 		}
@@ -580,6 +416,7 @@ export async function decorRoute(req: Request, viewer: Viewer): Promise<Response
 // The page script: frames on avatars everywhere, and on a decorated profile its
 // background behind the page and its theme on the column.
 export const DECOR_SCRIPT = String.raw`(function(){
+	var RELATION=${JSON.stringify(RELATION_BUTTON)};
 	var known={},waiting={},queue=[],timer,current=null;
 	var still=matchMedia("(prefers-reduced-motion: reduce)").matches;
 	var RESERVED=/^(home|explore|notifications|messages|i|settings|search|compose|account|admin|login|logout|signup|tos|privacy|jobs|bookmarks|lists|communities|premium|verified-choose|public|abs|hashtag|intent)$/;
@@ -622,6 +459,8 @@ export const DECOR_SCRIPT = String.raw`(function(){
 	function clearProfile(){
 		if(layer){layer.remove();layer=null}
 		if(style){style.remove();style=null}
+		document.querySelectorAll("[data-xitter-glass],[data-xitter-clear]").forEach(function(el){el.removeAttribute("data-xitter-glass");el.removeAttribute("data-xitter-clear")});
+		seen=new WeakSet();
 		greys.textContent="";greyKey="";greyAt=0;
 		document.documentElement.removeAttribute("data-xitter-decor");
 		current=null;
@@ -633,46 +472,57 @@ export const DECOR_SCRIPT = String.raw`(function(){
 		if(!n&&current&&(document.querySelector('[aria-modal="true"]')||document.querySelector('[data-testid="primaryColumn"] [data-testid="UserName"]')))return;
 		if(!n){if(current)clearProfile();return}
 		var k=known[n];
+		if(current&&current!==n)clearProfile();
 		if(k===undefined){want(n);return}
-		if(!k||(!k.background&&!k.theme)){if(current)clearProfile();return}
+		if(!k||(!k.background&&!k.theme))return;
 		if(current===n)return;
 		clearProfile();current=n;
-		var light=/^rgb\(255, 255, 255/.test(getComputedStyle(document.body).backgroundColor);
+		// X's own colour sits on the body inline: a viewer's theme paints over the
+		// computed one, and the decor follows X's mode, not the theme it replaces
+		var light=/^rgb\(255, 255, 255/.test(document.body.style.backgroundColor||getComputedStyle(document.body).backgroundColor);
 		document.documentElement.setAttribute("data-xitter-decor","");
-		var css="";
-		if(k.background){
-			layer=document.createElement("div");
-			layer.setAttribute("data-xitter-decor-bg","");
-			var bg=k.background;
-			// the whole picture, as wide as the window: covering it cut the sides
-			// off, where the art usually is. Below it, a blurred copy fills in.
-			var fill=document.createElement("div");fill.className="fill";fill.style.backgroundImage='url("'+bg.image+'")';
-			layer.appendChild(fill);
-			if(bg.movie||bg.mp4){
-				var v=document.createElement("video");
-				v.muted=true;v.loop=true;v.autoplay=true;v.playsInline=true;v.setAttribute("playsinline","");v.poster=bg.image;
-				if(bg.movie){var s1=document.createElement("source");s1.src=bg.movie;s1.type="video/webm";v.appendChild(s1)}
-				if(bg.mp4){var s2=document.createElement("source");s2.src=bg.mp4;s2.type="video/mp4";v.appendChild(s2)}
-				if(matchMedia("(prefers-reduced-motion: reduce)").matches)v.autoplay=false;
-				layer.appendChild(v);
-			}else{var pic=document.createElement("img");pic.src=bg.image;pic.alt="";layer.appendChild(pic)}
-			document.body.prepend(layer);
-			// the page's own black goes, so the background shows around the columns
-			// the menu on the left sits on the background: blurred under it, so it reads
-			css+='html[data-xitter-decor] header[role="banner"]>div>div{-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);background:'+(light?"rgba(255,255,255,.45)":"rgba(0,0,0,.35)")+'!important}';
-			css+='html[data-xitter-decor],html[data-xitter-decor] body{background:transparent!important}'+
-				'html[data-xitter-decor] #react-root>div>div,html[data-xitter-decor] #react-root>div>div>div:not([data-testid]){background-color:transparent!important}';
-		}
-		// Steam's themes are dark: on X's light look they only tint a white column
 		var t=k.theme;
-		// and the bright ones (Lunar, Winter) drown X's grey text: a dark veil goes
-		// over the theme, and the grey turns lighter
-		var col=light?(t?"linear-gradient(rgba(255,255,255,.8),rgba(255,255,255,.8)),"+t.background:"rgba(255,255,255,.88)"):(t?"linear-gradient(rgba(0,0,0,.4),rgba(0,0,0,.4)),"+t.background:"rgba(0,0,0,.72)");
-		css+='html[data-xitter-decor] [data-testid="primaryColumn"]{background:'+col+'!important;-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}';
+		var css="",glass=light?"rgba(255,255,255,.66)":"rgba(0,0,0,.55)",edge=light?"rgba(0,0,0,.08)":"rgba(255,255,255,.14)",frost="-webkit-backdrop-filter:blur(24px) saturate(1.4);backdrop-filter:blur(24px) saturate(1.4)";
+		layer=document.createElement("div");
+		layer.setAttribute("data-xitter-decor-bg","");
+		var bg=k.background;
+		if(!bg)layer.style.background=(light?"linear-gradient(rgba(255,255,255,.8),rgba(255,255,255,.8)),":"linear-gradient(rgba(0,0,0,.4),rgba(0,0,0,.4)),")+t.background;
+		else if(bg.movie||bg.mp4){
+			var v=document.createElement("video");
+			v.muted=true;v.loop=true;v.autoplay=true;v.playsInline=true;v.setAttribute("playsinline","");v.poster=bg.image;
+			if(bg.movie){var s1=document.createElement("source");s1.src=bg.movie;s1.type="video/webm";v.appendChild(s1)}
+			if(bg.mp4){var s2=document.createElement("source");s2.src=bg.mp4;s2.type="video/mp4";v.appendChild(s2)}
+			if(still)v.autoplay=false;
+			layer.appendChild(v);
+		}else{var pic=document.createElement("img");pic.src=bg.image;pic.alt="";layer.appendChild(pic)}
+		document.body.prepend(layer);
+		var pane='background:'+glass+'!important;'+(t&&!light?"background:"+t.glass+"!important;":"")+frost;
+		css+='html[data-xitter-decor] header[role="banner"]>div>div,html[data-xitter-decor] [data-xitter-glass]{'+pane+';border-color:'+edge+'!important}'+
+			'html[data-xitter-decor] [data-testid="primaryColumn"]{background:transparent!important;position:relative;z-index:0;border-color:'+edge+'!important}'+
+			'html[data-xitter-decor] [data-testid="primaryColumn"]::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;'+pane+'}'+
+			'html[data-xitter-decor] [data-xitter-clear]{background:transparent!important}'+
+			'html[data-xitter-decor],html[data-xitter-decor] body{background:transparent!important}'+
+			'html[data-xitter-decor] #react-root>div>div,html[data-xitter-decor] #react-root>div>div>div:not([data-testid]){background-color:transparent!important}';
 		dark=!light;
-		if(t&&!light)css+='html[data-xitter-decor] [data-testid="primaryColumn"] [data-testid="placementTracking"] button,html[data-xitter-decor] [data-testid="primaryColumn"] a[data-testid="editProfileButton"]{background:'+t.button+'!important;border-color:'+t.outline+'!important}';
+		if(t&&!light)css+='html[data-xitter-decor] [data-testid="primaryColumn"] [data-testid="placementTracking"] '+RELATION+',html[data-xitter-decor] [data-testid="primaryColumn"] a[data-testid="editProfileButton"]{background:'+t.button+'!important;border-color:'+t.outline+'!important}'+
+			'html[data-xitter-decor] [data-testid="primaryColumn"] [data-testid="placementTracking"] '+RELATION+' *,html[data-xitter-decor] [data-testid="primaryColumn"] a[data-testid="editProfileButton"] *{color:#fff!important}'+
+			'@media (hover:hover){html[data-xitter-decor] [data-testid="primaryColumn"] [data-testid="placementTracking"] '+RELATION+':hover,html[data-xitter-decor] [data-testid="primaryColumn"] a[data-testid="editProfileButton"]:hover{background:'+t.buttonHover+'!important}}';
 		style=document.createElement("style");style.setAttribute("data-xitter-decor-css","");style.textContent=css;document.head.appendChild(style);
-		greys.textContent="";greyKey="";lighten();
+		greys.textContent="";greyKey="";glassAt=0;lighten();sidebar();
+	}
+	var glassAt=0,glassTimer=null,seen=new WeakSet();
+	function sidebar(){
+		if(!current||!layer)return;
+		if(Date.now()-glassAt<300){if(!glassTimer)glassTimer=setTimeout(function(){glassTimer=null;sidebar()},300);return}
+		glassAt=Date.now();
+		var page=document.body.style.backgroundColor||"rgb(0, 0, 0)";
+		document.querySelectorAll('[data-testid="sidebarColumn"] div,[data-testid="primaryColumn"] div').forEach(function(el){
+			if(seen.has(el))return;
+			seen.add(el);
+			var cs=getComputedStyle(el),opaque=cs.backgroundColor===page;
+			if(el.closest('[data-testid="sidebarColumn"]')){if(opaque)el.setAttribute(parseFloat(cs.borderTopLeftRadius)>0?"data-xitter-glass":"data-xitter-clear","");return}
+			if(opaque||cs.backdropFilter!=="none"&&cs.backdropFilter)el.setAttribute("data-xitter-clear","");
+		});
 	}
 	// X adds its classes as it first uses them: the grey ones are looked for again
 	// while a decorated profile is up, a second apart at most
@@ -689,7 +539,7 @@ export const DECOR_SCRIPT = String.raw`(function(){
 		if(!greys.isConnected)document.head.appendChild(greys);
 	}
 	function scan(){
-		frames();profile();lighten();
+		frames();profile();lighten();sidebar();
 		if(queue.length)load();
 	}
 	function load(){
@@ -705,8 +555,7 @@ export const DECOR_SCRIPT = String.raw`(function(){
 	base.textContent='[data-xitter-framed] div{border-radius:4%!important}'+
 		'[data-xitter-frame]{position:absolute;left:-11%;top:-11%;width:122%;height:122%;max-width:none;pointer-events:none;z-index:1}'+
 		'[data-xitter-decor-bg]{position:fixed;inset:0;z-index:-1;background:#000;overflow:hidden;pointer-events:none}'+
-		'[data-xitter-decor-bg] .fill{position:absolute;inset:-60px;background:center/cover no-repeat;filter:blur(40px) brightness(.55)}'+
-		'[data-xitter-decor-bg] video,[data-xitter-decor-bg] img{position:absolute;left:0;top:0;width:100%;height:auto;-webkit-mask-image:linear-gradient(#000 80%,transparent);mask-image:linear-gradient(#000 80%,transparent)}';
+		'[data-xitter-decor-bg] video,[data-xitter-decor-bg] img{position:absolute;left:50%;top:0;width:max(108vw,230vh);height:auto;max-width:none;transform:translateX(-50%)}';
 	document.head.appendChild(base);
 	new MutationObserver(function(){if(!timer)timer=setTimeout(function(){timer=null;scan()},150)}).observe(document.documentElement,{childList:true,subtree:true});
 	addEventListener("popstate",scan);

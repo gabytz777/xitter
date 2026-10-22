@@ -18,6 +18,10 @@ const API_HOSTS = ["api", "upload", "caps", "jf"].flatMap((s) => [`${s}.x.com`, 
 const inRegex = (url: string) => url.replace(/[/.]/g, (c) => "\\" + c);
 
 const RULES: [RegExp, string][] = [
+	[/(restID:\w+\.rest_id,tweetCreateRequest:)(\w+)(,userMentions:\w+\}\))/g, '$1($2?.xitter_conversation_card&&!$2.status?{...$2,status:window.__XITTER_CONVERSATION_DRAFT_LABEL__?.($2.xitter_conversation_card)||"Conversation card"}:$2)$3'],
+	[/(\w+)=(\w+)\.status\|\|"",(\w+)="Failed"===/g, '$1=$2.status||($2.xitter_conversation_card&&window.__XITTER_CONVERSATION_DRAFT_LABEL__?.($2.xitter_conversation_card))||"",$3="Failed"==='],
+	[/(_handleClick=(\w+)=>\(\)=>\{)(let \w+=\2\.scheduling_info&&\2\.scheduling_info\.execute_at;if\(!this\.isDraftsTab)/g, '$1document.dispatchEvent(new CustomEvent("xitter:restore-conversation-cards",{detail:$2.tweet_create_request}));$3'],
+	[/(_areComposersEmptyOrUnchanged=\(\)=>\{)/g, '$1if(!this.props.isInline&&window.__XITTER_CONVERSATION_HAS_DRAFT__?.())return!1;'],
 	// Chat is a separate app (module federation): its manifest comes from
 	// chat.x.com, its files from abs.twimg.com, and both are checked by pattern
 	[/https:\/\/chat\.x\.com\/embed-v1\.json/g, `${PUBLIC_ORIGIN}/xchat/embed-v1.json`],
@@ -79,6 +83,13 @@ const RULES: [RegExp, string][] = [
 	// Analytics hides its charts below 50 followers, which on a small instance
 	// is nearly everyone
 	[/(\w+)=(\w+)\.followerCount>=50,/g, "$1=$2.followerCount>=0,"],
+	// A player card (YouTube links, links.ts) opens as a thumbnail with a play
+	// button, and only a click switches it to the player in its frame
+	// (player-card.ts). One with a frame starts as the player.
+	[
+		/((?<![\w$])([\w$]+)=[\w$]+&&[\w$]+\?[\w$.]+\.getPlayerCardIFrameUrl\([\w$]+\):void 0,[\s\S]{0,6000}?:\{cardState:)([\w$]+\.[\w$]+)\.DEFAULT(,layout:\{\[\3\.DEFAULT\]:\{size:"small"\},\[\3\.CONDENSED\])/g,
+		"$1$2?$3.SECONDARY:$3.DEFAULT$4",
+	],
 	// The same resizer re-encodes every cropped, rotated or oversized image as
 	// JPEG on a canvas it fills white first, so a transparent avatar loses its
 	// background. The canvas stays empty, and one with any transparent pixel

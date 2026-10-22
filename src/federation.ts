@@ -5,6 +5,7 @@ import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { settings } from "./settings";
 import { isSuperadminHome, pinnedHomeKey } from "./superadmins";
+import { MIGRATION_FORMAT_VERSION, SCHEMA, VERSION } from "./version";
 
 export const PROTOCOL = 1;
 export const INSTANCE_ID = new URL(PUBLIC_ORIGIN).host.toLowerCase();
@@ -341,7 +342,7 @@ export async function wellKnown(): Promise<Response> {
 		};
 	}
 	return Response.json(
-		{ protocol: PROTOCOL, software: "xitter", id: INSTANCE_ID, url: PUBLIC_ORIGIN, public_key: publicKey(), rules: !!settings().rules.trim(), rules_url: `${PUBLIC_ORIGIN}/rules`, federation: { enabled: FEDERATION_ON, peers: FEDERATION_ON ? peerStatus.peers : [] } },
+		{ protocol: PROTOCOL, software: "xitter", version: VERSION, schema: SCHEMA, migration: { format_version: MIGRATION_FORMAT_VERSION }, id: INSTANCE_ID, url: PUBLIC_ORIGIN, public_key: publicKey(), rules: !!settings().rules.trim(), rules_url: `${PUBLIC_ORIGIN}/rules`, federation: { enabled: FEDERATION_ON, peers: FEDERATION_ON ? peerStatus.peers : [] } },
 		{ headers: { "cache-control": "public, max-age=60", "access-control-allow-origin": "*" } },
 	);
 }

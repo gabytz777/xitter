@@ -66,38 +66,13 @@ export const BADGES_SCRIPT = String.raw`(function(){
 	var SEL='[data-testid="User-Name"],[data-testid="UserName"],[data-testid="UserCell"],[data-testid="HoverCard"],[data-testid="SideNav_AccountSwitcher_Button"],[data-testid="primaryColumn"] h2';
 	function handle(box){
 		var spans=box.querySelectorAll("span");
-		for(var i=0;i<spans.length;i++){var full=spans[i].getAttribute("data-xitter-handle");if(full)return full;var m=/^@([^\s\/\?#@%,:]{1,50}(?:@[a-zA-Z0-9.-]{1,253}(?::\d{1,5})?)?)$/.exec(spans[i].textContent);if(m)return m[1].toLowerCase()}
+		for(var i=0;i<spans.length;i++){var m=/^@([^\s\/\?#@%,:]{1,50}(?:@[a-zA-Z0-9.-]{1,253}(?::\d{1,5})?)?)$/.exec(spans[i].textContent);if(m)return m[1].toLowerCase()}
 		// a profile's top bar has the name but no handle: the page's address does
 		if(box.tagName==="H2"){
 			var p=/^\/([^\/?#]{1,150})(?:\/|$)/.exec(location.pathname);
 			var profile=/^\/[^\/?#]+\/?$/.test(location.pathname);
 			if(p&&(box.querySelector('div[style*="height: calc(1.0625em)"]')||box.querySelector('svg[data-testid="icon-verified"]')||profile&&box.getAttribute("dir")))try{return decodeURIComponent(p[1]).toLowerCase()}catch(e){}
 		}
-	}
-	// names show "@name" for someone from another instance; the whole handle
-	// stays on the element (and its tooltip), and the globe badge says where
-	// they're from. Only the text changes, in place, so the client's own copy
-	// of it stays its own: when it writes the long one back, it's shortened again.
-	function shorten(box){
-		var spans=[box].concat([].slice.call(box.querySelectorAll("span, a")));
-		for(var i=0;i<spans.length;i++){
-			var t=spans[i].firstChild;
-			if(!t||t.nodeType!==3||spans[i].childNodes.length!==1)continue;
-			var m=/^@([^\s\/\?#@%,:]{1,50})@([a-zA-Z0-9.-]{1,253}(?::\d{1,5})?)$/.exec(t.nodeValue);
-			if(!m)continue;
-			spans[i].setAttribute("data-xitter-handle",(m[1]+"@"+m[2]).toLowerCase());
-			spans[i].title="@"+m[1]+"@"+m[2];
-			t.nodeValue="@"+m[1];
-		}
-	}
-	// the same inside running text ("Replying to @a@x.org and @b@y.org")
-	function shortenText(box){
-		var walk=document.createTreeWalker(box,NodeFilter.SHOW_TEXT),t,full=[];
-		while((t=walk.nextNode())){
-			var v=t.nodeValue,next=v.replace(/@([^\s\/\?#@%,:]{1,50})@([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+(?::\d{1,5})?)/g,function(all,name){full.push(all);return "@"+name});
-			if(next!==v)t.nodeValue=next;
-		}
-		if(full.length)box.title=full.join(", ");
 	}
 	// a bot's extra labels, as badges on the same "Automated by @owner" row
 	function around(box){
@@ -134,7 +109,17 @@ export const BADGES_SCRIPT = String.raw`(function(){
 		el.style.textOverflow="ellipsis";
 		el.style.whiteSpace="nowrap";
 	}
-	function drawLabels(box,labels){
+	// React keeps a name's elements when the page moves on to another account
+	// (one profile to the next), with what was drawn for the last one still in
+	// them: that goes. Labels only on the profile's own line; a post's line is
+	// shared with the post it quotes.
+	function forget(box,name){
+		[].forEach.call(box.querySelectorAll("[data-xitter-badges]"),function(r){if(r.closest(SEL)===box&&r.getAttribute("data-xitter-badges")!==name)r.remove()});
+		var line=profileLine(box),row=line&&line.parentElement;
+		if(row)[].forEach.call(row.querySelectorAll("[data-xitter-labels]"),function(l){if(l.getAttribute("data-xitter-labels")!==name)l.remove()});
+		if(!(known[name]&&known[name].gold))[].forEach.call(box.querySelectorAll("svg[data-xitter-gold]"),function(g){g.style.removeProperty("color");g.removeAttribute("data-xitter-gold")});
+	}
+	function drawLabels(box,name,labels){
 		var line=findLine(around(box))||profileLine(box);
 		if(!line)return;
 		var row=line.parentElement;
@@ -148,7 +133,7 @@ export const BADGES_SCRIPT = String.raw`(function(){
 		var h=size&&size.height||"1.25em",w=size&&size.width||"1.25em";
 		labels.forEach(function(l){
 			var wrap=document.createElement("div");
-			wrap.setAttribute("data-xitter-labels","");
+			wrap.setAttribute("data-xitter-labels",name);
 			wrap.style.cssText="display:flex;align-items:center;min-width:0;margin-left:12px";
 			if(l.icon){
 				var iw=document.createElement("div");
@@ -278,8 +263,8 @@ export const BADGES_SCRIPT = String.raw`(function(){
 	function draw(box,name){
 		var k=known[name];
 		// the translator globe X draws (its label is the client's "Translator account")
-		if(k.gold)box.querySelectorAll('svg[aria-label="Translator account"]').forEach(function(g){g.style.setProperty("color","#d4a72c","important")});
-		if(k.labels&&k.labels.length)drawLabels(box,k.labels);
+		if(k.gold)box.querySelectorAll('svg[aria-label="Translator account"]').forEach(function(g){g.style.setProperty("color","#d4a72c","important");g.setAttribute("data-xitter-gold","")});
+		if(k.labels&&k.labels.length)drawLabels(box,name,k.labels);
 		if(!k.badges.length)return;
 		// this name's rows, not those of a name inside it (a hover card's)
 		var mine=[].filter.call(box.querySelectorAll("[data-xitter-badges]"),function(r){return r.closest(SEL)===box});
@@ -289,7 +274,7 @@ export const BADGES_SCRIPT = String.raw`(function(){
 		if(row)mine.forEach(function(r){if(r!==row)r.remove()});
 		else{
 			row=document.createElement("span");
-			row.setAttribute("data-xitter-badges","");
+			row.setAttribute("data-xitter-badges",name);
 			row.style.cssText="display:inline-flex;align-items:center;vertical-align:text-bottom";
 			k.badges.forEach(function(b){
 				var img=document.createElement("img");
@@ -302,19 +287,14 @@ export const BADGES_SCRIPT = String.raw`(function(){
 	}
 	function scan(){
 		document.querySelectorAll(SEL).forEach(function(box){
-			shorten(box);
+			// a box holding other accounts' boxes (the account switcher, a hover card
+			// with a list): each of those is an account of its own, this one isn't
+			if(box.querySelector(SEL))return;
 			var name=handle(box);
+			forget(box,name||"");
 			if(!name)return;
 			if(known[name]){draw(box,name);return}
 			if(known[name]===undefined&&!waiting[name]){waiting[name]=true;queue.push(name)}
-		});
-		// the accounts under the search box carry no badge, only the handle
-		document.querySelectorAll('[data-testid="TypeaheadUser"]').forEach(shorten);
-		// "Replying to @name@example.org" on posts and in the reply composer: links
-		// to accounts from other instances, and the composer's button that names them
-		document.querySelectorAll('a[href*="@"]').forEach(shorten);
-		document.querySelectorAll('[role="dialog"] [role="button"], [data-testid="primaryColumn"] [role="button"]').forEach(function(b){
-			if(b.textContent.indexOf("Replying to")===0&&b.textContent.indexOf("@",1)>=0)shortenText(b);
 		});
 		if(queue.length)load();
 	}
@@ -341,7 +321,7 @@ export const BADGES_SCRIPT = String.raw`(function(){
 	function openCard(id,at){
 		closeCard();
 		var light=/^rgb\(255, 255, 255/.test(getComputedStyle(document.body).backgroundColor);
-		var fg=light?"#0f1419":"#e7e9ea",muted=light?"#536471":"#71767b",accent="#1d9bf0";
+		var fg=light?"#0f1419":"#e7e9ea",muted=light?"#536471":"#71767b",accent=getComputedStyle(document.documentElement).getPropertyValue("--xt-accent").trim()||"#1d9bf0";
 		card=el("div","position:fixed;z-index:10000;width:280px;max-width:calc(100vw - 32px);padding:16px;border-radius:16px;font:15px/20px -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"+
 			"background:"+(light?"#fff":"#000")+";color:"+fg+";box-shadow:"+(light?"rgba(101,119,134,.2) 0 0 15px, rgba(101,119,134,.15) 0 0 3px 1px":"rgba(255,255,255,.2) 0 0 15px, rgba(255,255,255,.15) 0 0 3px 1px"));
 		card.setAttribute("role","dialog");

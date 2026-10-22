@@ -3,7 +3,7 @@
 // account, so two people can't both use its last use.
 
 import { hateInName } from "./hate";
-import { handleHeld } from "./held";
+import { forgetHeld, handleHeld } from "./held";
 import { blockedNameIn } from "./names";
 import { sql } from "./db";
 import { flagValue } from "./flags";
@@ -37,11 +37,10 @@ const RESERVED = new Set(
 
 export const isReserved = (name: string) => RESERVED.has(name.toLowerCase()) || superadminNameHere(name);
 
-// handles staff may give an account in the admin panel: any characters up to
-// 50, except what would break a profile address, a list of names or a mention
 export const STAFF_HANDLE = /^[^\s\p{C}/\\?#@%,:]{1,50}$/u;
+export const STRICT_HANDLE = /^[A-Za-z0-9_]{1,15}$/;
 export const staffHandleProblem = (name: string): string | null =>
-	!STAFF_HANDLE.test(name) || /^\.+$/.test(name) ? "Handles are up to 50 characters, with no spaces or / \\ ? # @ % , :" : null;
+	STRICT_HANDLE.test(name) ? null : "Handles are 1 to 15 letters, digits or underscores.";
 
 export class SignupError extends Error {}
 
@@ -152,5 +151,6 @@ export async function signUp(
 				select ${id}::bigint, u.id from users u where lower(u.screen_name) = any(${sql.array(follows, "TEXT")}) and u.status <> 'suspended'
 				on conflict do nothing`;
 	});
+	forgetHeld();
 	return id;
 }

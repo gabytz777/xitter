@@ -11,7 +11,7 @@
 // or two.
 
 import { sql } from "./db";
-import { idTime } from "./ids";
+import { idTime, newId } from "./ids";
 import { type FeedItem, communityVisible, homeHidden, itemsFromRows } from "./posts";
 import { followedTopicMatch, unwantedTopicMatch } from "./topics";
 
@@ -44,6 +44,30 @@ function ranking(viewerId: string, asOf: string): Promise<Ranked> {
 	rows.catch(() => rankings.delete(key));
 	return rows;
 }
+
+// Opening "For you" (a reload, the app coming back, several tabs at once) made
+// a new ranking each time, the costliest query here by far. For a minute the
+// last one is handed out again while nothing new has been posted or reposted
+// and the viewer hasn't changed anything (forgetRanking); its ages are then
+// measured from a few seconds back, which moves no post more than a hair.
+const REUSE_MS = 60_000;
+const latest = new Map<string, { asOf: string; at: number }>();
+
+export async function freshAsOf(viewerId: string): Promise<string> {
+	const now = Date.now();
+	const last = latest.get(viewerId);
+	if (last && now - last.at < REUSE_MS && rankings.has(`${viewerId}:${last.asOf}`)) {
+		const [{ newer }] = await sql`select exists (select 1 from posts where id > ${last.asOf}::bigint and reply_to_id is null)
+			or exists (select 1 from reposts where id > ${last.asOf}::bigint) as newer`;
+		if (!newer) return last.asOf;
+	}
+	if (latest.size >= MAX_RANKINGS) for (const [k, l] of latest) if (now - l.at >= REUSE_MS) latest.delete(k);
+	const asOf = newId();
+	latest.set(viewerId, { asOf, at: now });
+	return asOf;
+}
+
+export const forgetRanking = (viewerId: string) => void latest.delete(viewerId);
 
 // One page of the ranked feed. `asOf` (an item id) pins the ranking for the pages of one
 // scroll: posts newer than it wait for the next refresh, and ages are measured

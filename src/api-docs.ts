@@ -56,6 +56,9 @@ export function apiDocsPage(req: Request): Promise<Response> {
 <li>After consent, validate <code>state</code> and send the returned <code>code</code> with <code>grant_type=authorization_code</code>, <code>client_id</code>, <code>redirect_uri</code>, and <code>code_verifier</code> as a form POST to <code>${esc(PUBLIC_ORIGIN)}/oauth/token</code>.</li>
 <li>Use <code>access_token</code> as the Bearer token below. Codes work once for five minutes; access tokens expire after 30 days. Reauthorize to get a new one.</li></ol>
 <p>PKCE S256 is required. Clients have no shared secret. HTTPS redirects and HTTP loopback redirects are accepted; the redirect must match the registered URL exactly.</p>
+<h3>One app for every Xitter</h3>
+<p>Instead of registering on each instance, an app can use the HTTPS URL of a JSON document it hosts as its <code>client_id</code> (an OAuth client ID metadata document). The document holds <code>client_id</code> (its own URL, exactly), <code>client_name</code>, <code>redirect_uris</code>, which must be HTTPS on the document's host, and optionally <code>logo_uri</code>, an HTTPS image on that host shown as the app's icon. Registered apps upload their icon under <a href="/account/apps/developer">Developer apps</a>. People then sign in with one tap on any instance that supports it; <code>${esc(PUBLIC_ORIGIN)}/.well-known/oauth-authorization-server</code> says so with <code>client_id_metadata_document_supported</code>.</p>
+<pre>{"client_id": "https://app.example/oauth-client.json", "client_name": "My app", "redirect_uris": ["https://app.example/"], "logo_uri": "https://app.example/icon.png", "token_endpoint_auth_method": "none"}</pre>
 <p>Requests go to <code>${esc(base)}</code>. Bodies are JSON (or a form); answers are JSON with the result in <code>data</code>, or <code>{"error": "..."}</code> with a 4xx or 5xx status.</p>
 
 <h2>Endpoints</h2>

@@ -5,12 +5,13 @@
     "": {
       "name": "xitter",
       "dependencies": {
-        "emusks": "^2.3.19",
+        "eld": "2.1.0",
         "nodemailer": "6.9.16",
       },
       "devDependencies": {
         "@types/bun": "latest",
         "@types/nodemailer": "6.4.17",
+        "emusks": "^2.3.19",
       },
     },
   },
@@ -50,6 +51,8 @@
     "domutils": ["domutils@4.0.2", "", { "dependencies": { "dom-serializer": "^3.0.0", "domelementtype": "^3.0.0", "domhandler": "^6.0.0" } }, "sha512-qI4JLRKnSzqFqr7hAlS5xQDusBCjKSEG4t4+7aNrIQMHBcsC2TGEhuyABJdYkgSewL57PNLYEiibY2iPKhKpaA=="],
 
     "dunder-proto": ["dunder-proto@1.0.1", "", { "dependencies": { "call-bind-apply-helpers": "^1.0.1", "es-errors": "^1.3.0", "gopd": "^1.2.0" } }, "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A=="],
+
+    "eld": ["eld@2.1.0", "", {}, "sha512-hDQ9FX17th7NDNMO8/St6m3ADQVqjF0sQoOHI6NUAxC7yDaPmZ9wC9d8zau/9FIqOV7KtNwrPKRt6fkkrzZj0g=="],
 
     "emusks": ["emusks@2.3.19", "", { "dependencies": { "cycletls": "^2.0.5", "linkedom": "^0.18.12", "tweetnacl": "^1.0.3", "x-client-transaction-id": "^0.3.2" }, "peerDependencies": { "@roamhq/wrtc": "^0.10.0" }, "optionalPeers": ["@roamhq/wrtc"] }, "sha512-3I+3U72yWDdND5NKwxax1sl8F0YyKXKpvD8ME+5smLSPrtdkbiFODuHktAp7seF6D6Sq44W4z8N5DiSXgtU4rQ=="],
 

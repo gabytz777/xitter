@@ -49,6 +49,10 @@ const CSS = `
 .gallery label:has(input:checked){border-color:var(--text)}
 .gallery label:has(input:focus-visible),.styles label:has(input:focus-visible){outline:2px solid var(--text);outline-offset:2px}
 .gallery img{width:84%;height:84%}
+.gallery label[hidden]{display:none}
+.search{display:grid;gap:6px;margin-top:8px;font-size:14px;color:var(--muted)}
+.search input{color:var(--text)}
+#deco-count:empty{display:none}
 .save{position:sticky;bottom:0;padding:12px 0;background:var(--bg)}
 @media (hover:hover){.choice:hover,.styles label:hover,.gallery label:hover{background:var(--hover)}}
 `;
@@ -70,10 +74,12 @@ function page(
 		(s) =>
 			`<label><input type="radio" name="style" value="${s}"${ears.style === s ? " checked" : ""}><img alt="" src="${esc(decorationUrl({ ...ears, style: s }) ?? "")}">${STYLE_NAMES[s]}</label>`,
 	).join("");
-	const gallery = DISCORD_DECORATIONS.map(
-		(a, i) =>
-			`<label title="Discord decoration ${i + 1}"><input type="radio" name="choice" value="discord:${a}"${chosen === `discord:${a}` ? " checked" : ""} aria-label="Discord decoration ${i + 1}"><img loading="lazy" alt="" src="/i/xitter/decoration/${a}.png"></label>`,
-	).join("");
+	const gallery = DISCORD_DECORATIONS.map((d, i) => {
+		const name = d.name || `Discord decoration ${i + 1}`;
+		const title = d.category && d.category !== d.name ? `${name}, ${d.category}` : name;
+		const terms = ` ${d.name} ${d.category} ${d.label}`.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ");
+		return `<label title="${esc(title)}" data-terms="${esc(terms)}"><input type="radio" name="choice" value="discord:${d.asset}"${chosen === `discord:${d.asset}` ? " checked" : ""} aria-label="${esc(title)}"><img loading="lazy" alt="" src="/i/xitter/decoration/${d.asset}.png"></label>`;
+	}).join("");
 	const avatar = viewer.avatar_url
 		? `<img class="avatar" alt="Your avatar" src="${esc(viewer.avatar_url)}">`
 		: `<div class="avatar" aria-label="Your avatar"></div>`;
@@ -103,7 +109,9 @@ ${radio("ears", "Cat ears")}
 </div>
 <h2>From Discord</h2>
 <p class="dim">${DISCORD_DECORATIONS.length} of Discord's decorations. They move on your profile and stay still everywhere else.</p>
-<div class="gallery">${gallery}</div>
+<label class="search">Search decorations<input type="search" id="deco-search" placeholder="Cats, Valorant, flowers" autocomplete="off" spellcheck="false"></label>
+<p class="dim" id="deco-count" role="status"></p>
+<div class="gallery" id="gallery">${gallery}</div>
 <div class="save"><button type="submit">Save decoration</button></div>
 </form>
 <script>(function(){
@@ -117,7 +125,14 @@ function update(e){
 	deco.hidden=false;
 	deco.src=v==="ears"?earsUrl():"/i/xitter/decoration/"+v.slice(8)+".png?animated=1";
 }
-f.addEventListener("input",update);f.addEventListener("change",update);
+f.addEventListener("input",function(e){if(e.target.id!=="deco-search")update(e)});f.addEventListener("change",function(e){if(e.target.id!=="deco-search")update(e)});
+var search=document.getElementById("deco-search"),count=document.getElementById("deco-count"),tiles=[].slice.call(document.querySelectorAll("#gallery > label"));
+search.addEventListener("keydown",function(e){if(e.key==="Enter")e.preventDefault()});
+search.addEventListener("input",function(){
+	var words=search.value.toLowerCase().split(/\\s+/).filter(Boolean),shown=0;
+	tiles.forEach(function(t){var terms=t.getAttribute("data-terms");var on=words.every(function(w){return terms.indexOf(" "+w)>=0});t.hidden=!on;if(on)shown++});
+	count.textContent=words.length?(shown?shown+(shown===1?" decoration":" decorations"):"No decorations match. Try a shorter word."):"";
+});
 })();</script>`,
 	});
 }

@@ -398,6 +398,7 @@ create table if not exists invites (
 alter table users add column if not exists invite_code text references invites (code) on delete set null;
 -- a pride flag shown next to the name (see flags.ts), picked at sign-up
 alter table users add column if not exists flag text;
+alter table users add column if not exists pronouns text;
 
 -- Admin panel. Staff roles: admin (everything), moderator (users' standing and
 -- posts), support (read, password resets, sign-outs). Every staff action is logged.
@@ -571,6 +572,7 @@ alter table chat_events add column if not exists deleted boolean not null defaul
 alter table articles add column if not exists hidden boolean not null default false;
 alter table users add column if not exists org_badge_id bigint references custom_badges(id) on delete set null;
 create index if not exists users_org_badge_idx on users(org_badge_id);
+alter table users add column if not exists remote_org_badge text;
 create index if not exists users_status_until_idx on users(status_until) where status_until is not null;
 
 create table if not exists lists (
@@ -1002,6 +1004,19 @@ create table if not exists oauth_codes (
 	expires_at timestamptz not null
 );
 create index if not exists oauth_codes_expires_idx on oauth_codes(expires_at);
+-- Apps identified by a client ID metadata document URL (oauth-metadata.ts)
+-- get a row the first time someone approves them; they have no owner here.
+alter table oauth_clients add column if not exists metadata_url text unique;
+alter table oauth_clients alter column owner_id drop not null;
+-- staff blocks (Admin > OAuth apps); a blocked app is also revoked
+alter table oauth_clients add column if not exists blocked_at timestamptz;
+alter table oauth_clients add column if not exists blocked_reason text;
+-- the app's icon: uploaded by its developer (icon, icon_mime, icon_at), or the
+-- logo_uri of its client ID metadata document
+alter table oauth_clients add column if not exists icon bytea;
+alter table oauth_clients add column if not exists icon_mime text;
+alter table oauth_clients add column if not exists icon_at timestamptz;
+alter table oauth_clients add column if not exists logo_uri text;
 alter table api_tokens add column if not exists client_id bigint references oauth_clients(id) on delete cascade;
 alter table api_tokens add column if not exists expires_at timestamptz;
 create index if not exists api_tokens_client_idx on api_tokens(client_id, user_id) where client_id is not null;
@@ -1380,12 +1395,12 @@ begin
 end $$;
 create or replace trigger federation_user_insert after insert on users for each row execute function federation_user_changed();
 alter table users add column if not exists decoration jsonb;
-create or replace trigger federation_user_update after update of screen_name, name, bio, location, website, avatar_url, banner_url, protected, status, deactivated_at, verified_type, translator, flag, parody_label, count_overrides, decoration on users for each row
+create or replace trigger federation_user_update after update of screen_name, name, bio, location, website, avatar_url, banner_url, protected, status, deactivated_at, verified_type, translator, flag, pronouns, parody_label, count_overrides, decoration, org_badge_id on users for each row
 	when (old.screen_name is distinct from new.screen_name or old.name is distinct from new.name or old.bio is distinct from new.bio or old.location is distinct from new.location or old.website is distinct from new.website
 		or old.avatar_url is distinct from new.avatar_url or old.banner_url is distinct from new.banner_url or old.protected is distinct from new.protected
 		or old.status is distinct from new.status or old.deactivated_at is distinct from new.deactivated_at or old.verified_type is distinct from new.verified_type
-		or old.translator is distinct from new.translator or old.flag is distinct from new.flag or old.parody_label is distinct from new.parody_label
-		or old.count_overrides is distinct from new.count_overrides or old.decoration is distinct from new.decoration)
+		or old.translator is distinct from new.translator or old.flag is distinct from new.flag or old.pronouns is distinct from new.pronouns or old.parody_label is distinct from new.parody_label
+		or old.count_overrides is distinct from new.count_overrides or old.decoration is distinct from new.decoration or old.org_badge_id is distinct from new.org_badge_id)
 	execute function federation_user_changed();
 create or replace function federation_badges_changed() returns trigger language plpgsql as $$
 begin
@@ -1394,6 +1409,36 @@ begin
 end $$;
 create or replace trigger federation_user_badges after insert or delete on user_badges for each row execute function federation_badges_changed();
 create or replace trigger federation_user_delete before delete on users for each row execute function federation_user_changed();
+create table if not exists affiliation_votes (
+	org_id bigint not null references users (id) on delete cascade,
+	user_id bigint not null references users (id) on delete cascade,
+	side text not null check (side in ('org', 'member')),
+	primary key (org_id, user_id, side)
+);
+alter table federation_outbox drop constraint if exists federation_outbox_kind_check;
+alter table federation_outbox add constraint federation_outbox_kind_check check (kind in ('user', 'post', 'like', 'repost', 'follow', 'affiliate', 'affiliation')) not valid;
+create or replace function federation_affiliation_changed() returns trigger language plpgsql as $$
+declare
+	org bigint := coalesce(new.org_id, old.org_id);
+	member bigint := coalesce(new.user_id, old.user_id);
+begin
+	if federation_local(org) then
+		if tg_table_name = 'affiliations' or not federation_local(member) then
+			insert into federation_outbox (kind, a, b) values ('affiliate', org, member);
+		end if;
+	elsif federation_local(member) and (tg_table_name = 'affiliations' or tg_op = 'DELETE') then
+		insert into federation_outbox (kind, a, b) values ('affiliation', member, org);
+	end if;
+	return null;
+end $$;
+create or replace trigger federation_affiliation_change after insert or delete on affiliations for each row execute function federation_affiliation_changed();
+create or replace trigger federation_affiliation_request_change after insert or delete on affiliation_requests for each row execute function federation_affiliation_changed();
+do $$ begin
+	if not exists (select 1 from schema_steps where name = 'federation_affiliations') then
+		insert into federation_outbox (kind, a, b) select 'affiliate', a.org_id, a.user_id from affiliations a join users o on o.id = a.org_id where o.instance is null;
+		insert into schema_steps (name) values ('federation_affiliations');
+	end if;
+end $$;
 
 do $$ begin
 	if not exists (select 1 from schema_steps where name = 'federation_backfill') then
@@ -1441,5 +1486,98 @@ drop trigger if exists users_admins_unblocked on users;
 create trigger users_admins_unblocked after update of role on users for each row execute function admins_unblocked();
 delete from blocks bl using users b, users t where b.id = bl.blocker_id and t.id = bl.blocked_id and b.instance is null and t.role = 'admin' and t.instance is null;
 
+-- Imports of X archives (archive-import.ts): one per account, the latest. The
+-- zip waits in ARCHIVE_DIR while it uploads and imports, and goes when done.
+create table if not exists archive_imports (
+	user_id bigint primary key references users (id) on delete cascade,
+	state text not null check (state in ('uploading', 'queued', 'running', 'done', 'failed')),
+	size bigint not null default 0,
+	options jsonb not null default '{}',
+	total int not null default 0,
+	posts int not null default 0,
+	media int not null default 0,
+	skipped int not null default 0,
+	error text,
+	updated_at timestamptz not null default now()
+);
+-- posts the instance's rules left out, and when a paused import (the post
+-- rate limit) carries on
+alter table archive_imports add column if not exists refused int not null default 0;
+alter table archive_imports add column if not exists waiting_until timestamptz;
+-- 'pending': waiting for staff to approve it (Admin > Settings, Import from X)
+alter table archive_imports drop constraint if exists archive_imports_state_check;
+alter table archive_imports add constraint archive_imports_state_check check (state in ('uploading', 'pending', 'queued', 'running', 'done', 'failed'));
+
 -- profile decor for gold-check accounts, from the Steam Points Shop (decor.ts)
 alter table users add column if not exists decor jsonb;
+
+alter table posts add column if not exists conversation_card jsonb;
+
+alter table posts add column if not exists conversation_card_post_id bigint references posts (id) on delete set null;
+
+create table if not exists post_translations (
+	post_id bigint not null references posts (id) on delete cascade,
+	version int not null,
+	target_lang text not null,
+	source_hash text not null,
+	source_lang text not null,
+	text text not null,
+	created_at timestamptz not null default now(),
+	primary key (post_id, version, target_lang)
+);
+
+create table if not exists bio_translations (
+	user_id bigint not null references users (id) on delete cascade,
+	target_lang text not null,
+	source_hash text not null,
+	source_lang text not null,
+	text text not null,
+	created_at timestamptz not null default now(),
+	primary key (user_id, target_lang)
+);
+
+-- account migration between instances (migration.ts, migration-import.ts).
+-- The old instance hands out a migration code (stored as its SHA-256) that
+-- lets the new one read the account's archive and files; the new instance
+-- keeps a job per import and maps every object it brought over, so running
+-- the same import again resumes instead of duplicating.
+create table if not exists migration_tokens (
+	token_hash text primary key,
+	user_id bigint not null references users (id) on delete cascade,
+	created_at timestamptz not null default now(),
+	expires_at timestamptz not null,
+	-- the instance that last used it, and when the import there finished
+	used_by text,
+	used_at timestamptz,
+	completed_at timestamptz
+);
+create index if not exists migration_tokens_user_idx on migration_tokens (user_id);
+create table if not exists account_migrations (
+	id bigint primary key,
+	user_id bigint not null references users (id) on delete cascade,
+	source text not null,
+	source_user_id bigint not null,
+	source_handle text not null,
+	state text not null check (state in ('running', 'done', 'failed')),
+	progress jsonb not null default '{}',
+	report jsonb not null default '{}',
+	error text,
+	created_at timestamptz not null default now(),
+	finished_at timestamptz
+);
+create index if not exists account_migrations_user_idx on account_migrations (user_id, created_at desc);
+create unique index if not exists account_migrations_running_idx on account_migrations (user_id) where state = 'running';
+create table if not exists migration_objects (
+	user_id bigint not null references users (id) on delete cascade,
+	source text not null,
+	kind text not null,
+	remote_id text not null,
+	local_id bigint not null,
+	created_at timestamptz not null default now(),
+	primary key (user_id, source, kind, remote_id)
+);
+-- when it came over: a move gets a daily allowance of posts (migration-import.ts)
+alter table migration_objects add column if not exists created_at timestamptz not null default now();
+-- where an account went, as handle@instance; set by the new instance when the import finished
+alter table users add column if not exists moved_to text;
+alter table users add column if not exists moved_at timestamptz;

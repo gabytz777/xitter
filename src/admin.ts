@@ -9,6 +9,7 @@
 // written to the audit log.
 
 import { isSuperadminViewer } from "./superadmin";
+import { oneLine } from "./text-clean";
 import { SUPERADMINS, isSuperadminHome, superadminNameHere, superadminOf } from "./superadmins";
 import { FEDERATION_ON, ID_RE, INSTANCE_ID, acceptKeyChange, isBlocked as isFederationBlocked, isPeer, liftBlock, listBlocks, listed, listedInstance, pendingKeyChange, publicKey, registryCheckedAt, registryError, registrySequence, setBlock as setFederationBlock } from "./federation";
 import { dropRemoteMedia, pullFrom, savedRemoteMedia, storesRemoteMedia } from "./federation-sync";
@@ -17,7 +18,7 @@ import { sql } from "./db";
 import { flagValue, unknownFlag } from "./flags";
 import { isId, newId } from "./ids";
 import { createInvite, staffHandleProblem } from "./invites";
-import { retireAccount } from "./held";
+import { forgetHeld, handleHeld, retireAccount } from "./held";
 import { activeStrikes, shutOut } from "./moderation";
 import { REASONS } from "./reports";
 import { FEATURES, type Feature, type SignupMode, allSettings, setSetting, settings } from "./settings";
@@ -29,10 +30,12 @@ import { mailEnabled, mailFrom, sendMail } from "./mail";
 import { mailDigests } from "./mail-digest";
 import { toolActions } from "./admin-tools";
 import { stickerActions } from "./stickers";
+import { oauthAppActions } from "./oauth-admin";
 import { hashflagActions } from "./hashflags";
 import { switchActions } from "./feature-switches";
 import { AFFILIATION_LIMIT } from "./org-manage";
 import { staffGate } from "./staff-access";
+import { countryCode, countryName } from "./countries";
 import { GRANTABLE, PERMISSIONS, RANK, type Role, allows, mayRun, permissionOf, rolePermissions } from "./staff-permissions";
 
 export class AdminError extends Error {
@@ -374,7 +377,7 @@ const ACTIONS: Record<string, Action> = {
 		role: "support",
 		run: async (a, b) => {
 			const id = idOf(b.id);
-			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.count_overrides, u.decor, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
+			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.based_in_override, u.country, u.signup_country, u.count_overrides, u.decor, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
 				(select coalesce(json_agg(ub.badge_id::text order by ub.position), '[]') from user_badges ub where ub.user_id = u.id) as badge_ids,
 				(select count(*)::int from sessions s where s.user_id = u.id) as sessions,
 				(select count(*)::int from api_tokens t where t.user_id = u.id) as api_tokens,
@@ -392,6 +395,7 @@ const ACTIONS: Record<string, Action> = {
 				join login_events other on other.ip = mine.ip and other.user_id <> mine.user_id and other.created_at > now() - interval '90 days'
 				join users u on u.id = other.user_id
 				where mine.user_id = ${id}::bigint and mine.ip is not null and mine.created_at > now() - interval '90 days' limit 20`;
+			u.joined_from = u.signup_country ? (countryName(u.signup_country) ?? u.signup_country) : "";
 			return { user: u, invited, log, alts, strikes, next_step: ladder.length ? ladder[Math.min(strikes + 1, ladder.length) - 1] : 0 };
 		},
 	},
@@ -402,10 +406,14 @@ const ACTIONS: Record<string, Action> = {
 			const id = idOf(b.id);
 			await guard(a, id, true);
 			const limits: Record<string, [string, number]> = { name: ["name", 50], screen_name: ["screen_name", 50], bio: ["bio", 160], location: ["location", 30], website: ["website", 100], based_in: ["based_in_override", 50] };
+			const [old] = await sql`select screen_name from users where id = ${id}::bigint`;
 			const changes: Record<string, string | null> = {};
 			for (const [field, [column, max]] of Object.entries(limits)) {
 				if (typeof b[field] !== "string") continue;
 				const value = b[field].trim();
+				// the form always sends the handle; one set before the handle rules
+				// (a symbol in it) must not block saving the rest of the profile
+				if (field === "screen_name" && value === old?.screen_name) continue;
 				if ([...value].length > max) throw new AdminError(`${field} is at most ${max} characters.`);
 				if (field === "screen_name" && staffHandleProblem(value)) throw new AdminError(staffHandleProblem(value)!);
 				if (field === "name" && !value) throw new AdminError("Name can't be blank.");
@@ -413,15 +421,23 @@ const ACTIONS: Record<string, Action> = {
 				// a blank "based in" goes back to the detected region
 				changes[column] = field === "based_in" && !value ? null : value;
 			}
+			// the country after the date joined in About this account; blank hides it
+			if (typeof b.joined_from === "string") {
+				const value = b.joined_from.trim();
+				const code = value ? countryCode(value) : null;
+				if (code === undefined) throw new AdminError("Joined from takes a country name or its two-letter code, like SE.");
+				changes.signup_country = code;
+			}
 			if (!Object.keys(changes).length) return {};
 			if (changes.screen_name) {
 				const [taken] = await sql`select 1 from users where lower(screen_name) = lower(${changes.screen_name}) and id <> ${id}::bigint`;
 				if (taken) throw new AdminError("That handle is taken.");
+				if (await handleHeld(changes.screen_name, id)) throw new AdminError("That handle looks too much like another account's.");
 			}
-			const [old] = await sql`select screen_name from users where id = ${id}::bigint`;
 			await sql`update users set ${sql(changes)} where id = ${id}::bigint`;
 			if (changes.screen_name && changes.screen_name !== old.screen_name)
 				await sql`insert into username_changes (user_id, old_name, new_name) values (${id}::bigint, ${old.screen_name}, ${changes.screen_name})`;
+			if (changes.screen_name) forgetHeld();
 			await audit(a, "edit_profile", id, changes);
 			return {};
 		},
@@ -580,12 +596,14 @@ const ACTIONS: Record<string, Action> = {
 			const name = String(b.name ?? "").trim() || screenName;
 			if (!/^[A-Za-z0-9_]{4,15}$/.test(screenName)) throw new AdminError("Handles are 4 to 15 letters, digits or underscores.");
 			if (superadminNameHere(screenName)) throw new AdminError("That handle is reserved.");
+			if (await handleHeld(screenName)) throw new AdminError("That handle looks too much like another account's.");
 			const [taken] = await sql`select 1 from users where lower(screen_name) = lower(${screenName})`;
 			if (taken) throw new AdminError("That handle is taken.");
 			const password = randomPassword();
 			const id = newId();
 			await sql`insert into users (id, screen_name, name, password_hash, verified_type)
 				values (${id}::bigint, ${screenName}, ${name}, ${await Bun.password.hash(password)}, 'business')`;
+			forgetHeld();
 			await audit(a, "create_org", id, { screen_name: screenName });
 			return { id, password };
 		},
@@ -604,8 +622,9 @@ const ACTIONS: Record<string, Action> = {
 		run: async (a, b) => {
 			const orgId = idOf(b.orgId, "organisation");
 			if (!(await sql`select 1 from users where id = ${orgId}::bigint`).length) throw new AdminError("No such account.", 404);
-			const [u] = await sql`select id::text as id from users where lower(screen_name) = lower(${String(b.screen_name ?? "").replace(/^@/, "")})`;
+			const [u] = await sql`select id::text as id, instance from users where lower(screen_name) = lower(${String(b.screen_name ?? "").replace(/^@/, "")})`;
 			if (!u) throw new AdminError("No account with that handle.");
+			if (u.instance) throw new AdminError("That account is on another instance. The organisation can ask them from its Organisation page, and they accept on their own instance.");
 			await guard(a, u.id, true);
 			await sql`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${u.id}::bigint) on conflict do nothing`.catch((e) => {
 				throw /affiliation_limit/.test(String(e?.message)) ? new AdminError(`That account is already an affiliate of ${AFFILIATION_LIMIT} organisations.`) : e;
@@ -789,12 +808,28 @@ const ACTIONS: Record<string, Action> = {
 				await setSetting("post_limits", next);
 				changed.push("post_limits");
 			}
+			if (b.daily_caps && typeof b.daily_caps === "object") {
+				const cap = (v: unknown, name: string) => {
+					const x = Number(v);
+					if (!Number.isInteger(x) || x < 1 || x > 1_000_000) throw new AdminError(`The daily ${name} cap must be a whole number from 1 to 1000000.`);
+					return x;
+				};
+				await setSetting("daily_caps", { enabled: !!b.daily_caps.enabled, posts: cap(b.daily_caps.posts, "post"), replies: cap(b.daily_caps.replies, "reply") });
+				changed.push("daily_caps");
+			}
 			if (b.announcement && typeof b.announcement === "object") {
 				const text = String(b.announcement.text ?? "").trim().slice(0, 500);
-				const link = String(b.announcement.link ?? "").trim();
-				if (link && !/^https?:\/\/\S+$/.test(link)) throw new AdminError("The announcement link must be an http or https address.");
+				const raw = Array.isArray(b.announcement.buttons) ? b.announcement.buttons : [];
+				if (raw.length > 4) throw new AdminError("An announcement has at most 4 buttons.");
+				const buttons = raw
+					.map((x: any) => ({ label: oneLine(String(x?.label ?? "")).slice(0, 30), url: String(x?.url ?? "").trim() }))
+					.filter((x: { label: string; url: string }) => x.label || x.url);
+				for (const x of buttons) {
+					if (!x.label) throw new AdminError("Give every announcement button a label.");
+					if (!/^https?:\/\/\S{1,500}$/.test(x.url)) throw new AdminError(`The link for "${x.label}" must be an http or https address.`);
+				}
 				// a new id brings the banner back for people who closed the old one
-				await setSetting("announcement", { id: text ? newId() : "", text, link });
+				await setSetting("announcement", { id: text ? newId() : "", text, link: "", buttons });
 				changed.push("announcement");
 			}
 			if (Array.isArray(b.default_follows)) {
@@ -869,6 +904,7 @@ const ACTIONS: Record<string, Action> = {
 
 Object.assign(ACTIONS, toolActions);
 Object.assign(ACTIONS, stickerActions);
+Object.assign(ACTIONS, oauthAppActions);
 Object.assign(ACTIONS, hashflagActions);
 Object.assign(ACTIONS, switchActions);
 
@@ -876,6 +912,12 @@ Object.assign(ACTIONS, switchActions);
 for (const [key, p] of Object.entries(PERMISSIONS))
 	for (const name of p.actions)
 		if (ACTIONS[name]?.role !== p.role) throw new Error(`Staff permission ${key}: ${name} ${ACTIONS[name] ? `needs ${ACTIONS[name].role}, not ${p.role}` : "is no action"}.`);
+
+const READS = new Set(
+	"federation platforms mail cards topics me staffPermissions stats users user orgs affiliates posts reports invites settings audit badges labels staffNotes staffMessages appeals handleHistory userSessions blockedNameAccounts articles media operations heldIdentities health security backups archiveImports client checkClient errors inviteTree featureSwitches hashflags oauthApps stickers automodScan".split(
+		" ",
+	),
+);
 
 export async function adminApi(req: Request, action: string, viewer: Viewer | undefined): Promise<Response> {
 	const fail = (message: string, status: number) => Response.json({ error: message }, { status });
@@ -898,7 +940,13 @@ export async function adminApi(req: Request, action: string, viewer: Viewer | un
 	if (!mayRun(viewer.role, action, a.role)) return fail(permissionOf(action) ? "An admin hasn't given your role permission to do that." : `Needs the ${a.role} role.`, 403);
 	const body = await req.json().catch(() => ({}));
 	try {
-		return Response.json((await a.run(viewer, body ?? {}, req)) ?? {});
+		const result = await a.run(viewer, body ?? {}, req);
+		if (viewer.superadmin && !READS.has(action)) {
+			const b = (body ?? {}) as Record<string, unknown>;
+			const target = ["id", "userId", "orgId", "screen_name", "instance", "slot"].map((k) => b[k]).find((v) => typeof v === "string" || typeof v === "number");
+			await audit(viewer, `superadmin_${action}`, target === undefined ? null : String(target).slice(0, 200));
+		}
+		return Response.json(result ?? {});
 	} catch (e) {
 		if (e instanceof AdminError) return fail(e.message, e.status);
 		throw e;

@@ -26,9 +26,7 @@ export const protectedFor = (viewerId: string) =>
 		and id not in (select followee_id from follows where follower_id = ${viewerId}::bigint)
 		and not ${staffViewer(viewerId)})`;
 
-export const suspendedFor = (viewerId: string) =>
-	sql`(select id from users where ${gone}
-		and not ${staffViewer(viewerId)})`;
+export const suspendedFor = (viewerId: string) => sql`(select id from users where ${gone} and id <> ${viewerId}::bigint)`;
 
 // Accounts from other instances the viewer hid, all of them or some instances
 // (Settings > Other instances): they stay out of timelines, replies, search and

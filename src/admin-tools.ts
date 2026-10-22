@@ -21,6 +21,7 @@ import { clientIp, ipAllowed, parseRange } from "./staff-access";
 import { allows } from "./staff-permissions";
 import { BACKUP_DIR, createBackup, deleteBackup, listBackups } from "./backups";
 import { clientStatus, latestSha, rollbackClient, updateClient } from "./client-update";
+import { decideImport, pendingImports } from "./archive-import";
 
 const STANDINGS = ["active", "restricted", "limited", "suspended"];
 
@@ -617,6 +618,33 @@ export const toolActions: Record<string, Action> = {
 			const quota = { enabled: b.enabled, per_month: n(b.per_month, 1, 100, "Invites a month"), uses: n(b.uses, 1, 100, "Uses each"), min_age_days: n(b.min_age_days, 0, 3650, "Account age") };
 			await setSetting("invite_quota", quota);
 			await audit(a, "invite_quota", null, quota);
+			return {};
+		},
+	},
+
+	// archive-import.ts: who may import from X, and the imports waiting for staff
+	saveArchiveImport: {
+		role: "admin",
+		run: async (a, b) => {
+			const days = Number(b.min_age_days);
+			if (!Number.isInteger(days) || days < 0 || days > 3650) throw new AdminError("Account age is 0 to 3650 days.");
+			if (typeof b.approval !== "boolean") throw new AdminError("Choose whether staff approve each import.");
+			const value = { min_age_days: days, approval: b.approval };
+			await setSetting("archive_import", value);
+			await audit(a, "archive_import", null, value);
+			return {};
+		},
+	},
+	archiveImports: { role: "moderator", run: async () => ({ imports: await pendingImports() }) },
+	decideArchiveImport: {
+		role: "moderator",
+		run: async (a, b) => {
+			const id = idOf(b.userId);
+			await guard(a, id);
+			if (typeof b.approve !== "boolean") throw new AdminError("Approve or decline.");
+			const reason = typeof b.reason === "string" ? b.reason.trim().slice(0, 300) : "";
+			if (!(await decideImport(id, b.approve, reason))) throw new AdminError("That import isn't waiting any more.", 404);
+			await audit(a, b.approve ? "approve_archive_import" : "decline_archive_import", id, reason ? { reason } : {});
 			return {};
 		},
 	},

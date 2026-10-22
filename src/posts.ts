@@ -2,10 +2,10 @@ import type { User } from "./auth";
 import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { INSTANCE_ID } from "./federation";
-import { newId } from "./ids";
+import { idAt, newId } from "./ids";
 import { hateIn } from "./hate";
 import { automodStrike } from "./moderation";
-import { hasBlockedPhrase } from "./settings";
+import { hasBlockedPhrase, settings } from "./settings";
 import { postLimitFor, weightedLength } from "./textlen";
 import type { PostRow } from "./model";
 import { articlesByIds } from "./articles";
@@ -29,7 +29,7 @@ const SUSPENDED = sql`(select id from users where status = 'suspended' or instan
 
 // every post query starts from this; callers append where/order/limit
 const select = (viewerId: string) => sql`
-	select p.id, p.text, p.reply_to_id, p.conversation_id, p.quote_id, p.article_id, p.created_at, p.source, p.sensitive and not u.never_sensitive as sensitive, u.never_sensitive, p.community_id::text as community_id, p.poll_id::text as poll_id, p.place_id, p.edit_count, p.edited_at, p.reply_policy,
+	select p.id, p.text, p.conversation_card, p.conversation_card_post_id::text, p.reply_to_id, p.conversation_id, p.quote_id, p.article_id, p.created_at, p.source, p.sensitive and not u.never_sensitive as sensitive, u.never_sensitive, p.community_id::text as community_id, p.poll_id::text as poll_id, p.place_id, p.edit_count, p.edited_at, p.reply_policy,
 		exists (select 1 from posts r where r.id = p.conversation_id and r.reply_policy is not null and r.user_id <> ${viewerId}::bigint and not (
 			(r.reply_policy = 'Community' and exists (select 1 from follows f where f.follower_id = r.user_id and f.followee_id = ${viewerId}::bigint))
 			or (r.reply_policy = 'ByInvitation' and exists (select 1 from post_mentions m where m.post_id = r.id and m.user_id = ${viewerId}::bigint))
@@ -70,6 +70,8 @@ function toRow(r: any): PostRow {
 		article_id: r.article_id,
 		community_id: r.community_id,
 		poll_id: r.poll_id,
+		conversationCard: r.conversation_card,
+		conversationCardPostId: r.conversation_card_post_id,
 		place_id: r.place_id,
 		edit_count: r.edit_count,
 		view_count: r.view_count,
@@ -96,7 +98,20 @@ function toRow(r: any): PostRow {
 
 // media, articles, and the post each one quotes (one level: a quote inside a quote is not expanded)
 async function hydrate(viewerId: string, posts: PostRow[], quotes = true): Promise<PostRow[]> {
+	let cardPost: PostRow, cardSource: any;
 	const media = await mediaForPosts(posts.map((p) => p.id));
+	const cardSourceIds = [...new Set(posts.map((p) => p.conversationCardPostId).filter((id): id is string => !!id))];
+	const cardRows = cardSourceIds.length ? await sql`${select(viewerId)} where p.id = any(${sql.array(cardSourceIds, "INT8")}) and p.conversation_card_post_id is null` : [];
+	const cardSources = new Map<string, any>(cardRows.map((row: any) => [String(row.id), row]));
+	const cardMedia = await mediaForPosts(cardSourceIds);
+	for (cardPost of posts) {
+		cardSource = cardPost.conversationCardPostId ? cardSources.get(cardPost.conversationCardPostId) : undefined;
+		if (cardSource?.conversation_card) {
+			cardPost.conversationCard = cardSource.conversation_card;
+			cardPost.conversationCreative = cardMedia.get(String(cardSource.id))?.[0];
+			cardPost.sensitive = cardPost.sensitive || cardSource.sensitive;
+		}
+	}
 	for (const p of posts) p.media = (media.get(p.id) ?? []).map((m) => (p.never_sensitive ? { ...m, sensitive_warning: null } : m));
 	if (posts.length) {
 		const notes = await sql`select n.id::text, n.post_id::text, n.text, count(*)::int as ratings,
@@ -132,10 +147,10 @@ async function hydrate(viewerId: string, posts: PostRow[], quotes = true): Promi
 			if (!target) continue;
 			l.post.localLinks ??= new Map();
 			l.post.localLinks.set(l.url, `${PUBLIC_ORIGIN}/${target.author.screen_name}/status/${target.id}`);
-			if (quotes && !l.post.quote_id && !l.post.poll && !l.post.article_id && !l.post.media?.length && target.id !== l.post.id) l.post.quoted = target;
+			if (quotes && !l.post.quote_id && !l.post.poll && !l.post.conversationCard && !l.post.article_id && !l.post.media?.length && target.id !== l.post.id) l.post.quoted = target;
 		}
 	}
-	const linkOf = (p: PostRow) => (p.poll || p.quote_id || p.quoted || p.article_id || p.media?.length ? undefined : linksIn(p.text).filter((l) => previewable(l.url)).at(-1)?.url);
+	const linkOf = (p: PostRow) => (p.poll || p.conversationCard || p.quote_id || p.quoted || p.article_id || p.media?.length ? undefined : linksIn(p.text).filter((l) => previewable(l.url)).at(-1)?.url);
 	const previews = await previewsFor(posts.map(linkOf).filter((u): u is string => !!u));
 	for (const p of posts) {
 		const preview = previews.get(linkOf(p) ?? "");
@@ -442,8 +457,16 @@ export const seenBy = (userId: string) =>
 export async function createPost(userId: string, input: string, opts: { replyToId?: string; quoteId?: string; articleId?: string; source?: string; communityId?: string; placeId?: string; replyPolicy?: string; db?: typeof sql; skipPreview?: boolean } = {}): Promise<string> {
 	const db = opts.db ?? sql;
 	const text = cleanText(input, { blankLines: 2 });
-	const [author] = await db`select status, deactivated_at from users where id = ${userId}::bigint`;
+	const [author] = await db`select status, deactivated_at, role from users where id = ${userId}::bigint`;
 	if (!author || author.status === "restricted" || author.status === "suspended" || author.deactivated_at) throw new PostError("Your account can't post right now.", 326);
+	const caps = settings().daily_caps;
+	if (caps.enabled && !author.role) {
+		const reply = !!opts.replyToId;
+		const cap = reply ? caps.replies : caps.posts;
+		const [made] = await db`select count(*)::int as n from posts
+			where user_id = ${userId}::bigint and id >= ${idAt(Date.now() - 86_400_000)}::bigint and (reply_to_id is not null) = ${reply}`;
+		if (made.n >= cap) throw new PostError(`You've reached the limit of ${cap} ${reply ? (cap === 1 ? "reply" : "replies") : cap === 1 ? "post" : "posts"} a day. Try again later.`, 185);
+	}
 	await checkLength(userId, text, db);
 	await refuseHate(userId, text);
 	if (hasBlockedPhrase(text)) throw new PostError("Your post contains a phrase this instance doesn't allow.", 186);

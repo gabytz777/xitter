@@ -54,12 +54,11 @@ function homePage(req: Request, viewer: Viewer, message = "") {
 		title: "Superadmin",
 		body: `${message ? `<p class="box">${esc(message)}</p>` : ""}
 <h1>Open another instance's admin panel</h1>
-<p>You get an admin session there for ${SESSION_MINUTES} minutes. Every instance logs it.</p>
+<p>You get a temporary admin session there for up to ${SESSION_MINUTES} minutes. It's deleted when it runs out or you sign out. Changes you make show in that instance's own audit log.</p>
 <form method="post" action="/federation/superadmin/enter">
+<input type="hidden" name="csrf" value="${esc(viewer.csrf)}">
 <label>Instance <select name="instance" required>${options}</select></label>
-<label>Password <input type="password" name="password" autocomplete="current-password" required></label>
-<label>Two-factor code <input name="code" inputmode="numeric" autocomplete="one-time-code" required></label>
-<button>Get a ticket</button>
+<button>Open admin panel</button>
 </form>
 <h1>Emergency defederation</h1>
 <p>Every instance that federates stops talking to the instance you name within a minute. Lifting it works the same way.</p>
@@ -83,21 +82,24 @@ export async function superadminHomeRoute(req: Request, url: URL, viewer: Viewer
 	const form = await req.formData().catch(() => new FormData());
 	const instance = String(form.get("instance") ?? "");
 	if (!targets().some((i) => i.id === instance)) return homePage(req, viewer, "Pick an instance from the list.");
-	const refused = await reauthenticate(u, form);
-	if (refused) return homePage(req, viewer, refused);
 
 	if (url.pathname === "/federation/superadmin/enter") {
+		if (String(form.get("csrf") ?? "") !== viewer.csrf) return homePage(req, viewer, "That form is out of date. Try again.");
+		const h = hit("auth", `superadmin:${viewer.id}`);
+		if (!h.ok) return limitedResponse(h);
 		const now = Math.floor(Date.now() / 1000);
-		const ticket = seal({ typ: "xitter-superadmin-v1", iss: INSTANCE_ID, aud: instance, sub: viewer.screen_name, sub_id: viewer.id, name: viewer.name, iat: now, exp: now + TICKET_SECONDS, nonce: b64url(randomBytes(18)), amr: ["pwd", "otp"] });
-		await auditHome(viewer.id, "superadmin_ticket", instance, {});
+		const ticket = seal({ typ: "xitter-superadmin-v1", iss: INSTANCE_ID, aud: instance, sub: viewer.screen_name, sub_id: viewer.id, name: viewer.name, iat: now, exp: now + TICKET_SECONDS, nonce: b64url(randomBytes(18)) });
 		return accountPage({
 			req,
 			viewer,
 			title: "Superadmin",
-			body: `<h1>Ticket for ${esc(instance)}</h1><p>It works once, within ${TICKET_SECONDS} seconds.</p>
-<form method="post" action="${esc(baseUrl(instance))}/federation/superadmin/accept"><input type="hidden" name="ticket" value="${esc(JSON.stringify(ticket))}"><button>Open ${esc(instance)}</button></form>`,
+			body: `<h1>Opening ${esc(instance)}</h1><p>If nothing happens, press the button. The link works once, within ${TICKET_SECONDS} seconds.</p>
+<form method="post" action="${esc(baseUrl(instance))}/federation/superadmin/accept" id="enter"><input type="hidden" name="ticket" value="${esc(JSON.stringify(ticket))}"><button>Open ${esc(instance)}</button></form>
+<script>document.getElementById("enter").submit()</script>`,
 		});
 	}
+	const refused = await reauthenticate(u, form);
+	if (refused) return homePage(req, viewer, refused);
 	if (url.pathname === "/federation/superadmin/emergency") {
 		const action = form.get("action") === "lift" ? "lift" : "block";
 		const reason = String(form.get("reason") ?? "").trim().slice(0, 500);
@@ -121,6 +123,7 @@ export async function superadminHomeRoute(req: Request, url: URL, viewer: Viewer
 }
 
 export async function endSuperadminVisits() {
+	await sql`delete from sessions where superadmin and expires_at <= now()`;
 	await sql`update users set role = null where instance is not null and role is not null
 		and not exists (select 1 from sessions s where s.user_id = users.id and s.superadmin and s.expires_at > now())`;
 }
@@ -170,7 +173,7 @@ export async function pollEmergencies() {
 	}
 }
 
-type Ticket = { typ: string; iss: string; aud: string; sub: string; sub_id: string; name: string; iat: number; exp: number; nonce: string; amr: string[] };
+type Ticket = { typ: string; iss: string; aud: string; sub: string; sub_id: string; name: string; iat: number; exp: number; nonce: string };
 
 export async function acceptTicket(req: Request, ip: string): Promise<Response> {
 	const refuse = (why: string, status = 403) => new Response(why, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
@@ -192,7 +195,6 @@ export async function acceptTicket(req: Request, ip: string): Promise<Response> 
 	const now = Math.floor(Date.now() / 1000);
 	if (!t || t.typ !== "xitter-superadmin-v1" || t.iss !== issuer || t.aud !== INSTANCE_ID) return refuse("That ticket isn't valid here.");
 	if (!Number.isSafeInteger(t.iat) || !Number.isSafeInteger(t.exp) || t.exp < now || t.exp - t.iat > 2 * TICKET_SECONDS || t.iat > now + 60) return refuse("That ticket has expired.");
-	if (!Array.isArray(t.amr) || !t.amr.includes("otp") || !t.amr.includes("pwd")) return refuse("That ticket wasn't issued after a two-factor check.");
 	if (typeof t.sub !== "string" || typeof t.sub_id !== "string" || !/^\d{1,19}$/.test(t.sub_id) || !superadminOf(issuer, t.sub, t.sub_id)) return refuse("That account isn't a superadmin.");
 	if (typeof t.nonce !== "string" || !/^[A-Za-z0-9_-]{24}$/.test(t.nonce)) return refuse("That ticket isn't valid here.");
 	const [fresh] = await sql`insert into superadmin_tickets (nonce) values (${t.nonce}) on conflict do nothing returning nonce`;
@@ -210,7 +212,6 @@ export async function acceptTicket(req: Request, ip: string): Promise<Response> 
 	const token = b64url(randomBytes(32));
 	const csrf = b64url(randomBytes(24));
 	await sql`insert into sessions (token, user_id, csrf, superadmin, expires_at, ip) values (${token}, ${id}::bigint, ${csrf}, true, now() + make_interval(mins => ${SESSION_MINUTES}), ${ip})`;
-	await sql`insert into audit_log (id, actor_id, action, target, detail) values (${newId()}::bigint, ${id}::bigint, 'superadmin_enter', ${handle}, ${JSON.stringify({ issuer, ip })}::text::jsonb)`;
 	const headers = new Headers({ location: "/admin" });
 	for (const c of sessionCookies({ token, csrf, userId: id })) headers.append("set-cookie", c);
 	return new Response(null, { status: 303, headers });

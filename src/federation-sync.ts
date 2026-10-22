@@ -3,11 +3,12 @@ import { join } from "node:path";
 import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { flagValue } from "./flags";
+import { pronounsValue } from "./pronouns";
 import { badgesOf } from "./users";
 import { FederationError, INSTANCE_ID, type Incoming, isBlocked, isPeer, peers, signedAnswer, signedFetch, signedRawAnswer } from "./federation";
 import { newId } from "./ids";
 import { replyLimited } from "./blocks";
-import { STAFF_HANDLE } from "./invites";
+import { STAFF_HANDLE, STRICT_HANDLE } from "./invites";
 import { saveMentions } from "./mentions";
 import { cleanText, oneLine } from "./text-clean";
 import { parseDecoration } from "./decorations";
@@ -74,7 +75,7 @@ const USER_COUNTS = ["followers", "following", "posts", "likes"];
 const POST_COUNTS = ["likes", "reposts", "replies", "quotes", "bookmarks", "views"];
 
 async function renderUser(id: string) {
-	const [u] = await sql`select id::text, screen_name, name, bio, location, website, avatar_url, banner_url, protected, created_at, verified_type, translator, flag, parody_label, decoration, ${badgesOf(sql`users.id`)} as badges from users
+	const [u] = await sql`select id::text, screen_name, name, bio, location, website, avatar_url, banner_url, protected, created_at, verified_type, translator, flag, pronouns, parody_label, decoration, org_badge_id::text, ${badgesOf(sql`users.id`)} as badges from users
 		where id = ${id}::bigint and instance is null and status <> 'suspended' and deactivated_at is null`;
 	if (!u) return { kind: "user", id, gone: true };
 	return {
@@ -89,9 +90,11 @@ async function renderUser(id: string) {
 		verified_type: u.verified_type ?? null,
 		translator: u.translator ?? null,
 		flag: u.flag ?? null,
+		pronouns: u.pronouns ?? null,
 		parody_label: u.parody_label ?? "None",
 		decoration: parseDecoration(u.decoration),
 		badges: (u.badges ?? []).map((b: { id: string; name: string }) => ({ name: b.name, url: `${PUBLIC_ORIGIN}/public/badge-${b.id}.png` })),
+		org_badge: u.org_badge_id ? `${PUBLIC_ORIGIN}/public/badge-${u.org_badge_id}.png` : null,
 		protected: u.protected,
 		created_at: new Date(u.created_at).toISOString(),
 		avatar: await renderMedia(isLocalMediaPath(u.avatar_url)),
@@ -156,11 +159,28 @@ async function renderPair(kind: "like" | "repost" | "follow", a: string, b: stri
 	return target ? { kind, actor: a, target, on: !!on, counts: target === ref(b) ? await postCounts(b) : null } : undefined;
 }
 
+async function renderAffiliation(kind: "affiliate" | "affiliation", a: string, b: string) {
+	const [org, member] = kind === "affiliate" ? [a, b] : [b, a];
+	const target = await canonicalOf("user", b);
+	if (!target) return undefined;
+	const [on] = await sql`select 1 from affiliations where org_id = ${org}::bigint and user_id = ${member}::bigint`;
+	if (kind === "affiliation") return { kind, actor: a, target, on: !!on };
+	const [asked] = on ? [] : await sql`select 1 from affiliation_requests where org_id = ${org}::bigint and user_id = ${member}::bigint`;
+	return { kind, actor: a, target, state: on ? "on" : asked ? "requested" : "off" };
+}
+
 async function eventsAfter(after: string, limit: number) {
 	const rows = await sql`select seq::text, kind, a::text, b::text from federation_outbox where seq > ${after}::bigint order by federation_outbox.seq limit ${limit}`;
 	const events: unknown[] = [];
 	for (const r of rows) {
-		const rendered = r.kind === "user" ? await renderUser(r.a) : r.kind === "post" ? await renderPost(r.a) : await renderPair(r.kind, r.a, r.b);
+		const rendered =
+			r.kind === "user"
+				? await renderUser(r.a)
+				: r.kind === "post"
+					? await renderPost(r.a)
+					: r.kind === "affiliate" || r.kind === "affiliation"
+						? await renderAffiliation(r.kind, r.a, r.b)
+						: await renderPair(r.kind, r.a, r.b);
 		if (rendered) events.push({ seq: r.seq, ...rendered });
 	}
 	const [{ max }] = await sql`select coalesce(max(seq), 0)::text as max from federation_outbox`;
@@ -279,7 +299,7 @@ export async function applyUser(instance: string, u: any): Promise<string | unde
 		if (local) await sql`delete from users where id = ${local}::bigint and instance = ${instance}`;
 		return undefined;
 	}
-	if (typeof u.screen_name !== "string" || !STAFF_HANDLE.test(u.screen_name) || /^\.+$/.test(u.screen_name)) return undefined;
+	if (typeof u.screen_name !== "string" || !STRICT_HANDLE.test(u.screen_name)) return undefined;
 	const pick = (value: unknown, allowed: string[]) => (typeof value === "string" && allowed.includes(value) ? value : null);
 	const badgeUrl = new RegExp(`^https?://${instance.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/public/badge-\\d{1,19}\\.png$`);
 	const badges = (Array.isArray(u.badges) ? u.badges : [])
@@ -290,8 +310,10 @@ export async function applyUser(instance: string, u: any): Promise<string | unde
 		verified_type: pick(u.verified_type, ["blue", "business", "government", "government_individual"]),
 		translator: pick(u.translator, ["translator", "moderator", "approver"]),
 		flag: flagValue(u.flag),
+		pronouns: pronounsValue(u.pronouns),
 		parody_label: pick(u.parody_label, ["Parody", "Commentary", "Fan"]) ?? "None",
 		remote_badges: JSON.stringify(badges),
+		org_badge: typeof u.org_badge === "string" && badgeUrl.test(u.org_badge) ? u.org_badge : null,
 		decoration: JSON.stringify(parseDecoration(u.decoration)),
 	};
 	const website = typeof u.website === "string" && /^https?:\/\/[^\s<>"]{1,200}$/.test(u.website) ? u.website : "";
@@ -315,7 +337,7 @@ export async function applyUser(instance: string, u: any): Promise<string | unde
 	const avatar = await remoteMedia(instance, id, u.avatar, null, null);
 	const banner = await remoteMedia(instance, id, u.banner, null, null);
 	await sql`update users set avatar_url = ${avatar ? `/media/${avatar}` : null}, banner_url = ${banner ? `/media/banner/${banner}` : null},
-		remote_counts = ${countsOf(u.counts, USER_COUNTS)}::text::jsonb, verified_type = ${looks.verified_type}, translator = ${looks.translator}, flag = ${looks.flag}, parody_label = ${looks.parody_label}, remote_badges = ${looks.remote_badges}::text::jsonb, decoration = nullif(${looks.decoration}, 'null')::jsonb
+		remote_counts = ${countsOf(u.counts, USER_COUNTS)}::text::jsonb, verified_type = ${looks.verified_type}, translator = ${looks.translator}, flag = ${looks.flag}, pronouns = ${looks.pronouns}, parody_label = ${looks.parody_label}, remote_badges = ${looks.remote_badges}::text::jsonb, remote_org_badge = ${looks.org_badge}, decoration = nullif(${looks.decoration}, 'null')::jsonb
 		where id = ${id}::bigint`;
 	if (u.protected) await sql`delete from posts where user_id = ${id}::bigint`;
 	return id;
@@ -426,14 +448,74 @@ async function applyPair(instance: string, e: any) {
 	await sql`insert into federation_outbox (kind, a) select 'post', p.id from posts p join users u on u.id = p.user_id where p.id = ${post}::bigint and u.instance is null`;
 }
 
+async function applyAffiliation(instance: string, e: any) {
+	const fromOrg = e.kind === "affiliate";
+	const actor = await resolveUser(ref(String(e.actor ?? ""), instance));
+	const other = actor && (await resolveUser(e.target));
+	if (!actor || !other || actor === other) return;
+	const [org, member] = fromOrg ? [actor, other] : [other, actor];
+	const on = fromOrg ? e.state === "on" : e.on === true;
+	const [o] = await sql`select instance, verified_type in ('business', 'government') as is_org from users where id = ${org}::bigint`;
+	const [m] = await sql`select instance from users where id = ${member}::bigint`;
+	if (!o || !m) return;
+	const pair = sql`org_id = ${org}::bigint and user_id = ${member}::bigint`;
+	const join = () => (o.is_org ? sql`insert into affiliations (org_id, user_id) values (${org}::bigint, ${member}::bigint) on conflict do nothing`.catch(() => {}) : undefined);
+	if (!o.instance) {
+		if (fromOrg) return;
+		if (!on) {
+			await sql`delete from affiliation_requests where ${pair}`;
+			await sql`delete from affiliations where ${pair}`;
+			return;
+		}
+		const asked = await sql`delete from affiliation_requests where ${pair} returning 1`;
+		if (asked.length) await join();
+		return;
+	}
+	if (!m.instance) {
+		if (!fromOrg || e.state === "on") return;
+		if (e.state === "requested") {
+			if (o.is_org && !(await blockedBetween(org, member)) && !(await sql`select 1 from affiliations where ${pair}`).length)
+				await sql`insert into affiliation_requests (org_id, user_id) values (${org}::bigint, ${member}::bigint) on conflict do nothing`;
+			return;
+		}
+		await sql`delete from affiliation_requests where ${pair}`;
+		await sql`delete from affiliations where ${pair}`;
+		return;
+	}
+	if (o.instance === m.instance) {
+		await (on ? join() : sql`delete from affiliations where ${pair}`);
+		return;
+	}
+	const side = fromOrg ? "org" : "member";
+	if (!on) {
+		await sql`delete from affiliation_votes where ${pair} and side = ${side}`;
+		await sql`delete from affiliations where ${pair}`;
+		return;
+	}
+	await sql`insert into affiliation_votes (org_id, user_id, side) values (${org}::bigint, ${member}::bigint, ${side}) on conflict do nothing`;
+	const [votes] = await sql`select count(*)::int as n from affiliation_votes where ${pair}`;
+	if (votes.n === 2) await join();
+}
+
 async function applyEvent(instance: string, e: any) {
 	if (e?.kind === "user") return void (await applyUser(instance, e));
 	if (e?.kind === "post") return void (await applyPost(instance, e));
 	if (e?.kind === "like" || e?.kind === "repost" || e?.kind === "follow") return applyPair(instance, e);
+	if (e?.kind === "affiliate" || e?.kind === "affiliation") return applyAffiliation(instance, e);
 }
 
 const pulling = new Set<string>();
 const wanted = new Set<string>();
+const known = new Set<string>();
+
+// An instance that is down, or doesn't take us yet, was asked again every 15
+// seconds for as long as it failed, each time with a request out and a write
+// here. After a failure the timed pulls wait twice as long each time, up to
+// PULL_BACKOFF_MAX; a pull that works, or a poke from the instance, ends that.
+const PULL_BACKOFF_BASE = 15_000;
+const PULL_BACKOFF_MAX = 15 * 60_000;
+const failing = new Map<string, { failures: number; until: number }>();
+const backingOff = (instance: string) => (failing.get(instance)?.until ?? 0) > Date.now();
 
 export async function pullFrom(instance: string): Promise<number> {
 	if (pulling.has(instance)) {
@@ -443,13 +525,17 @@ export async function pullFrom(instance: string): Promise<number> {
 	pulling.add(instance);
 	let applied = 0;
 	try {
-		await sql`insert into federation_peers (instance) values (${instance}) on conflict do nothing`;
+		if (!known.has(instance)) {
+			await sql`insert into federation_peers (instance) values (${instance}) on conflict do nothing`;
+			known.add(instance);
+		}
 		for (let page = 0; page < 20; page++) {
 			const [peer] = await sql`select cursor::text from federation_peers where instance = ${instance}`;
 			const r = await signedFetch(instance, "GET", `/federation/v1/events?after=${peer.cursor}&limit=${PAGE}`);
 			if (r.status !== 200) throw new FederationError(`${instance} answered ${r.status}`);
 			const doc = r.json();
 			if (!Array.isArray(doc?.events) || !/^\d{1,19}$/.test(String(doc.next))) throw new FederationError(`${instance} sent a malformed page`);
+			failing.delete(instance);
 			const previous = budgets.get(instance);
 			const budget = previous && Date.now() - previous.start <= 3_600_000 ? previous : { start: Date.now(), used: 0 };
 			budgets.set(instance, budget);
@@ -472,6 +558,8 @@ export async function pullFrom(instance: string): Promise<number> {
 			if (!doc.more) break;
 		}
 	} catch (e) {
+		const failures = (failing.get(instance)?.failures ?? 0) + 1;
+		failing.set(instance, { failures, until: Date.now() + Math.min(PULL_BACKOFF_BASE * 2 ** failures, PULL_BACKOFF_MAX) });
 		await sql`update federation_peers set last_error = ${e instanceof Error ? e.message.slice(0, 500) : String(e)}, last_error_at = now() where instance = ${instance}`;
 	} finally {
 		pulling.delete(instance);
@@ -483,6 +571,8 @@ export async function pullFrom(instance: string): Promise<number> {
 const pokes = new Map<string, ReturnType<typeof setTimeout>>();
 function pokeSoon(instance: string) {
 	if (pokes.has(instance) || !isPeer(instance)) return;
+	// it answers again
+	failing.delete(instance);
 	pokes.set(
 		instance,
 		setTimeout(() => {
@@ -637,7 +727,7 @@ export function startFederationSync() {
 	setInterval(() => {
 		tick++;
 		void pokePeers().catch(() => {});
-		if (tick % 5 === 0) for (const p of peers()) void pullFrom(p.id);
+		if (tick % 5 === 0) for (const p of peers()) if (!backingOff(p.id)) void pullFrom(p.id);
 		if (tick % 200 === 10) void backfillMedia().catch((e) => console.error("federation: media backfill:", e instanceof Error ? e.message : e));
 		if (tick % 3600 === 0) void sql`delete from federation_outbox where created_at < now() - interval '60 days'`.catch(() => {});
 	}, 3000).unref();

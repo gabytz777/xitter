@@ -2,6 +2,8 @@
 // (status, media_ids, reply target, ...); it is kept as sent and replayed when
 // the time comes.
 
+import { conversationCard } from "./conversation-cards";
+import { checkConversationCard } from "./conversation-card-moderation";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
 import { isId, newId } from "./ids";
@@ -26,13 +28,18 @@ const ids = (value: unknown): string[] => (Array.isArray(value) ? value.map(Stri
 // The root request is the first post; thread_tweets contains only its replies.
 // Keep the composer's rich-text/media metadata for editing, even where posting
 // currently supports only the text, quote and uploaded attachments.
-function cleanPart(value: unknown): Vars {
+function cleanPart(value: unknown, draft = false): Vars {
 	const r = value && typeof value === "object" && !Array.isArray(value) ? value as Vars : {};
 	const out: Vars = {
 		status: typeof r.status === "string" ? r.status : "",
 		media_ids: ids(r.media_ids).slice(0, 4),
 		exclude_reply_user_ids: ids(r.exclude_reply_user_ids).slice(0, 50),
 	};
+	if (r.xitter_conversation_card !== undefined) {
+		try { out.xitter_conversation_card = conversationCard(r.xitter_conversation_card, () => false, draft); }
+		catch (error) { throw new PostError(error instanceof Error ? error.message : "Invalid conversation card.", 214); }
+		if (r.attachment_url || r.card_uri) throw new PostError("Conversation cards cannot be combined with quotes or other cards.", 214);
+	}
 	if (Array.isArray(r.media_ids) && (r.media_ids.length > 4 || r.media_ids.some((id: unknown) => !isId(id))))
 		throw new PostError("A post can have up to four valid attachments.", 186);
 	if (isId(r.in_reply_to_status_id)) out.in_reply_to_status_id = r.in_reply_to_status_id;
@@ -43,14 +50,14 @@ function cleanPart(value: unknown): Vars {
 	return out;
 }
 
-function cleanRequest(request: Vars | undefined): Vars {
-	const out = cleanPart(request);
+function cleanRequest(request: Vars | undefined, kind: "scheduled" | "draft" = "scheduled"): Vars {
+	const out = cleanPart(request, kind === "draft");
 	const thread = request?.thread_tweets;
 	if (thread != null && (!Array.isArray(thread) || thread.length > 25))
 		throw new PostError("A thread can have up to 26 posts.", 186);
 	out.thread_tweets = (thread ?? []).map((part: unknown) => {
 		if (!part || typeof part !== "object" || Array.isArray(part)) throw new PostError("Invalid thread post.", 170);
-		return cleanPart(part);
+		return cleanPart(part, kind === "draft");
 	});
 	if (JSON.stringify(out).length > 300_000) throw new PostError("That post is too large to keep.", 186);
 	return out;
@@ -92,11 +99,12 @@ function unsentMedia(m: MediaRow) {
 
 function item(row: any, media: Map<string, ReturnType<typeof unsentMedia>>) {
 	const request = row.request as Vars;
+	const attachments = [...new Set(mediaIdsOf(request))].flatMap((id) => media.has(id) ? [media.get(id)!] : []);
 	return {
 		rest_id: row.id,
-		...(row.kind === "scheduled" ? { scheduling_info: { execute_at: Math.floor(new Date(row.execute_at).getTime() / 1000), state: "Scheduled" } } : {}),
+		...(row.kind === "scheduled" ? { scheduling_info: { execute_at: new Date(row.execute_at).toISOString(), state: "Scheduled" } } : {}),
 		tweet_create_request: { ...request, type: "PostTweetRequest" },
-		media_entities: [...new Set(mediaIdsOf(request))].flatMap((id) => media.has(id) ? [media.get(id)!] : []),
+		...(attachments.length ? { media_entities: attachments } : {}),
 	};
 }
 
@@ -113,23 +121,31 @@ function executeAt(vars: Vars): Date {
 
 async function check(userId: string, request: Vars, kind: "scheduled" | "draft", db: typeof sql = sql, moderate = true) {
 	const [author] = await db`select status, deactivated_at from users where id = ${userId}::bigint`;
-	if ((author?.status !== "active" && author?.status !== "limited") || author?.deactivated_at) throw new PostError("Your account can't post right now.", 326);
 	const usedMedia = new Set<string>();
-	for (const part of parts(request)) {
+	const cardMedia = new Set<string>();
+	let part: Vars, id: string, media: { id: string; kind: string }[], videos: Set<string>, checkedMedia: Set<string>;
+	if ((author?.status !== "active" && author?.status !== "limited") || author?.deactivated_at) throw new PostError("Your account can't post right now.", 326);
+	for (part of parts(request)) {
 		if (kind === "scheduled" && !part.status.trim() && !part.media_ids.length) throw new PostError("Your post is empty.", 170);
 		await checkLength(userId, part.status.trim(), db);
 		if (moderate) await refuseHate(userId, part.status.trim());
 		quoteOf(part);
-		for (const id of part.media_ids) {
+		if (part.xitter_conversation_card) {
+			if (moderate) part.xitter_conversation_card = await checkConversationCard(userId, part.xitter_conversation_card, kind === "draft");
+			if ((kind === "scheduled" && part.media_ids.length !== 1) || part.media_ids.length > 1) throw new PostError("A conversation card needs exactly one image or video before publishing.", 214);
+			for (id of part.media_ids) cardMedia.add(id);
+		}
+		for (id of part.media_ids) {
 			if (kind === "scheduled" && usedMedia.has(id)) throw new PostError("An attachment can only be used once in a thread.", 186);
 			usedMedia.add(id);
 		}
 	}
-	if (kind === "scheduled" && usedMedia.size) {
-		const media = await db`select id::text, kind from media where id = any(${sql.array([...usedMedia], "INT8")})
-			and user_id = ${userId}::bigint and post_id is null and state = 'ready'`;
-		if (media.length !== usedMedia.size) throw new PostError("Attachments must be your own unused, finished uploads.", 186);
-		const videos = new Set(media.filter((m: any) => m.kind === "video").map((m: any) => m.id));
+	checkedMedia = kind === "scheduled" ? usedMedia : cardMedia;
+	if (checkedMedia.size) {
+		media = await db`select id::text, kind from media where id = any(${sql.array([...checkedMedia], "INT8")})
+			and user_id = ${userId}::bigint and post_id is null and not detached and state = 'ready'`;
+		if (media.length !== checkedMedia.size) throw new PostError("Attachments must be your own unused, finished uploads.", cardMedia.size ? 214 : 186);
+		videos = new Set(media.filter((m) => m.kind === "video").map((m) => m.id));
 		if (parts(request).some((part) => part.media_ids.length > 1 && part.media_ids.some((id: string) => videos.has(id))))
 			throw new PostError("A video goes alone in a post.", 186);
 	}
@@ -151,7 +167,7 @@ function quotaError(kind: "scheduled" | "draft"): PostError {
 }
 
 async function create(v: Viewer, vars: Vars, kind: "scheduled" | "draft") {
-	const request = cleanRequest(vars.post_tweet_request);
+	const request = cleanRequest(vars.post_tweet_request, kind);
 	const at = kind === "scheduled" ? executeAt(vars) : null;
 	await check(v.id, request, kind);
 	const id = newId();
@@ -174,7 +190,7 @@ async function edit(v: Viewer, vars: Vars, kind: "scheduled" | "draft") {
 	if (!isId(id)) throw new PostError("Not found.", 144);
 	const [existing] = await sql`select id from scheduled_posts where id = ${id}::bigint and user_id = ${v.id}::bigint and kind = ${kind}`;
 	if (!existing) throw new PostError("Not found.", 144);
-	const request = cleanRequest(vars.post_tweet_request);
+	const request = cleanRequest(vars.post_tweet_request, kind);
 	const at = kind === "scheduled" ? executeAt(vars) : null;
 	await check(v.id, request, kind);
 	await sql.begin(async (tx) => {
@@ -272,6 +288,7 @@ export async function runDue(lookupMention: (handle: string) => Promise<unknown>
 					for (const part of parts(request)) {
 						const id = await createPost(row.user_id, part.status.trim(), { replyToId: replyTo, quoteId: quoteOf(part), db: publication, skipPreview: true });
 						await attachMedia(row.user_id, id, part.media_ids, { db: publication, strict: true });
+						if (part.xitter_conversation_card) await publication`update posts set conversation_card = ${JSON.stringify(part.xitter_conversation_card)}::text::jsonb where id = ${id}::bigint`;
 						if (part.possibly_sensitive) await publication`update posts set sensitive = true where id = ${id}::bigint`;
 						replyTo = id;
 					}

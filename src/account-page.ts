@@ -1,13 +1,13 @@
 import { parseCookies, type Viewer } from "./auth";
 import { loadBuild } from "./build";
 import { readCached } from "./client-cache";
+import { sql } from "./db";
 import { settings } from "./settings";
 import { menuLinks } from "./tidy";
 
 export const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
 type Theme = "light" | "dim" | "dark";
-const THEMES: Record<string, Theme> = { "0": "light", "1": "dim", "2": "dark" };
 
 const TOKENS: Record<Theme, Record<string, string>> = {
 	light: {
@@ -77,13 +77,13 @@ const fontFaces = () => {
 };
 
 const CSS = `
-:root{${vars("light")};--accent:rgb(29 155 240);--accent-hover:rgb(26 140 216);--danger:#f4212e;--success:#00ba7c;--warning:#ffd400}
+:root{${vars("light")};--accent:rgb(29 155 240);--accent-fill:var(--accent);--accent-hover:rgb(26 140 216);--danger:#f4212e;--success:#00ba7c;--warning:#ffd400}
 @media (prefers-color-scheme:dark){:root:not([data-theme]){${vars("dark")}}}
 :root[data-theme="dim"]{${vars("dim")}}
 :root[data-theme="dark"]{${vars("dark")}}
 *,*::before,*::after{box-sizing:border-box}
 html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/20px ${FONT};overflow-wrap:break-word}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/20px var(--font, ${FONT});overflow-wrap:break-word}
 .col{width:min(600px,100%);min-height:100vh;margin:0 auto;border-inline:1px solid var(--border);display:flex;flex-direction:column}
 .bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:20px;min-height:53px;padding:0 16px;background:var(--bar);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
 .back{display:grid;place-items:center;width:36px;height:36px;margin-left:-8px;border-radius:50%;color:var(--text);flex:none}
@@ -96,7 +96,7 @@ body{margin:0;background:var(--bg);color:var(--text);font:15px/20px ${FONT};over
 .tabs a{flex:1 0 auto;display:flex;justify-content:center;padding:0 16px;color:var(--muted);font-weight:500;text-decoration:none}
 .tabs span{position:relative;display:block;padding:16px 0;white-space:nowrap}
 .tabs a[aria-current]{color:var(--text);font-weight:700}
-.tabs a[aria-current] span::after{content:"";position:absolute;left:0;right:0;bottom:0;height:4px;border-radius:9999px;background:var(--accent)}
+.tabs a[aria-current] span::after{content:"";position:absolute;left:0;right:0;bottom:0;height:4px;border-radius:9999px;background:var(--accent-fill,var(--accent))}
 main{flex:1;padding:16px;display:flex;flex-direction:column;gap:12px}
 h1,h2,p,pre{margin:0}
 h1{font-size:23px;line-height:28px;font-weight:800;text-wrap:balance}
@@ -117,7 +117,7 @@ form.row{display:flex}
 input,select,textarea{width:100%;min-height:44px;padding:11px 12px;border:1px solid var(--field);border-radius:4px;background:var(--bg);color:inherit;font:inherit;font-size:16px}
 textarea{min-height:120px;resize:vertical}
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-color:transparent}
-button{min-height:36px;padding:0 16px;border:1px solid transparent;border-radius:9999px;background:var(--accent);color:#fff;font:inherit;font-weight:700;cursor:pointer;white-space:nowrap;transition:scale 200ms ease-out}
+button{min-height:36px;padding:0 16px;border:1px solid transparent;border-radius:9999px;background:var(--accent-fill,var(--accent));color:var(--accent-text,#fff);font:inherit;font-weight:700;cursor:pointer;white-space:nowrap;transition:scale 200ms ease-out}
 button:active:not(:disabled){scale:.97}
 button.secondary{background:transparent;border-color:var(--outline);color:var(--text)}
 button.danger{background:var(--danger);color:#fff}
@@ -162,11 +162,24 @@ type PageOptions = {
 	cache?: string;
 	referrer?: string | null;
 	css?: string;
+	head?: string;
 };
 
-export async function accountPage({ req, title, body, viewer, status = 200, back, cache = "no-store", referrer = "no-referrer", css = "" }: PageOptions): Promise<Response> {
+export async function accountPage({ req, title, body, viewer, status = 200, back, cache = "no-store", referrer = "no-referrer", css = "", head = "" }: PageOptions): Promise<Response> {
+	const { accountVars, accentVars } = await import("./themes/css");
+	const { nightModeCookies } = await import("./themes/api");
+	const { paletteOf, readPrefs } = await import("./themes/validate");
 	const name = settings().instance_name;
-	const theme = THEMES[parseCookies(req).night_mode ?? ""];
+	const night = parseCookies(req).night_mode;
+	let look: ReturnType<typeof readPrefs>["look"] = null;
+	let extra = "";
+	if (viewer) {
+		const [row] = await sql`select preferences from users where id = ${viewer.id}::bigint`;
+		const prefs = readPrefs(row?.preferences);
+		look = prefs.look;
+		extra = look?.kind === "painted" ? `:root[data-theme]{${accountVars(look.theme)}}` : `:root{${accentVars(prefs.accent)}}`;
+	}
+	const theme = paletteOf(look, night);
 	const path = new URL(req.url).pathname;
 	const links = viewer ? await menuLinks(viewer.id) : [];
 	const tabs = links.length
@@ -183,7 +196,8 @@ export async function accountPage({ req, title, body, viewer, status = 200, back
 <meta name="color-scheme" content="${theme ? TOKENS[theme].scheme : "light dark"}">
 <title>${esc(title)} · ${esc(name)}</title>
 <link rel="icon" type="image/png" href="/public/favicon.png">
-<style>${fontFaces()}${CSS}${css}</style>
+${head}
+<style>${fontFaces()}${CSS}${extra}${css}</style>
 </head>
 <body>
 <div class="col">
@@ -198,7 +212,8 @@ ${body}
 </html>`;
 	// never inside another site's frame: these pages hold one-click actions
 	// (authorizing an app, removing 2FA) a hidden frame could be clicked into
-	const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8", "cache-control": cache, "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" };
-	if (referrer) headers["referrer-policy"] = referrer;
+	const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": cache, "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" });
+	if (referrer) headers.set("referrer-policy", referrer);
+	if (viewer) for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
 	return new Response(html, { status, headers });
 }

@@ -1,7 +1,7 @@
 // Settings > Your account: password, deactivation. Username and language go
 // through account/settings.json (rest.ts) and use the helpers here.
 import { hateInName } from "./hate";
-import { handleHeld } from "./held";
+import { forgetHeld, handleHeld } from "./held";
 import { automodStrike, shutOut } from "./moderation";
 import { blockedNameIn, suspendForName } from "./names";
 import { isReserved, usernameProblem } from "./invites";
@@ -54,6 +54,7 @@ export async function changeUsername(viewer: Viewer, wanted: string): Promise<st
 	}
 	await sql`insert into username_changes (user_id, old_name, new_name) values (${viewer.id}::bigint, ${viewer.screen_name}, ${wanted})`;
 	await sql`update users set screen_name = ${wanted} where id = ${viewer.id}::bigint`;
+	forgetHeld();
 	return undefined;
 }
 

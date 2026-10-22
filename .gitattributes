@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers, where a CR at the end of the
+# shebang line makes "exec ... no such file or directory": keep them LF even
+# in checkouts that convert line endings (core.autocrlf on Windows).
+*.sh text eol=lf

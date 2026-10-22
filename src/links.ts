@@ -154,6 +154,47 @@ async function fetchPage(url: string): Promise<string | undefined> {
 	return new TextDecoder().decode(Buffer.concat(chunks).subarray(0, MAX_HTML));
 }
 
+// YouTube answers proxied page fetches with a consent wall, so its videos are
+// described from oEmbed instead, and their cards play the video in place.
+const YOUTUBE_HOST = /^(?:www\.|m\.|music\.)?(?:youtube\.com|youtube-nocookie\.com)$/;
+const YOUTUBE_ID = /^[\w-]{11}$/;
+
+export function youtubeOf(url: string): { id: string; start: number } | undefined {
+	try {
+		const u = new URL(url);
+		const host = u.hostname.toLowerCase();
+		const path = u.pathname.split("/").filter(Boolean);
+		const id =
+			host === "youtu.be" ? path[0] : YOUTUBE_HOST.test(host) ? (path[0] === "watch" ? u.searchParams.get("v") : ["shorts", "embed", "live", "v"].includes(path[0]) ? path[1] : undefined) : undefined;
+		if (!id || !YOUTUBE_ID.test(id)) return undefined;
+		const t = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/.exec(u.searchParams.get("t") ?? u.searchParams.get("start") ?? "");
+		const start = t ? Number(t[1] ?? 0) * 3600 + Number(t[2] ?? 0) * 60 + Number(t[3] ?? 0) : 0;
+		return { id, start: Math.min(start, 360_000) };
+	} catch {
+		return undefined;
+	}
+}
+
+async function youtubePreview(url: string, id: string): Promise<Preview | undefined> {
+	const oembed = `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}`;
+	const res = await fetch(proxied(oembed), { signal: AbortSignal.timeout(8000), headers: { accept: "application/json" } }).catch(() => undefined);
+	if (!res?.ok) {
+		await res?.body?.cancel().catch(() => {});
+		return undefined;
+	}
+	const o: any = await res.json().catch(() => undefined);
+	if (typeof o?.title !== "string" || !o.title) return undefined;
+	return {
+		url,
+		title: clip(decode(o.title), 200),
+		description: typeof o.author_name === "string" ? clip(decode(o.author_name), 300) : "",
+		site: "YouTube",
+		image: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+		width: 480,
+		height: 360,
+	};
+}
+
 const inFlight = new Set<string>();
 const RETRY_FAILED = "1 day";
 const REFRESH = "7 days";
@@ -162,9 +203,10 @@ export async function fetchPreview(url: string): Promise<void> {
 	if (!previewable(url) || inFlight.has(url) || inFlight.size > 50) return;
 	inFlight.add(url);
 	try {
-		const html = await fetchPage(url);
+		const youtube = youtubeOf(url);
+		const html = youtube ? undefined : await fetchPage(url);
 		const shell = html && isPeer(new URL(url).host) && !/<meta\b[^>]*og:title/i.test(html.slice(0, 300_000));
-		const p = html && !shell ? parsePreview(url, html) : undefined;
+		const p = youtube ? await youtubePreview(url, youtube.id) : html && !shell ? parsePreview(url, html) : undefined;
 		await sql`insert into link_previews (url, ok, title, description, site, image, width, height, fetched_at)
 			values (${url}, ${!!p}, ${p?.title ?? ""}, ${p?.description ?? ""}, ${p?.site ?? ""}, ${p?.image ?? null}, ${p?.width ?? 0}, ${p?.height ?? 0}, now())
 			on conflict (url) do update set ok = excluded.ok, title = excluded.title, description = excluded.description, site = excluded.site,
@@ -200,6 +242,14 @@ export function linkCard(p: Preview) {
 		vanity_url: { ...str(domain), scribe_key: "vanity_url" },
 		card_url: { ...str(p.url), scribe_key: "card_url" },
 	};
+	const youtube = youtubeOf(p.url);
+	if (youtube) {
+		const player = image ?? { url: proxied(`https://i.ytimg.com/vi/${youtube.id}/hqdefault.jpg`), width: 480, height: 360 };
+		values.player_url = str(`https://www.youtube-nocookie.com/embed/${youtube.id}${youtube.start ? `?start=${youtube.start}` : ""}`);
+		values.player_width = str("1280");
+		values.player_height = str("720");
+		for (const key of ["player_image", "player_image_large", "player_image_original"]) values[key] = img(player);
+	}
 	if (image)
 		for (const key of ["thumbnail_image", "thumbnail_image_large", "thumbnail_image_original", "summary_photo_image", "summary_photo_image_large", "summary_photo_image_original", "photo_image_full_size", "photo_image_full_size_large", "photo_image_full_size_original"])
 			values[key] = img(image);
@@ -208,7 +258,7 @@ export function linkCard(p: Preview) {
 		legacy: {
 			binding_values: Object.entries(values).map(([key, value]) => ({ key, value })),
 			card_platform: { platform: { audience: { name: "production" }, device: { name: "Swift", version: "12" } } },
-			name: large ? "summary_large_image" : "summary",
+			name: youtube ? "player" : large ? "summary_large_image" : "summary",
 			url: p.url,
 			user_refs_results: [],
 		},

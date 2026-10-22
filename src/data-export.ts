@@ -76,7 +76,7 @@ async function build(tx: SQL, viewer: Viewer, exportId: string) {
 		'generated_at', ${new Date().toISOString()}::text,
 		'account', (select to_jsonb(x) from (select screen_name, name, bio, location, website, email, language, protected, ${iso(sql`created_at`)} as created_at
 			from users where id = ${id}::bigint) x),
-		'posts', ${list(sql`select id::text as id, text, ${iso(sql`created_at`)} as created_at, reply_to_id::text as reply_to_id, poll_id::text as poll_id from posts where user_id = ${id}::bigint order by id`)},
+		'posts', ${list(sql`select id::text as id, text, ${iso(sql`created_at`)} as created_at, reply_to_id::text as reply_to_id, poll_id::text as poll_id, conversation_card, conversation_card_post_id::text from posts where user_id = ${id}::bigint order by id`)},
 		'drafts', ${list(sql`select id::text as id, request, ${iso(sql`created_at`)} as created_at from scheduled_posts where user_id = ${id}::bigint and kind = 'draft' order by id`)},
 		'scheduled_posts', ${list(sql`select id::text as id, request, ${iso(sql`execute_at`)} as execute_at, ${iso(sql`created_at`)} as created_at from scheduled_posts where user_id = ${id}::bigint and kind = 'scheduled' order by execute_at, id`)},
 		'polls', ${list(sql`select p.id::text as id, p.choices, p.duration_minutes,

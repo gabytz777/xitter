@@ -17,7 +17,7 @@ export const FLAG_PICKER_CSS = `#xitter-flags{padding:12px 0;font-family:Twitter
 #xitter-flags .xf-list{display:flex;flex-wrap:wrap;gap:6px}
 #xitter-flags .xf-flag{display:grid;place-items:center;width:36px;height:36px;padding:0;border:2px solid rgba(128,128,128,.35);border-radius:6px;background:none;color:rgb(113,118,123);font-size:12px;cursor:pointer}
 #xitter-flags .xf-flag img{width:22px;height:22px;border-radius:3px}
-#xitter-flags .xf-flag.xf-on{border-color:rgb(29,155,240)}`;
+#xitter-flags .xf-flag.xf-on{border-color:var(--xt-accent,#1d9bf0)}`;
 
 export const FLAG_PICKER_SCRIPT = `(function(){
 	var X=window.__XITTER__||{flag:"",flags:[],maxFlags:4};

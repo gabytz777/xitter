@@ -1,6 +1,7 @@
 {
 	"name": "xitter",
 	"private": true,
+	"version": "1.0.0",
 	"license": "AGPL-3.0-only",
 	"type": "module",
 	"scripts": {
@@ -12,10 +13,11 @@
 	},
 	"devDependencies": {
 		"@types/bun": "latest",
-		"@types/nodemailer": "6.4.17"
+		"@types/nodemailer": "6.4.17",
+		"emusks": "^2.3.19"
 	},
 	"dependencies": {
-		"emusks": "^2.3.19",
+		"eld": "2.1.0",
 		"nodemailer": "6.9.16"
 	}
 }

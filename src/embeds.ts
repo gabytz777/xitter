@@ -71,7 +71,7 @@ ${tags.map(([attr, key, value]) => `<meta ${attr}="${key}" content="${esc(value)
 <link rel="canonical" href="${esc(url)}">
 <link rel="alternate" type="application/json+oembed" href="${esc(oembed)}" title="${esc(o.title)}">
 <meta http-equiv="refresh" content="0;url=/">
-</head><body style="background:#000;color:#e7e9ea;font-family:sans-serif"><p><a href="/" style="color:#1d9bf0">Sign in to ${esc(name)}</a> to see this.</p></body></html>`;
+</head><body style="background:#000;color:#e7e9ea;font-family:sans-serif"><p><a href="/" style="color:var(--xt-accent,#1d9bf0)">Sign in to ${esc(name)}</a> to see this.</p></body></html>`;
 	return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 }
 

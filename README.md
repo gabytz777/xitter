@@ -58,6 +58,8 @@ copy during setup, and it stays on that machine.
   sign-in dialog offers them in the username field and with a button, and
   `/account/passkey` has one too; changing or resetting the password removes
   them), password reset by email
+- Moving an account between instances (Settings > Move account,
+  `/account/migrate`): see [Moving accounts](#moving-accounts)
 - Reporting posts and accounts
 - Account analytics (Overview, Content and each post's page) from the
   instance's own counts
@@ -66,10 +68,39 @@ copy during setup, and it stays on that machine.
 - Branded hashtags (X's branded likes and hashmoji, Admin > Branded
   hashtags): for a set time, liking a post with the hashtag plays a custom
   Lottie animation, and the hashtag shows an emoji (optionally with hashfetti)
+- Conversation cards: the composer’s conversation-card icon adds up to four hashtag buttons
+  with prefilled post text, a title and an optional thank-you message, destination
+  URL and display URL to one image, GIF or video. The editor previews the attached media, title and buttons
+  together; its crop control opens the client’s image editor for still images.
+  Published cards use the client’s native image/video conversation-card design.
+  Each button opens an editable post carrying the original card; hashtag fields
+  add the # prefix automatically. Post text is optional, including the prefilled
+  text for each choice (which defaults to its hashtag). Drafts and scheduled
+  posts preserve card settings and media. Incomplete cards can be saved as drafts;
+  scheduling requires a valid card with one finished upload. Empty-text card
+  shares include the title and hashtags when federation is enabled.
+- Import from X (off by default; Admin > Settings, feature switches, then
+  Settings > Your account > Import from X): upload the archive x.com makes
+  (up to `ARCHIVE_MAX_MB`, default 1024) and its posts, threads, photos,
+  videos and profile come over with their original dates and X ids. Imported
+  posts pass the same length limit, automod and blocked phrases as new ones
+  (those that don't are left out and counted) and count toward the post rate
+  limit, so the import waits on it. Retweets and likes stay behind, mentions
+  stay as text, imported posts aren't sent to other instances, and an upload
+  that isn't imported within a day is deleted. By default only accounts a
+  week old can import, and staff approve each import first (Admin > Settings,
+  Import from X)
 - Polls with a photo on each choice
+- YouTube links (videos, Shorts, live, youtu.be, with `t=` start times) become
+  player cards: the thumbnail comes through `EMBED_PROXY`, and pressing play
+  loads the video in place from youtube-nocookie.com
 - Previews when a public post or profile is shared in other apps (Discord,
   Slack, iMessage…): OpenGraph and Twitter card tags and oEmbed, for active,
   unprotected accounts only. Admin > Settings > Features switches them off
+- Dim (X dropped it from Display settings) and custom themes, including
+  gradients, per-token colours, and Google Fonts served from this instance;
+  Settings > Display or /account/theme. Organisation profile decor keeps its
+  own look on the profile column.
 - Staff labels under posts, as X shows them: Visibility limited (also kept out
   of For you and search), Misleading, Stay informed, Get the latest, Legally
   required notice; staff can also set the counts a post or profile shows
@@ -83,7 +114,10 @@ copy during setup, and it stays on that machine.
 - Connected apps: developers register a public client at `/account/apps/developer`,
   users approve read or read-and-write access with OAuth 2 authorization code
   and mandatory PKCE, and revoke access at `/account/apps`. Tokens expire after
-  30 days; `/api` documents the flow.
+  30 days; `/api` documents the flow. Apps can skip registering on each
+  instance by using the URL of a client ID metadata document as their
+  `client_id`, so one app signs in with one tap on every Xitter
+  (`/.well-known/oauth-authorization-server` advertises it).
 - An admin panel at `/admin`: users, standing (restrict, limit, suspend),
   badges (blue, gold organisation, grey government organisation or official),
   translator globes (blue translator, gold translator moderator, yellow approver),
@@ -169,6 +203,12 @@ any variable from the Configuration table can be added to `.env`.
 `FETCH_CLIENT=0` skips the first-start download; `docker compose exec app bun
 scripts/fetch-client.ts --latest` re-pins the build.
 
+The image has a health check: `/healthz` answers `ok` while the server runs
+and reaches its database, and `docker compose ps` shows the app as
+`unhealthy` when it doesn't. Docker doesn't restart unhealthy containers by
+itself; a watcher such as
+[autoheal](https://github.com/willfarrell/docker-autoheal) can.
+
 For an optional PgBouncer connection pool, add `DB_HOST=pool` and
 `DB_PORT=6432` to `.env`, then start with
 `docker compose --profile sqlpool up -d --build`. PgBouncer uses session pooling
@@ -212,8 +252,12 @@ cache and autovacuum settings; adjust them for the host's memory and workload.
 | `SMTP_URL` | unset | Own mail server for sign-up codes, password resets and notifications: `smtp://user:pass@host:587` (STARTTLS) or `smtps://user:pass@host:465`; percent-encode `@` in the user; the host must be the name on the server's certificate |
 | `RESEND_API_KEY` | unset | Resend key, used when `SMTP_URL` isn't set or refused a mail; without either nothing is sent |
 | `MAIL_FROM` | `Xitter <noreply@xit.chococat.lol>` | Sender of that mail (its domain must be the mail server's, or verified in Resend) |
+| `ARCHIVE_DIR`, `ARCHIVE_MAX_MB` | `data/imports`, `1024` | Where uploaded X archives wait while they import, and the largest accepted |
+| `ARCHIVE_MAX_JSON_MB` | `64` | Largest JSON file in an archive (`tweets.js` and its parts) an import reads; it's parsed in memory |
 | `KLIPY_API_KEY` | unset | GIF search through [Klipy](https://klipy.com) (see `src/gifs.ts`); without it or `TENOR_API_KEY` the GIF button is hidden |
 | `TENOR_API_KEY` | unset | GIF search through Tenor's v2 API instead, used when `KLIPY_API_KEY` isn't set |
+| `XITTER_VERSION` | `version` in `package.json` | The version this instance reports in `/.well-known/xitter` and compares when an account moves |
+| `MIGRATION_ALLOW_HTTP`, `MIGRATION_ALLOW_PRIVATE` | unset | `1` lets an account move from an instance over plain HTTP, or on a private network. For test instances only |
 
 Everything else (name, sign-up mode, features, limits, announcement, rules,
 logos) is set in the admin panel.
@@ -223,6 +267,47 @@ logos) is set in the admin panel.
 Instances listed in `instances.json` share public accounts and posts with each
 other. [FEDERATION.md](FEDERATION.md) explains how to set up an instance and
 join the list.
+
+## Moving accounts
+
+An account can move from one Xitter instance to another, federated or not.
+Both sides are on the Move account page (`/account/migrate`):
+
+1. On the old instance, the account makes a migration code with its password.
+   The code works for 24 hours and lets one other instance read the account's
+   data; a new code replaces it.
+2. On the new instance, the account it moves into enters the old instance's
+   address and the code, and presses Check. Nothing is copied yet: the new
+   instance asks the old one what it runs and what the account holds, and shows
+   both side by side.
+   - It refuses when the old instance exports a newer archive format than it
+     reads, when the address is its own, or while another import runs.
+   - It warns, and starts only once the warnings are accepted, when the two run
+     different versions (or the same version with a different database schema,
+     meaning one is modified), when the two don't federate with each other (so
+     the account's follows, likes, replies and the like involving accounts there
+     can't be matched), when the account here already has posts or follows, and
+     when files are over this instance's size limits.
+3. The import runs in the background, with its progress and a report on the
+   same page: files, polls, articles, posts with their threads, quotes, edit
+   history and original times, drafts and scheduled posts, the profile, follows,
+   follow requests, blocks, mutes, muted words, lists, likes, reposts,
+   bookmarks and their folders. Other accounts and posts are matched to the ones
+   this instance already knows (its own, or copies from federation); the report
+   lists accounts it couldn't find. Every object brought over is recorded, so an
+   import that failed, or is run again, only adds what's missing.
+4. When it's done, the old instance records where the account went, cancels its
+   scheduled posts there, and if asked leaves "Moved to @name@instance" as the
+   profile's bio and deactivates the account.
+
+Followers can't be moved for them, and encrypted chats stay behind, since their
+keys never leave the browser. The old instance only answers on the public
+internet over HTTPS unless `MIGRATION_ALLOW_HTTP` and `MIGRATION_ALLOW_PRIVATE`
+are set.
+
+`docker/migration-test.yaml` runs two throwaway instances on ports 3101 and
+3102; `bun scripts/test-migration.ts` moves a seeded account between them and
+checks what arrived (its first lines give the variables).
 
 ## Encrypted chat and key backup
 
@@ -341,6 +426,9 @@ expiry, write paths and request limits against one.
   validation without a running server. `bun scripts/test-juicebox.ts` verifies
   realm registration and recovery; run it with `recover` after a realm/database
   restart to check durability (`TEST_JUICEBOX_URL` selects the realm).
+- `bun scripts/test-conversation-live.ts public/logo-light.png` verifies conversation
+  card uploads, publication, native previews, sharing and JSON storage against a
+  running server and database. It creates and removes its own test account.
 - Other checks: `test-account-settings`, `test-two-factor`, `test-password-reset`,
   `test-reply-limits`, `test-views`, `test-protected`, `test-communities`, `test-lists`,
   `test-polls`, `test-scheduled` and the rest of `scripts/test-*.ts`. A passing
@@ -350,6 +438,18 @@ expiry, write paths and request limits against one.
 - `bun scripts/drive.ts <path> <steps...>` clicks through the real client in
   headless Edge and takes screenshots (uses the browser profile
   `scripts/probe.sh` leaves signed in).
+
+## Donate
+
+If Xitter is useful to you, crypto donations keep the main instance running.
+Send only the coin on the network listed for each address.
+
+| Coin | Network | Address |
+| --- | --- | --- |
+| SOL | Solana | `5nmzmrxFrvacVuQhNPVFJzbbkAgRMefWsWmPSoft1cJF` |
+| BTC | Bitcoin | `bc1qj2kedn4kqavwg2r5z5n4cldtx09gy2recswak9` |
+| ETH | Ethereum | `0x5A7cFbf7F877BE5b6DB4aE248178761E68129881` |
+| USDT | Tron (TRC20) | `THvC2xDHpF8Yr9s6jhHCXYGDya9ZnvjG79` |
 
 ## License
 

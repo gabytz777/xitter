@@ -46,6 +46,9 @@ export const RULES = {
 	// codes and links mailed (sign-up, password reset), per address
 	mail: { limit: 5, window: 60 * MIN },
 	federation: { limit: 30_000, window: 15 * MIN },
+	translate: { limit: 150, window: 15 * MIN },
+	// calls an instance importing an account makes with its migration code (migration.ts)
+	migration: { limit: 20_000, window: 15 * MIN },
 } satisfies Record<string, Rule>;
 
 export type Bucket = keyof typeof RULES;
@@ -275,6 +278,7 @@ export function bucketsFor(method: string, path: string, operation: string | und
 		return method === "GET" || (operationTypes.queries.has(operation) && !operationTypes.mutations.has(operation)) ? ["read"] : ["read", "write"];
 	}
 	if (ENGAGE_REST.test(path)) return ["read", "engage"];
+	if (/\/translation\/service\/translate(Tweet|Profile)$/.test(path)) return ["read", "translate"];
 	return method === "GET" ? ["read"] : ["read", "write"];
 }
 

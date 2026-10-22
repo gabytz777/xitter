@@ -8,15 +8,18 @@ import { hashflagsJson } from "./hashflags";
 import { accountsRoute } from "./accounts";
 import type { Viewer } from "./auth";
 import { addKeyword, mutedKeywords, removeKeywords, setBlock, setMute, updateKeyword } from "./blocks";
+import { getPost } from "./posts";
 import { sql } from "./db";
 import { flagValue, unknownFlag } from "./flags";
+import { pronounsProblem } from "./pronouns";
 import { isId } from "./ids";
-import { isVerified, legacyUser } from "./model";
+import { isVerified, legacyUser, tweetResult } from "./model";
 import { markSeen } from "./notifications";
 import { PollError, createCard, vote } from "./polls";
 import { placeById, searchPlaces } from "./places";
 import { reportFlow } from "./reports";
 import { settingsFor } from "./shell";
+import { changeCountryFlow } from "./country-setting";
 import { hashtagsLike, searchUsers } from "./search";
 import { STAFF_HANDLE } from "./invites";
 import { accountSettingsRoute, changeUsername, revokeSessionsRoute } from "./account-settings";
@@ -26,8 +29,9 @@ import { exploreSettings, searchLocations, setExploreSettings } from "./explore-
 import { loginHistory } from "./login-history";
 import { emailInfo, resendConfirmation } from "./email-address";
 import { pushSettingsRoute } from "./push";
-import { answerRequest, pendingRequests, setFollow, setProtected, suggestedUsers, updateFriendship, userById, userByName, usersByIds } from "./users";
+import { answerRequest, followList, knownFollowerCount, pendingRequests, setFollow, setProtected, suggestedUsers, updateFriendship, userById, userByName, usersByIds } from "./users";
 import { cleanText, oneLine } from "./text-clean";
+import { translateRoute } from "./translate";
 
 // friendships/show's shape, from the viewer's side (source) and the other account's (target)
 async function relationship(viewer: Viewer, targetId: string) {
@@ -69,7 +73,7 @@ const changedUser = async (viewer: Viewer) => Response.json(legacyUser((await us
 // account/update_profile, update_profile_image, update_profile_banner, remove_profile_banner,
 // and our own update_flag (the pride flag badge, from the picker shell.ts adds to the dialog)
 async function profileRoute(path: string, viewer: Viewer, req: Request): Promise<Response | undefined> {
-	const m = /^\/1\.1\/account\/(update_profile|update_profile_image|update_profile_banner|remove_profile_banner|update_flag)\.json$/.exec(path);
+	const m = /^\/1\.1\/account\/(update_profile|update_profile_image|update_profile_banner|remove_profile_banner|update_flag|update_pronouns)\.json$/.exec(path);
 	if (!m || req.method !== "POST") return undefined;
 	const f = await form(req);
 
@@ -106,6 +110,23 @@ async function profileRoute(path: string, viewer: Viewer, req: Request): Promise
 		await sql`update users set flag = ${flag} where id = ${viewer.id}::bigint`;
 		return changedUser(viewer);
 	}
+	if (m[1] === "update_pronouns") {
+		const value = oneLine(f.pronouns ?? "").trim();
+		const problem = pronounsProblem(value);
+		if (problem) return profileError(problem);
+		const hate = hateIn(value);
+		if (hate) {
+			await automodStrike(viewer.id, hate, "profile", value);
+			return profileError("Your pronouns contain a slur or hate speech this instance doesn't allow.");
+		}
+		if (blockedWordIn(value)) {
+			if (!viewer.role) await suspendForName(viewer.id, value);
+			return profileError("Your pronouns contain a word this instance doesn't allow.");
+		}
+		if (hasBlockedPhrase(value)) return profileError("Your pronouns contain a phrase this instance doesn't allow.");
+		await sql`update users set pronouns = ${value || null} where id = ${viewer.id}::bigint`;
+		return changedUser(viewer);
+	}
 	if (m[1] === "remove_profile_banner") {
 		await sql`update users set banner_url = null where id = ${viewer.id}::bigint`;
 		return changedUser(viewer);
@@ -128,6 +149,14 @@ const EMPTY_LIST = { users: [], next_cursor: 0, next_cursor_str: "0", previous_c
 
 // `path` has no /i/api prefix
 export async function restRoute(method: string, path: string, viewer: Viewer, req: Request): Promise<Response | undefined> {
+	if ((method === "GET" && path.endsWith("/capi/passthrough/1")) || (method === "POST" && path === "/v2/cards/preview.json")) {
+		const params = { ...Object.fromEntries(new URL(req.url).searchParams), ...(method === "POST" ? await form(req) : {}) };
+		const id = /^card:\/\/(\d{1,19})$/.exec(params["twitter:string:card_uri"] ?? params.status ?? "")?.[1];
+		const post = id && isId(id) ? await getPost(viewer.id, id) : undefined;
+		const card = post?.conversationCard ? (tweetResult(post, false).card as any)?.legacy : undefined;
+		if (!card) return Response.json({ errors: [{ code: 144, message: "That conversation card is unavailable." }] }, { status: 404 });
+		return Response.json({ card: { ...card, binding_values: Object.fromEntries(card.binding_values.map((entry: any) => [entry.key, entry.value])) } });
+	}
 	// poll cards: created before the post, voted on afterwards
 	if (method === "POST" && /^\/v2\/cards\/create\.json$/.test(path)) {
 		const form = await req.formData().catch(() => undefined);
@@ -311,6 +340,13 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 		const [fresh] = await sql`select screen_name, language, protected, preferences->>'discoverable_by_email' = 'true' as discoverable_by_email from users where id = ${viewer.id}::bigint`;
 		return Response.json(settingsFor({ ...viewer, ...fresh }) ?? {});
 	}
+	// Settings > Account information > Country
+	if (path === "/1.1/onboarding/task.json" && method === "POST") {
+		const url = new URL(req.url);
+		const body = await req.json().catch(() => ({}));
+		if (process.env.LOG_REQUESTS) console.log(`onboarding task ${url.search} ${JSON.stringify(body).slice(0, 600)}`);
+		if (/(^|\/)change_country$/.test(url.searchParams.get("flow_name") ?? "") || String(body?.flow_token ?? "").startsWith("change_country:")) return changeCountryFlow(viewer, body);
+	}
 	// Report post / Report account
 	if (path === "/1.1/report/flow.json" && method === "POST") {
 		const body = await req.json().catch(() => ({}));
@@ -386,10 +422,21 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 	if (path === "/1.1/help/settings.json") return Response.json({});
 	if (path === "/fleets/v1/fleetline") return Response.json({ threads: [], hydrated_threads: [], refresh_delay_secs: 300 });
 	if (path === "/fleets/v1/avatar_content") return Response.json({ users: {}, refresh_delay_secs: 0 });
-	if (path === "/1.1/friends/following/list.json") return Response.json(EMPTY_LIST);
+	// "Followers you know" line on a profile: a few faces plus the total
+	if (path === "/1.1/friends/following/list.json") {
+		const params = new URL(req.url).searchParams;
+		const target = params.get("user_id") ?? "";
+		if (!isId(target) || target === viewer.id) return Response.json(EMPTY_LIST);
+		const count = Math.min(Math.max(Number(params.get("count")) || 3, 1), 100);
+		const users = await followList(viewer.id, target, "known_followers", count);
+		const total = users.length ? await knownFollowerCount(viewer.id, target) : 0;
+		return Response.json({ ...EMPTY_LIST, users: users.map(legacyUser), total_count: total });
+	}
 	if (path === "/1.1/live_pipeline/update_subscriptions") return Response.json({ subscriptions: { errors: [] } });
 	if (path.endsWith("/p2"))
 		return Response.json({ totalEvents: 0, eventsFailed: 0, shouldRetry: false, retryAfterMs: null, eventsFailedSequenceNumbers: null, message: null });
+	const translation = await translateRoute(path, viewer);
+	if (translation) return translation;
 	if (TELEMETRY.test(path)) return Response.json({});
 	return undefined;
 }

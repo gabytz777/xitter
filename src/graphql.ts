@@ -12,6 +12,9 @@ import { countryName, regionName } from "./countries";
 import { gifHandlers } from "./gifs";
 import { listHandlers } from "./lists";
 import { placeById } from "./places";
+import { conversationCard } from "./conversation-cards";
+import { checkConversationCard } from "./conversation-card-moderation";
+import { FEDERATION_ON } from "./federation";
 import { PollError, attachPoll } from "./polls";
 import { scheduledHandlers } from "./scheduled";
 import { noteHandlers } from "./notes";
@@ -20,9 +23,9 @@ import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { trendScope } from "./explore-settings";
 import { activeCards, cardsEntry } from "./explore-cards";
-import { blockedIds, blockedFor, outOfView, protectedFor } from "./blocks";
+import { isBlockedEitherWay, blockedIds, blockedFor, outOfView, protectedFor } from "./blocks";
 import { settings } from "./settings";
-import { rankedFeed } from "./ranking";
+import { freshAsOf, rankedFeed } from "./ranking";
 import * as articles from "./articles";
 import type { Viewer } from "./auth";
 import { notificationsTimeline, unreadCount } from "./notifications";
@@ -152,7 +155,7 @@ const forYou: Handler = async (viewer, vars) => {
 	const ranked = /^r(\d+)\.(\d{1,19})$/.exec(cursor);
 	if (cursor && !ranked) return home(false)(viewer, vars);
 	const count = Math.min(Math.max(Number(vars.count) || 20, 1), 100);
-	const asOf = ranked ? ranked[2] : newId();
+	const asOf = ranked ? ranked[2] : await freshAsOf(viewer.id);
 	const offset = ranked ? Number(ranked[1]) : 0;
 	const page = await rankedFeed(viewer.id, { asOf, offset, limit: count });
 	// sort indexes run down from asOf in ranked order, below anything newer
@@ -316,26 +319,52 @@ const bookmarks: Handler = async (viewer, vars) => {
 };
 
 const createTweet: Handler = async (viewer, vars) => {
-	const text = typeof vars.tweet_text === "string" ? vars.tweet_text.trim() : "";
+	let conversation: ReturnType<typeof conversationCard> | undefined, creative: any, sharedConversation: Awaited<ReturnType<typeof getPost>>, sharedId: string | undefined, id: string, post: Awaited<ReturnType<typeof getPost>>, text: string;
 	const mediaIds: string[] = (Array.isArray(vars.media?.media_entities) ? vars.media.media_entities : [])
 		.map((m: any) => String(m?.media_id ?? ""))
 		.filter(isId);
-	if (!text && !mediaIds.length) throw new PostError("Your post is empty.", 170);
 	const previous = vars.edit_options?.previous_tweet_id;
+	const replyTo = vars.reply?.in_reply_to_tweet_id;
+	const quoteId = typeof vars.attachment_url === "string" ? /\/status(?:es)?\/(\d{1,19})/.exec(vars.attachment_url)?.[1] : undefined;
+	const annotated = (Array.isArray(vars.semantic_annotation_ids) ? vars.semantic_annotation_ids : []).find((x: any) => String(x?.domain_id) === "31")?.entity_id;
+	const communityId = [vars.community_id, annotated].find(isId);
+	text = typeof vars.tweet_text === "string" ? vars.tweet_text.trim() : "";
+	if (vars.xitter_conversation_card !== undefined) {
+		conversation = await checkConversationCard(viewer.id, vars.xitter_conversation_card);
+		if (vars.card_uri || vars.attachment_url || vars.edit_options) throw new PostError("Conversation cards cannot be combined with polls, quotes or edits.", 214);
+	}
+	if (typeof vars.card_uri === "string" && vars.card_uri) {
+		sharedId = /^card:\/\/(\d{1,19})$/.exec(vars.card_uri)?.[1];
+		if (sharedId && isId(sharedId)) sharedConversation = await getPost(viewer.id, sharedId);
+		if (sharedConversation?.conversationCard) {
+			if (sharedConversation.conversationCardPostId) sharedConversation = await getPost(viewer.id, sharedConversation.conversationCardPostId);
+			if (!sharedConversation?.conversationCard || !sharedConversation.media?.length || sharedConversation.conversationCardPostId || await isBlockedEitherWay(viewer.id, sharedConversation.author.id)) throw new PostError("That conversation card is unavailable.", 214);
+			if (sharedConversation.author.protected && sharedConversation.author.id !== viewer.id) throw new PostError("Posts from protected accounts cannot be shared as conversation cards.", 214);
+			if (mediaIds.length || vars.attachment_url || previous) throw new PostError("Conversation cards cannot be combined with media, quotes or edits.", 214);
+		} else sharedConversation = undefined;
+	}
+	if (!text && sharedConversation?.conversationCard && FEDERATION_ON) text = [sharedConversation.conversationCard.title, ...sharedConversation.conversationCard.choices.map((choice) => choice.hashtag)].filter(Boolean).join(" ");
+	if (!text && !mediaIds.length && !sharedConversation) throw new PostError("Your post is empty.", 170);
+	if (conversation) {
+		if (mediaIds.length !== 1) throw new PostError("A conversation card needs exactly one image or video.", 214);
+		[creative] = await sql`select id from media where id = ${mediaIds[0]}::bigint and user_id = ${viewer.id}::bigint and post_id is null and state = 'ready' and kind in ('photo', 'video')`;
+		if (!creative) throw new PostError("Choose your own finished image or video upload.", 214);
+	}
 	if (previous !== undefined) {
 		if (!isId(previous)) throw new PostError("Invalid post id.", 144);
 		await editPost(viewer.id, previous, text);
 		return { data: { create_tweet: { tweet_results: { result: tweetResult((await getPost(viewer.id, previous))!, false) } } } };
 	}
-	const replyTo = vars.reply?.in_reply_to_tweet_id;
 	if (replyTo !== undefined && !isId(replyTo)) throw new PostError("Invalid post id.", 144);
-	// a quote arrives as a link to the quoted post
-	const quoteId = typeof vars.attachment_url === "string" ? /\/status(?:es)?\/(\d{1,19})/.exec(vars.attachment_url)?.[1] : undefined;
-	// a post to a community carries it as a semantic annotation (domain 31)
-	const annotated = (Array.isArray(vars.semantic_annotation_ids) ? vars.semantic_annotation_ids : []).find((x: any) => String(x?.domain_id) === "31")?.entity_id;
-	const communityId = [vars.community_id, annotated].find(isId);
-	const id = await createPost(viewer.id, text, { replyToId: replyTo, quoteId, source: viewer.postSource, communityId, placeId: placeById(vars.geo?.place_id) ? vars.geo.place_id : undefined, replyPolicy: ["Community", "ByInvitation", "Verified"].includes(vars.conversation_control?.mode) ? vars.conversation_control.mode : undefined });
-	if (typeof vars.card_uri === "string" && vars.card_uri) {
+	id = await createPost(viewer.id, text, { replyToId: replyTo, quoteId, source: viewer.postSource, communityId, placeId: placeById(vars.geo?.place_id) ? vars.geo.place_id : undefined, replyPolicy: ["Community", "ByInvitation", "Verified"].includes(vars.conversation_control?.mode) ? vars.conversation_control.mode : undefined });
+	if (sharedConversation) {
+		try {
+			await sql`update posts set conversation_card_post_id = ${sharedConversation.id}::bigint, sensitive = ${!!sharedConversation.sensitive} where id = ${id}::bigint`;
+		} catch (e) {
+			await deletePost(viewer.id, id);
+			throw new PostError("That conversation card is unavailable.", 214);
+		}
+	} else if (typeof vars.card_uri === "string" && vars.card_uri) {
 		try {
 			await attachPoll(viewer.id, id, vars.card_uri);
 		} catch (e) {
@@ -344,12 +373,22 @@ const createTweet: Handler = async (viewer, vars) => {
 			throw e;
 		}
 	}
-	if (mediaIds.length) await attachMedia(viewer.id, id, mediaIds);
+	if (conversation) {
+		try {
+			await sql.begin(async (tx) => {
+				await attachMedia(viewer.id, id, mediaIds, { db: tx, strict: true });
+				await tx`update posts set conversation_card = ${JSON.stringify(conversation)}::text::jsonb where id = ${id}::bigint`;
+			});
+		} catch (e) {
+			await deletePost(viewer.id, id);
+			throw new PostError(e instanceof Error ? e.message : "Could not attach conversation card.", 214);
+		}
+	} else if (mediaIds.length) await attachMedia(viewer.id, id, mediaIds);
 	// a content warning on any of its media makes the post sensitive
 	if (vars.media?.possibly_sensitive === true || mediaIds.length)
 		await sql`update posts set sensitive = true where id = ${id}::bigint and (${vars.media?.possibly_sensitive === true}
 			or exists (select 1 from media m where m.post_id = posts.id and m.sensitive_warning is not null))`;
-	const post = await getPost(viewer.id, id);
+	post = await getPost(viewer.id, id);
 	return { data: { create_tweet: { tweet_results: { result: tweetResult(post!, false) } } } };
 };
 
@@ -453,7 +492,7 @@ const likes: Handler = async (viewer, vars) => {
 };
 
 const follows =
-	(kind: "following" | "followers" | "verified_followers"): Handler =>
+	(kind: "following" | "followers" | "verified_followers" | "known_followers"): Handler =>
 	async (viewer, vars) => {
 		const users = vars.cursor ? [] : await followList(viewer.id, userId(vars), kind);
 		const base = BigInt(newId());
@@ -777,6 +816,7 @@ const handlers: Record<string, Handler> = {
 	Following: follows("following"),
 	Followers: follows("followers"),
 	BlueVerifiedFollowers: follows("verified_followers"),
+	FollowersYouKnow: follows("known_followers"),
 	UserMedia: userMedia("any"),
 	UserPhotoTimeline: userMedia("photo"),
 	UserVideoTimeline: userMedia("video"),

@@ -3,6 +3,7 @@
 
 import { recordSignIn } from "./login-history";
 import { login, sessionCookies } from "./auth";
+import { loadLook, nightModeCookies } from "./themes/api";
 import { hit, used } from "./ratelimit";
 import { settings } from "./settings";
 
@@ -22,10 +23,10 @@ export const layout = (title: string, body: string) => `<!doctype html>
 	h1 { margin: 0 0 8px; font-size: 28px; }
 	.alt { margin: 8px 0 0; color: #71767b; }
 	.rules { margin: 0 0 4px; white-space: pre-wrap; line-height: 1.45; }
-	a { color: #1d9bf0; text-decoration: none; }
+	a { color: var(--xt-accent, #1d9bf0); text-decoration: none; }
 	label { color: #71767b; font-size: 13px; }
 	input, textarea { padding: 12px; border: 1px solid #333639; border-radius: 4px; background: #000; color: inherit; font: inherit; }
-	input:focus, textarea:focus { outline: 2px solid #1d9bf0; border-color: transparent; }
+	input:focus, textarea:focus { outline: 2px solid var(--xt-accent, #1d9bf0); border-color: transparent; }
 	textarea { min-height: 120px; resize: vertical; }
 	button { padding: 12px 20px; border: 0; border-radius: 999px; background: #eff3f4; color: #0f1419; font: inherit; font-weight: 700; cursor: pointer; }
 	button.ghost { justify-self: start; padding: 6px 16px; background: none; border: 1px solid #536471; color: #eff3f4; }
@@ -49,9 +50,10 @@ ${body}
 export const html = (body: string, status = 200) =>
 	new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 
-function signedIn(session: { token: string; csrf: string; userId: string }): Response {
+async function signedIn(session: { token: string; csrf: string; userId: string }): Promise<Response> {
 	const headers = new Headers({ location: "/home" });
 	for (const c of sessionCookies(session)) headers.append("set-cookie", c);
+	for (const c of nightModeCookies(await loadLook(session.userId))) headers.append("set-cookie", c);
 	return new Response(null, { status: 303, headers });
 }
 

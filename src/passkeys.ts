@@ -128,6 +128,8 @@ const CLIENT = `(function(){
 		return post("/account/passkey/options").then(function(o){
 			return navigator.credentials.get({mediation:mediation,signal:ctl.signal,publicKey:{challenge:dec(o.challenge),rpId:o.rpId,userVerification:o.userVerification,timeout:o.timeout,allowCredentials:[]}});
 		}).then(function(c){
+			// some browsers resolve with nothing instead of rejecting when the prompt is closed
+			if(!c)throw new DOMException("closed","NotAllowedError");
 			var r=c.response;
 			return post("/account/passkey/signin",{id:c.id,clientDataJSON:enc(r.clientDataJSON),authenticatorData:enc(r.authenticatorData),signature:enc(r.signature),userHandle:r.userHandle?enc(r.userHandle):""});
 		}).then(function(){location.assign("/home")},function(e){
@@ -226,6 +228,8 @@ const MANAGE_SCRIPT = `${CLIENT}
 			o.excludeCredentials=o.excludeCredentials.map(function(c){return {type:c.type,id:xitterPasskey.dec(c.id)}});
 			return navigator.credentials.create({publicKey:o});
 		}).then(function(c){
+			// some browsers resolve with nothing instead of rejecting when the prompt is closed
+			if(!c)throw new DOMException("closed","NotAllowedError");
 			var r=c.response;
 			return xitterPasskey.post("/account/passkeys/add",{id:c.id,name:name,clientDataJSON:xitterPasskey.enc(r.clientDataJSON),attestationObject:xitterPasskey.enc(r.attestationObject),transports:r.getTransports?r.getTransports():[]});
 		}).then(function(){location.reload()},function(e){

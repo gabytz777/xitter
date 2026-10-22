@@ -37,7 +37,9 @@
 	.card span { color: var(--dim); font-size: 13px; }
 	.table { width: 100%; border-collapse: collapse; }
 	.table th { text-align: left; color: var(--dim); font-weight: 400; font-size: 13px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
-	.table td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+	/* a post that's one long word ("aaaa…") stretched the table and pushed every
+	   row's buttons off the side */
+	.table td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: middle; overflow-wrap: anywhere; }
 	.table tr.click { cursor: pointer; }
 	.table tr.click:hover td { background: var(--panel); }
 	.scroll { overflow-x: auto; }
@@ -60,6 +62,9 @@
 	.field { display: grid; gap: 4px; margin-bottom: 10px; }
 	.field label { color: var(--dim); font-size: 13px; }
 	.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+	.ann-buttons { display: grid; gap: 8px; }
+	.ann-row [data-label] { flex: 1 1 140px; min-width: 0; }
+	.ann-row [data-url] { flex: 3 1 220px; min-width: 0; }
 	label.row { flex-wrap: nowrap; align-items: flex-start; }
 	label.row input { margin-top: 3px; flex: none; }
 	.flags { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -91,6 +96,14 @@
 		nav button { width: auto; padding: 8px 10px; font-size: 14px; }
 		nav .who { display: none; }
 		main { padding: 16px; }
+		/* a table's last columns (the action buttons) fell off the side of a
+		   phone, behind a sideways scroll nobody noticed: each row stacks instead */
+		.table, .table tbody { display: block; }
+		.table tr { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+		.table tr:has(> th), .table [hidden] { display: none; }
+		.table td { padding: 0; border-bottom: 0; }
+		.table td:first-child { flex-basis: 100%; }
+		.table .row { flex-wrap: wrap !important; }
 	}
 </style>
 </head>
@@ -105,6 +118,7 @@
 "use strict";
 const csrf = (document.cookie.match(/(?:^|; )ct0=([^;]+)/) || [])[1] || "";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const annRow = (b, dis) => '<div class="row ann-row"><input data-label maxlength="30" placeholder="Label, like More" aria-label="Button label" value="' + esc(b.label) + '"' + dis + '><input data-url type="url" inputmode="url" placeholder="https://" aria-label="Button link" value="' + esc(b.url) + '"' + dis + '>' + (dis ? "" : '<button class="btn" type="button" data-remove>Remove</button>') + "</div>";
 const $ = (sel, root = document) => root.querySelector(sel);
 const RANK = { support: 1, moderator: 2, admin: 3 };
 let me = null;
@@ -189,6 +203,7 @@ const PAGES = {
 	cards: { icon: "newspaper", title: "Explore cards" },
 	email: { icon: "mail", title: "Email" },
 	apps: { icon: "devices", title: "Client apps" },
+	oauth: { icon: "key", title: "OAuth apps" },
 	federation: { icon: "hub", title: "Federation" },
 	settings: { icon: "tune", title: "Settings" },
 	errors: { icon: "bug_report", title: "Errors", needs: "errors" },
@@ -717,6 +732,38 @@ const RENDER = {
 		});
 	},
 
+	async oauth(main) {
+		const { apps } = await api("oauthApps");
+		const state = (x) => x.blocked_at ? '<span class="pill suspended">blocked</span>' : x.revoked ? '<span class="pill suspended">revoked by developer</span>' : '<span class="pill">active</span>';
+		const who = (x) => x.metadata_url
+			? 'Client ID <span class="code">' + esc(x.metadata_url) + "</span>, not registered here"
+			: "Registered by " + (x.owner ? "@" + esc(x.owner) : "a deleted account") + ', returns to <span class="code">' + esc(x.redirect_uri) + "</span>";
+		main.innerHTML = "<h1>OAuth apps</h1>" +
+			'<p class="dim">Apps people can sign in to with their account here: ones registered under Developer apps, and ones that use the address of their own client ID document instead (they have no owner here). Blocking an app ends everyone\'s access to it and stops it asking again.</p>' +
+			(can("blockOAuthApp") ? '<div class="box" style="margin-bottom:16px"><h2>Block an app nobody has used yet</h2><div class="row"><input id="obu" placeholder="https://app.example/oauth-client.json" style="flex:2;min-width:220px"><input id="obr" placeholder="Reason" maxlength="500" style="flex:1;min-width:160px"><button class="btn danger" id="obgo">Block</button></div></div>' : "") +
+			'<div class="scroll">' + (apps.length
+				? '<table class="table"><tr><th>App</th><th>People using it</th><th>State</th><th></th></tr>' +
+					apps.map((x) => "<tr><td><b>" + esc(x.name) + '</b><div class="dim small">' + who(x) + "</div>" +
+						(x.blocked_at ? '<div class="dim small">Blocked ' + esc(when(x.blocked_at)) + (x.blocked_reason ? ": " + esc(x.blocked_reason) : "") + "</div>" : "") +
+						"</td><td>" + esc(String(x.grants)) + "</td><td>" + state(x) + "</td><td>" +
+						(x.blocked_at
+							? (can("unblockOAuthApp") ? '<button class="btn" data-unblock="' + esc(x.id) + '">Unblock</button>' : "")
+							: !x.revoked && can("blockOAuthApp") ? '<button class="btn danger" data-block="' + esc(x.id) + '">Block</button>' : "") +
+						"</td></tr>").join("") + "</table>"
+				: '<div class="empty">No OAuth apps yet.</div>') + "</div>";
+		const block = async (body, name) => {
+			if (!(await ask("Block " + name + "? Everyone signed in to it here loses access, and it can't ask again until you unblock it."))) return;
+			act(() => api("blockOAuthApp", body), "Blocked").then(route);
+		};
+		if ($("#obgo")) $("#obgo").onclick = () => block({ url: $("#obu").value.trim(), reason: $("#obr").value }, $("#obu").value.trim());
+		main.querySelectorAll("[data-block]").forEach((b) => b.onclick = async () => {
+			const reason = prompt("Why block it? (optional, staff see this)");
+			if (reason === null) return;
+			block({ id: b.dataset.block, reason }, b.closest("tr").querySelector("b").textContent);
+		});
+		main.querySelectorAll("[data-unblock]").forEach((b) => b.onclick = () => act(() => api("unblockOAuthApp", { id: b.dataset.unblock }), "Unblocked").then(route));
+	},
+
 	async federation(main) {
 		const f = await api("federation");
 		const state = (i) => i.block
@@ -1012,9 +1059,16 @@ const RENDER = {
 			[["none", "No badge"], ["blue", "Blue check"], ["business", "Gold check (organisations)"], ["government", "Grey check (government organisations and officials)"]]
 				.map(([k, l]) => '<div class="field"><label>' + l + '</label><input type="number" min="1" data-postlen="' + k + '" value="' + esc(s.post_limits[k]) + '"' + dis + "></div>").join("") +
 			(admin ? '<button class="btn primary" id="savePostLen">Save</button>' : "") + "</div>" +
+			'<div class="box"><h2>Daily caps</h2><p class="dim small">The most posts and replies one account may make in any 24 hours. Staff have no caps.</p>' +
+			'<label class="row" style="margin:6px 0"><input type="checkbox" id="capsOn"' + (s.daily_caps.enabled ? " checked" : "") + dis + "> Cap posts and replies per day</label>" +
+			'<div class="field"><label>Posts a day</label><input type="number" min="1" id="capPosts" value="' + esc(s.daily_caps.posts) + '"' + dis + "></div>" +
+			'<div class="field"><label>Replies a day</label><input type="number" min="1" id="capReplies" value="' + esc(s.daily_caps.replies) + '"' + dis + "></div>" +
+			(admin ? '<button class="btn primary" id="saveCaps">Save</button>' : "") + "</div>" +
 			'<div class="box"><h2>Announcement</h2><p class="dim small">A banner above everyone\'s timeline until they close it. Saving new text shows it again to everyone.</p>' +
 			'<div class="field"><label>Text (empty removes the banner)</label><textarea id="annText" maxlength="500"' + dis + ">" + esc(s.announcement.text) + "</textarea></div>" +
-			'<div class="field"><label>Link (optional)</label><input id="annLink" value="' + esc(s.announcement.link) + '"' + dis + "></div>" +
+			'<div class="field"><label>Buttons (up to 4, each opens its link in a new tab)</label><div id="annButtons" class="ann-buttons">' +
+			((s.announcement.buttons && s.announcement.buttons.length) ? s.announcement.buttons : s.announcement.link ? [{ label: "More", url: s.announcement.link }] : []).map((b) => annRow(b, dis)).join("") +
+			"</div>" + (admin ? '<button class="btn" id="addAnnBtn" type="button" style="margin-top:8px">Add button</button>' : "") + "</div>" +
 			(admin ? '<button class="btn primary" id="saveAnn">Save</button>' : "") + "</div>" +
 			'<div class="box"><h2>Rules</h2><p class="dim small">Shown at <a href="/rules" target="_blank">/rules</a> and linked from sign-up. A blank line starts a new paragraph.</p>' +
 			'<textarea id="rules" style="min-height:160px"' + dis + ">" + esc(s.rules) + "</textarea>" +
@@ -1035,6 +1089,12 @@ const RENDER = {
 			'<div class="field"><label>Steps, one per strike: 0 is a warning, a number is hours suspended, -1 is permanent</label><input id="amLadder" value="' + esc(am.ladder.join(", ")) + '"' + dis + "></div>" +
 			'<div class="field"><label>Second chances a week: refused content that doesn\'t count as a strike, 0 for none</label><input id="amChances" type="number" min="0" max="100" value="' + esc(am.second_chances ?? 5) + '"' + dis + "></div>" +
 			(admin ? '<button class="btn primary" id="saveAutomod">Save</button>' : "") + "</div>" +
+			'<div class="box"><h2>Import from X</h2><p class="dim small">While the Import from X feature is on, who may bring their posts over from an X archive. Staff accounts skip both. An import waiting for approval is deleted after a week.</p>' +
+			'<div class="field"><label>From account age (days, 0 for any)</label><input id="aiDays" type="number" min="0" max="3650" value="' + esc(String(s.archive_import.min_age_days)) + '"' + dis + "></div>" +
+			'<label class="row" style="margin:6px 0"><input type="checkbox" id="aiApproval"' + (s.archive_import.approval ? " checked" : "") + dis + "> Staff approve each import before it starts</label>" +
+			(admin ? '<button class="btn primary" id="saveArchiveImport">Save</button>' : "") +
+			(can("archiveImports") ? '<h2 class="small" style="margin-top:16px">Waiting for approval</h2><div id="aiPending" class="dim small">Loading…</div>' : "") + "</div>" +
+
 			'<div class="box"><h2>Trends</h2><div class="field"><label>Hidden hashtags, one per line</label><textarea id="hiddenTrends"' + dis + ">" + esc(o.hidden_trends.map((t) => "#" + t).join("\n")) + "</textarea></div>" +
 			'<div class="field"><label>Promoted hashtags, shown first</label><textarea id="promotedTrends"' + dis + ">" + esc(o.promoted_trends.map((t) => "#" + t).join("\n")) + "</textarea></div>" +
 			'<div class="row"><div class="field"><label>People needed before a hashtag trends</label><input id="trendPeople" type="number" min="1" max="1000" value="' + esc(String(o.trend_min_people ?? 3)) + '"' + dis + "></div>" +
@@ -1055,6 +1115,20 @@ const RENDER = {
 
 		const save = (body, done) => act(() => api("saveSettings", body), done).then(route);
 		main.querySelectorAll("[name=mode]").forEach((r) => r.onchange = () => act(() => api("setSignupMode", { mode: r.value }), "Sign-up mode saved"));
+		if ($("#aiPending")) api("archiveImports").then(({ imports }) => {
+			const box = $("#aiPending");
+			if (!imports.length) { box.textContent = "None."; return; }
+			box.className = "";
+			box.innerHTML = imports.map((i) => '<div class="row" style="margin:6px 0;justify-content:space-between"><span><a href="#user/' + esc(i.user_id) + '">@' + esc(i.screen_name) + "</a> " +
+				'<span class="dim small">joined ' + esc(when(i.created_at)) + ", " + Math.max(1, Math.round(i.size / 1048576)) + " MB" + (i.options.replies ? ", with replies" : "") + (i.options.profile ? ", with profile" : "") + ", asked " + esc(when(i.updated_at)) + "</span></span>" +
+				'<span class="row"><button class="btn primary" data-ai-approve="' + esc(i.user_id) + '">Approve</button><button class="btn danger" data-ai-decline="' + esc(i.user_id) + '">Decline</button></span></div>').join("");
+			box.querySelectorAll("[data-ai-approve]").forEach((b) => b.onclick = () => act(() => api("decideArchiveImport", { userId: b.dataset.aiApprove, approve: true }), "Approved; the import starts").then(route));
+			box.querySelectorAll("[data-ai-decline]").forEach((b) => b.onclick = () => {
+				const reason = prompt("Why? The account sees this (optional).");
+				if (reason === null) return;
+				act(() => api("decideArchiveImport", { userId: b.dataset.aiDecline, approve: false, reason }), "Declined; the archive was deleted").then(route);
+			});
+		}, () => { $("#aiPending").textContent = "Couldn't load the imports."; });
 		if (!admin) return;
 		$("#saveFollows").onclick = () => save({ default_follows: $("#follows").value.split(",").map((x) => x.trim()).filter(Boolean) }, "Saved");
 		$("#savePinned").onclick = () => save({ pinned_follows: $("#pinned").value.split(",").map((x) => x.trim()).filter(Boolean) }, "Saved");
@@ -1079,7 +1153,17 @@ const RENDER = {
 			main.querySelectorAll("[data-postlen]").forEach((i) => r[i.dataset.postlen] = i.value);
 			save({ post_limits: r }, "Post lengths saved");
 		};
-		$("#saveAnn").onclick = () => save({ announcement: { text: $("#annText").value, link: $("#annLink").value } }, "Announcement saved");
+		if ($("#saveCaps")) $("#saveCaps").onclick = () => save({ daily_caps: { enabled: $("#capsOn").checked, posts: $("#capPosts").value, replies: $("#capReplies").value } }, "Daily caps saved");
+		const annList = $("#annButtons");
+		const annFull = () => { if ($("#addAnnBtn")) $("#addAnnBtn").disabled = annList.children.length >= 4; };
+		annFull();
+		if ($("#addAnnBtn")) $("#addAnnBtn").onclick = () => {
+			annList.insertAdjacentHTML("beforeend", annRow({ label: annList.children.length ? "" : "More", url: "" }, ""));
+			annList.lastElementChild.querySelector("input").focus();
+			annFull();
+		};
+		annList.onclick = (e) => { const x = e.target.closest("[data-remove]"); if (x) { x.closest(".ann-row").remove(); annFull(); } };
+		$("#saveAnn").onclick = () => save({ announcement: { text: $("#annText").value, buttons: [...annList.querySelectorAll(".ann-row")].map((r) => ({ label: r.querySelector("[data-label]").value, url: r.querySelector("[data-url]").value })) } }, "Announcement saved");
 		$("#saveRules").onclick = () => save({ rules: $("#rules").value }, "Rules saved");
 		const listOf = (id) => $(id).value.split("\n").map((x) => x.trim()).filter(Boolean);
 		// accounts that already carry a blocked name, then suspend them in one go
@@ -1094,6 +1178,7 @@ const RENDER = {
 				act(() => api("blockedNameAccounts", { suspend: true }), "Suspended").then(route);
 			};
 		});
+		if ($("#saveArchiveImport")) $("#saveArchiveImport").onclick = () => act(() => api("saveArchiveImport", { min_age_days: Number($("#aiDays").value), approval: $("#aiApproval").checked }), "Saved").then(route);
 		if ($("#saveAutomod")) $("#saveAutomod").onclick = () => act(() => api("saveAutomod", { enabled: $("#amOn").checked, strike_days: Number($("#amDays").value), ladder: $("#amLadder").value.split(",").map((x) => Number(x.trim())), second_chances: Number($("#amChances").value) }), "Automod saved").then(route);
 		main.querySelectorAll("[data-save-ops]").forEach((b) => b.onclick = () => act(() => api("saveOperations", {
 			maintenance: $("#maint").checked,
@@ -1229,6 +1314,7 @@ async function renderUser(main, id) {
 			.map(([k, l, v]) => '<div class="field"><label>' + l + '</label><input data-f="' + k + '" value="' + esc(v) + '"' + (canHere("updateUser") ? "" : " disabled") + "></div>").join("") +
 		'<div class="field"><label>Bio</label><textarea data-f="bio"' + (canHere("updateUser") ? "" : " disabled") + ">" + esc(u.bio) + "</textarea></div>" +
 		'<div class="field"><label>Account based in (About this account; blank shows the detected region' + (u.country ? ", " + esc(u.country) : "") + ')</label><input data-f="based_in" maxlength="50" value="' + esc(u.based_in_override ?? "") + '"' + (canHere("updateUser") ? "" : " disabled") + "></div>" +
+		'<div class="field"><label>Joined from (after the date joined in About this account; a country or its code, like SE; blank hides it)</label><input data-f="joined_from" maxlength="60" value="' + esc(u.joined_from ?? "") + '"' + (canHere("updateUser") ? "" : " disabled") + "></div>" +
 		(canHere("updateUser") ? '<button class="btn primary" id="save">Save profile</button>' : "") +
 		(canHere("setUserCounts") ? '<h2 style="margin-top:20px">Shown counts</h2><p class="dim small">Blank shows the real number. Only the number on the profile changes, not the lists.</p><div class="row">' +
 			["followers", "following"].map((k) => '<label class="small" style="flex:1">' + k + '<input data-count="' + k + '" type="number" min="0" value="' + ((u.count_overrides || {})[k] ?? "") + '"></label>').join("") +

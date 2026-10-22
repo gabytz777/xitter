@@ -44,9 +44,16 @@ export async function staffGate(req: Request, viewer: Viewer): Promise<string | 
 	return null;
 }
 
-const staffRequest = new AsyncLocalStorage<{ staff: boolean }>();
+const staffRequest = new AsyncLocalStorage<{ staff: boolean; language?: string }>();
 
 export const asRequest = <T>(run: () => T) => staffRequest.run({ staff: false }, run);
+
+export const setRequestLanguage = (language: string | undefined) => {
+	const request = staffRequest.getStore();
+	if (request) request.language = language;
+};
+
+export const requestLanguage = () => staffRequest.getStore()?.language;
 
 export const markStaff = () => {
 	const request = staffRequest.getStore();

@@ -5,6 +5,7 @@ import type { User } from "./auth";
 import { loadBuild } from "./build";
 import { feature, settings } from "./settings";
 import { postLimitFor } from "./textlen";
+import { CONVERSATION_CARD_CSS, CONVERSATION_CARD_SCRIPT } from "./conversation-card-ui";
 import { STICKER_PICKER_CSS, STICKER_PICKER_SCRIPT } from "./sticker-picker";
 import { PASSKEY_SCRIPT } from "./passkeys";
 import { FORGOT_SCRIPT, FRESH_SCRIPT, type MenuLink, TIDY_SCRIPT, hideCss, tidyData } from "./tidy";
@@ -13,8 +14,13 @@ import { ERROR_SCRIPT } from "./errors";
 import { BADGES_SCRIPT } from "./badges";
 import { DECOR_SCRIPT } from "./decor";
 import { DECORATIONS_SCRIPT } from "./decorations";
+import { THEME_SCRIPT } from "./themes/client";
+import { bootAccentCss, bootCss, fontLinks, pageChromeCss, steamMotion, type BackgroundPaint } from "./themes/css";
+import { DEFAULT_ACCENT, swatches, themeColorOf, type Accent } from "./themes/presets";
+import { clientLook, themeForClient, type Look } from "./themes/validate";
 import { NOTICE_SCRIPT } from "./automod-notice";
 import { FLAG_PICKER_CSS, FLAG_PICKER_SCRIPT, flagPickerData } from "./flag-picker";
+import { PRONOUNS_CSS, PRONOUNS_SCRIPT, pronounsData } from "./pronouns";
 import { PUBLIC_ORIGIN } from "./config";
 import { legacyUser } from "./model";
 import { patchText } from "./patch";
@@ -44,7 +50,7 @@ export function settingsFor(user: User): Record<string, unknown> {
 		always_allow_dms_from_subscribers: null,
 		allow_dm_groups_from: "following",
 		translator_type: "none",
-		country_code: "us",
+		country_code: (user.country ?? "us").toLowerCase(),
 		nsfw_user: false,
 		nsfw_admin: false,
 		ranked_timeline_setting: null,
@@ -148,6 +154,8 @@ const ownSwitches = (): Record<string, { value: unknown }> => ({
 	responsive_web_edit_tweet_enabled: { value: true },
 	responsive_web_edit_tweet_composition_enabled: { value: true },
 	responsive_web_edit_tweet_perspective_enabled: { value: true },
+	responsive_web_grok_tweet_translation: { value: false },
+	responsive_web_translation_feedback_enabled: { value: false },
 });
 const overrideSwitches = () => Object.fromEntries(Object.entries(settings().switch_overrides).map(([k, value]) => [k, { value }]));
 // Long posts for everyone, up to the limit of the viewer's badge (textlen.ts):
@@ -180,7 +188,7 @@ export function switchReport() {
 	}));
 }
 
-function initialState(user: User | null, fs: NonNullable<ReturnType<typeof loadBuild>>["build"]["featureSwitch"], inCommunity: boolean, educationFlags: Record<string, number>) {
+function initialState(user: User | null, fs: NonNullable<ReturnType<typeof loadBuild>>["build"]["featureSwitch"], inCommunity: boolean, educationFlags: Record<string, number>, accent: Accent = DEFAULT_ACCENT) {
 	return {
 		optimist: [],
 		entities: {
@@ -200,7 +208,7 @@ function initialState(user: User | null, fs: NonNullable<ReturnType<typeof loadB
 				nextPushCheckin: 0,
 				shouldAutoPlayGif: false,
 				scale: "normal",
-				themeColor: "blue500",
+				themeColor: themeColorOf(accent),
 				highContrastEnabled: false,
 				loginPromptLastShown: 0,
 				moneyNotificationsLastSeenSortIndex: {},
@@ -256,10 +264,41 @@ const inline = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
 
 let runtimePatched: { sha: string; text: string } | undefined;
 
+// Xitter's own scripts are the same on every page (one set signed in, one
+// signed out), so they come as a file the browser keeps instead of 130 KB
+// inside every page. Its address carries a hash of it (bootScript).
+const BOOT_SCRIPTS = (signedIn: boolean) =>
+	`${signedIn ? ERROR_SCRIPT : ""}
+${TIDY_SCRIPT}
+${FRESH_SCRIPT}
+${FORGOT_SCRIPT}
+${signedIn ? "" : PASSKEY_SCRIPT}
+${PRONOUNS_SCRIPT}
+${FLAG_PICKER_SCRIPT}
+${signedIn ? STICKER_PICKER_SCRIPT : ""}
+${signedIn ? CONVERSATION_CARD_SCRIPT : ""}
+${POST_CONTEXT_SCRIPT}
+${BADGES_SCRIPT}
+${signedIn ? THEME_SCRIPT : ""}
+${signedIn ? DECOR_SCRIPT : ""}
+${DECORATIONS_SCRIPT}
+${signedIn ? NOTICE_SCRIPT : ""}
+${PWA_SCRIPT}`;
+let boot: { body: Buffer; path: string }[] | undefined;
+const boots = () =>
+	(boot ??= [false, true].map((signedIn) => {
+		const body = Buffer.from(BOOT_SCRIPTS(signedIn));
+		return { body, path: `/i/xitter/boot-${Bun.hash(body).toString(36)}.js` };
+	}));
+const bootFor = (signedIn: boolean) => boots()[signedIn ? 1 : 0];
+export const bootScript = (path: string): Buffer | undefined => boots().find((b) => b.path === path)?.body;
+
 // With no user the client boots signed out, for the sign-in dialog.
 // `multi`: other accounts are signed in too (auth_multi), so the account menu
 // asks for them.
-export function shell(user: User | null, multi = false, inCommunity = false, educationFlags: Record<string, number> = {}, links: MenuLink[] = []): string | undefined {
+export function shell(user: User | null, multi = false, inCommunity = false, educationFlags: Record<string, number> = {}, links: MenuLink[] = [], look: Look | null = null, accent: Accent = DEFAULT_ACCENT, paint?: BackgroundPaint, csrf?: string): string | undefined {
+	const theme = look?.kind === "painted" ? look.theme : null;
+	const clientTheme = theme ? themeForClient(theme) : null;
 	const loaded = loadBuild();
 	if (!loaded) return undefined;
 	const { build, runtime } = loaded;
@@ -271,32 +310,23 @@ export function shell(user: User | null, multi = false, inCommunity = false, edu
 	const scripts = build.scripts
 		.map((p) => `<script defer charset="utf-8" crossorigin="anonymous" src="${PUBLIC_ORIGIN}/abs${p}"></script>`)
 		.join("");
-	return `<!DOCTYPE html><html dir="ltr" lang="en"><head><meta charset="utf-8" />
+	return `<!DOCTYPE html><html dir="ltr" lang="en"${theme ? ` data-xitter-theme="${esc(theme.id)}"` : ""} data-xitter-accent="${esc(accent.kind === "named" ? accent.id : "custom")}"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0,viewport-fit=cover" />
-<meta name="theme-color" content="#000000" /><title>${esc(settings().instance_name)}</title>
-<link rel="icon" type="image/png" href="/public/favicon.png" />${pwaHead()}
+<meta name="theme-color" content="${theme ? esc(theme.bg.stops[0] ?? "#000000") : "#000000"}" /><title>${esc(settings().instance_name)}</title>
+<link rel="icon" type="image/png" href="/public/favicon.png" />${pwaHead()}${fontLinks(theme)}
 <style>html,body{height:100%}body{margin:0;background-color:#000}
 html{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
 @media (display-mode:standalone){body{overscroll-behavior-y:none}}${LOGO_CSS}
 ${hideCss()}
 ${FLAG_PICKER_CSS}
-${STICKER_PICKER_CSS}</style>
+${PRONOUNS_CSS}
+${STICKER_PICKER_CSS}${bootAccentCss(accent)}${theme ? bootCss(theme, paint) : ""}
+${CONVERSATION_CARD_CSS}
+[data-testid="sidebarColumn"] div:has(> [data-testid="emptyState"]),[data-testid="sidebarColumn"] div:has(> div > aside) ~ div:empty{display:none}</style>
 </head><body><div id="react-root" style="height:100%;display:flex;"></div>
-<script>window.__INITIAL_STATE__=${inline(initialState(user, build.featureSwitch, inCommunity, educationFlags))};window.__META_DATA__=${inline(meta)};</script>
-<script>window.__XITTER__=${inline({ ...flagPickerData(user?.flag ?? null), tidy: tidyData(links) })};
-${user ? ERROR_SCRIPT : ""}
-${TIDY_SCRIPT}
-${FRESH_SCRIPT}
-${FORGOT_SCRIPT}
-${user ? "" : PASSKEY_SCRIPT}
-${FLAG_PICKER_SCRIPT}
-${user ? STICKER_PICKER_SCRIPT : ""}
-${POST_CONTEXT_SCRIPT}
-${BADGES_SCRIPT}
-${user ? DECOR_SCRIPT : ""}
-${DECORATIONS_SCRIPT}
-${user ? NOTICE_SCRIPT : ""}
-${PWA_SCRIPT}</script>
+<script>window.__INITIAL_STATE__=${inline(initialState(user, build.featureSwitch, inCommunity, educationFlags, accent))};window.__META_DATA__=${inline(meta)};</script>
+<script>window.__XITTER__=${inline({ ...flagPickerData(user?.flag ?? null), ...pronounsData(user), tidy: tidyData(links), theme: clientTheme, look: clientLook(look, accent), accent: clientLook(look, accent).accent, themeColor: themeColorOf(accent), themePresets: swatches(), pageChrome: pageChromeCss(paint), steamMotion: steamMotion(paint), ...(user && csrf ? { csrf } : {}) })};</script>
+<script src="${bootFor(!!user).path}"></script>
 <script id="nonce-csp"></script>
 <script>${runtimePatched.text}</script>
 ${scripts}

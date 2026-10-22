@@ -7,6 +7,8 @@
 import { accountPage, esc } from "./account-page";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
+import { lookupRemoteUser } from "./federation-sync";
+import { localName } from "./users";
 
 export const AFFILIATION_LIMIT = 4;
 
@@ -91,11 +93,14 @@ export async function orgRoute(req: Request, viewer: Viewer): Promise<Response> 
 		if (!isId(orgId)) return view(req, viewer, "No such request.");
 		if (action === "accept" && (await sql`select count(*)::int as n from affiliations where user_id = ${viewer.id}::bigint`)[0].n >= AFFILIATION_LIMIT)
 			return view(req, viewer, `You're already an affiliate of ${AFFILIATION_LIMIT} organisations. Leave one first.`);
-		const [r] = await sql`delete from affiliation_requests r using users o
-			where r.org_id = ${orgId}::bigint and r.user_id = ${viewer.id}::bigint and o.id = r.org_id and ${isOrg(sql`o`)} returning o.screen_name`;
+		const r = await sql.begin(async (tx) => {
+			const [found] = await tx`delete from affiliation_requests r using users o
+				where r.org_id = ${orgId}::bigint and r.user_id = ${viewer.id}::bigint and o.id = r.org_id and ${isOrg(sql`o`)} returning o.screen_name`;
+			if (found && action === "accept") await tx`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${viewer.id}::bigint) on conflict do nothing`;
+			return found;
+		});
 		if (!r) return view(req, viewer, "That request is gone.");
 		if (action === "decline") return view(req, viewer, "", `You declined @${r.screen_name}.`);
-		await sql`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${viewer.id}::bigint) on conflict do nothing`;
 		return view(req, viewer, "", `You are now an affiliate of @${r.screen_name}.`);
 	}
 	if (action === "leave") {
@@ -109,8 +114,10 @@ export async function orgRoute(req: Request, viewer: Viewer): Promise<Response> 
 	if (!org) return view(req, viewer, "Only an organisation and its managers can do that.");
 	const userId = field("user");
 	if (action === "add") {
-		const handle = field("handle").replace(/^@/, "");
-		const [u] = await sql`select id::text, screen_name, verified_type, status from users where lower(screen_name) = lower(${handle})`;
+		const handle = localName(field("handle").replace(/^@/, ""));
+		const find = () => sql`select id::text, screen_name, verified_type, status from users where lower(screen_name) = lower(${handle}) and not instance_blocked`;
+		let [u] = await find();
+		if (!u && handle.includes("@") && (await lookupRemoteUser(handle).catch(() => undefined))) [u] = await find();
 		if (!u || u.status === "suspended") return view(req, viewer, "No account with that handle.");
 		if (u.id === org.id) return view(req, viewer, "An organisation can't be its own affiliate.");
 		if ((await sql`select 1 from affiliations where user_id = ${org.id}::bigint and org_id = ${u.id}::bigint`).length)

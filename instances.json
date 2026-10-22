@@ -1,7 +1,14 @@
 {
 	"version": 1,
-	"sequence": 13,
+	"sequence": 17,
 	"instances": [
+		{
+			"id": "cro.corvine.vip",
+			"name": "CRO",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "OJiGKsH5eTlfBzKyWCe2G0uHIOESe6QV-9sSmVP-iVk",
+			"state": "active"
+		},
 		{
 			"id": "giggleshitter.gay",
 			"name": "giggleshitter",
@@ -31,10 +38,24 @@
 			"state": "active"
 		},
 		{
+			"id": "social.pixelatedaria.space",
+			"name": "social.pixelatedaria.space",
+			"source_url": "https://github.com/xittered/xitter",
+			"public_key": "yTE4xnSExcGTOgq_JAhElkvce0vif-MxTZefmy-8IeY",
+			"state": "active"
+		},
+		{
 			"id": "x.glitchprod.xyz",
 			"name": "Digital Circus",
 			"source_url": "https://github.com/MDCYT/xitter",
 			"public_key": "L2-aSa8he-ufDfTVKQdosl2vW0JyWZMiGae3qhTt1a8",
+			"state": "active"
+		},
+		{
+			"id": "x.iambrdn.dev",
+			"name": "xt.brdn",
+			"source_url": "https://github.com/braidenhxyz/xitter-compose",
+			"public_key": "2AbfXEDcr4aaSA5SY6laQbVSfHWvxK1Pbye9A67H3WI",
 			"state": "active"
 		},
 		{
@@ -66,17 +87,17 @@
 			"state": "active"
 		},
 		{
+			"id": "xitter.plunkinator.org",
+			"name": "Xitter",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "ovmWzg0FxZlqKk8oaBL6hjK-XGAhUFuh_JnAsW9M8ng",
+			"state": "active"
+		},
+		{
 			"id": "xitter.space",
 			"name": "Xit",
 			"source_url": "https://github.com/Xittered/xitter",
 			"public_key": "C_9Cz5GkJjtSvWngLyVhfSTscLdcYo6Omx_EpSzQU5w",
-			"state": "active"
-		},
-		{
-			"id": "xt.iambrdn.com",
-			"name": "xt.brdn",
-			"source_url": "https://github.com/braidenhxyz/xitter-compose",
-			"public_key": "eiI4EMp0bupFbJ7EKy5A_MIo_yvhRMbljYSnzozwXIY",
 			"state": "active"
 		}
 	]

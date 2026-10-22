@@ -9,7 +9,7 @@ const ICON = "M460-360q69 0 120-45t60-113l-320 90q26 32 62 50t78 18ZM294-510l106
 export const STICKER_PICKER_CSS = `#xitter-stickers{position:fixed;z-index:10000;width:340px;max-width:calc(100vw - 16px);max-height:min(420px,calc(100vh - 16px));display:flex;flex-direction:column;border-radius:16px;overflow:hidden;font-family:TwitterChirp,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;box-shadow:rgba(101,119,134,.2) 0 0 15px,rgba(101,119,134,.15) 0 0 3px 1px}
 #xitter-stickers .xs-tabs{display:flex;gap:4px;overflow-x:auto;padding:8px;border-bottom:1px solid rgba(128,128,128,.25)}
 #xitter-stickers .xs-tab{flex:none;padding:6px 12px;border:0;border-radius:999px;background:none;color:inherit;font:inherit;font-size:14px;font-weight:700;cursor:pointer;opacity:.6}
-#xitter-stickers .xs-tab.xs-on{opacity:1;background:rgba(29,155,240,.15);color:rgb(29,155,240)}
+#xitter-stickers .xs-tab.xs-on{opacity:1;background:var(--xt-accent-soft,rgba(29,155,240,.15));color:var(--xt-accent,#1d9bf0)}
 #xitter-stickers .xs-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:8px;overflow-y:auto}
 #xitter-stickers .xs-sticker{aspect-ratio:1;padding:4px;border:0;border-radius:8px;background:none;cursor:pointer}
 #xitter-stickers .xs-sticker:hover{background:rgba(128,128,128,.15)}

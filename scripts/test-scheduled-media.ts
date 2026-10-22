@@ -79,7 +79,7 @@ try {
  for(const [i,id]of badIds.entries())await sql`insert into media(id,user_id,kind,mime,size,width,height,state,post_id,detached,alt_text)
   values (${id}::bigint,${i===0?other:owner}::bigint,'photo','image/png',1,1,1,${i===2?'processing':'ready'},${i===1?published:null}::bigint,${i===3},${`DO NOT EXPOSE ${i}`})`;
  const bad=(await gql("CreateDraftTweet",{post_tweet_request:{status:"Stale or forged media",media_ids:badIds}})).data.tweet.rest_id;
- const filtered=(await draftList()).find((row:any)=>row.rest_id===bad);assert.deepEqual(filtered.media_entities,[]);assert(!JSON.stringify(filtered).includes("DO NOT EXPOSE"));
+ const filtered=(await draftList()).find((row:any)=>row.rest_id===bad);assert.equal(filtered.media_entities,undefined);assert(!JSON.stringify(filtered).includes("DO NOT EXPOSE"));
  // A duplicate id across saved draft parts has one entity, so the client can
  // restore both references without duplicate downloads or conflicting metadata.
  const duplicate=(await gql("CreateDraftTweet",{post_tweet_request:{status:"Duplicate draft media",media_ids:[photo],thread_tweets:[{status:"Duplicate reference",media_ids:[photo]}]}})).data.tweet.rest_id;

@@ -16,7 +16,7 @@ export const EAR_STYLES = ["pointy", "round", "tilted", "fluffy"] as const;
 type EarStyle = (typeof EAR_STYLES)[number];
 
 const HEX = /^#[0-9a-f]{6}$/;
-const PRESETS = new Set(DISCORD_DECORATIONS);
+const PRESETS = new Set(DISCORD_DECORATIONS.map((d) => d.asset));
 
 export function parseDecoration(value: unknown): Decoration | null {
 	if (!value || typeof value !== "object") return null;

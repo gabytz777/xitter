@@ -34,6 +34,15 @@ export function countryName(code: string): string | undefined {
 
 export const regionName = (code: string): string | undefined => REGION_OF.get(code);
 
+// a two-letter code, or a country's English name ("sweden"), as its code
+export function countryCode(input: string): string | undefined {
+	const value = input.trim();
+	if (/^[a-zA-Z]{2}$/.test(value) && countryName(value.toUpperCase())) return value.toUpperCase();
+	const wanted = value.toLowerCase();
+	for (const code of REGION_OF.keys()) if (countryName(code)?.toLowerCase() === wanted) return code;
+	return undefined;
+}
+
 // every country a trend location can be, by name
 export const allCountries = (): { code: string; name: string }[] =>
 	[...REGION_OF.keys()].flatMap((code) => (countryName(code) ? [{ code, name: countryName(code)! }] : [])).sort((a, b) => a.name.localeCompare(b.name));

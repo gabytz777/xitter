@@ -1,0 +1,64 @@
+# Two throwaway instances for trying account migration (src/migration.ts):
+#   docker compose -f docker/migration-test.yaml up -d --build
+#   docker compose -f docker/migration-test.yaml exec app-a bun scripts/create-user.ts alice <password>
+#   docker compose -f docker/migration-test.yaml exec app-b bun scripts/create-user.ts alice <password>
+# A is http://localhost:3101 and B http://localhost:3102. On B, the old
+# instance's address is http://app-a:3000, the name B reaches A by. Without a
+# client (FETCH_CLIENT=0) only the account pages work: sign in with
+#   curl -c jar -d username=alice -d password=<password> http://localhost:3101/login
+# or set FETCH_CLIENT=1 to download one into each instance.
+# B_VERSION gives B another version label, to see the mismatch warning.
+# scripts/test-migration.ts runs the checks against them (see its first lines).
+# `down -v` throws everything away.
+x-app: &app
+  build: ..
+  environment: &env
+    FEDERATION: "off"
+    FETCH_CLIENT: ${FETCH_CLIENT:-0}
+    MIGRATION_ALLOW_HTTP: "1"
+    # both instances sit on the same private network
+    MIGRATION_ALLOW_PRIVATE: "1"
+    RATE_LIMITS: "off"
+
+services:
+  app-a:
+    <<: *app
+    environment:
+      <<: *env
+      DATABASE_URL: postgres://xitter:test@db:5432/xit_a
+      PUBLIC_ORIGIN: http://localhost:3101
+      MEDIA_DIR: /app/media/a
+    ports: ["3101:3000"]
+    volumes: [media:/app/media, client-a:/app/client]
+    depends_on: { db: { condition: service_healthy } }
+  app-b:
+    <<: *app
+    environment:
+      <<: *env
+      DATABASE_URL: postgres://xitter:test@db:5432/xit_b
+      PUBLIC_ORIGIN: http://localhost:3102
+      MEDIA_DIR: /app/media/b
+      XITTER_VERSION: ${B_VERSION:-}
+    ports: ["3102:3000"]
+    volumes: [media:/app/media, client-b:/app/client]
+    depends_on: { db: { condition: service_healthy } }
+  db:
+    image: postgres:18-bookworm
+    environment:
+      POSTGRES_USER: xitter
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: xit_a
+    # the test script seeds both databases directly
+    ports: ["127.0.0.1:55433:5432"]
+    command: ["postgres", "-c", "shared_buffers=64MB"]
+    volumes:
+      - ./migration-test-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xitter -d xit_b"]
+      interval: 3s
+      retries: 30
+
+volumes:
+  media:
+  client-a:
+  client-b:

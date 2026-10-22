@@ -4,6 +4,7 @@
 // as images, so they animate without a video conversion step. Videos are
 // converted by video.ts.
 
+import { conversationVideoMap } from "./conversation-cards";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
@@ -97,6 +98,231 @@ export function sniffImage(b: Buffer): Image | undefined {
 
 const fileOf = (id: string) => join(MEDIA_DIR, id);
 const EXT: Record<string, string> = { "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/jpeg": "jpg" };
+
+export const THEME_BACKGROUND = "theme_background";
+export const THEME_PHOTO_MAX = 8 * 1024 * 1024;
+export const THEME_EDGE_MAX = 4096;
+export const THEME_FRAME_PIXELS = 40_000_000;
+
+export type ThemeMime = "image/png" | "image/gif" | "image/webp" | "image/jpeg";
+export type ImgExt = "png" | "gif" | "webp" | "jpg";
+export type ThemePhoto = { readonly mime: ThemeMime; readonly ext: ImgExt; readonly width: number; readonly height: number; readonly bytes: Buffer };
+export type ThemePhotoResult = { readonly ok: true; readonly photo: ThemePhoto } | { readonly ok: false; readonly message: string };
+
+const PNG_KEEP = new Set(["IHDR", "PLTE", "IDAT", "IEND", "tRNS", "gAMA", "sRGB", "cHRM", "bKGD", "pHYs", "sBIT"]);
+
+function skipGifSubs(b: Buffer, i: number): number | undefined {
+	while (i < b.length) {
+		const n = b[i]!;
+		i += 1;
+		if (n === 0) return i;
+		i += n;
+		if (i > b.length) return;
+	}
+	return;
+}
+
+function gifFrames(b: Buffer): { frames: number; trailer: number } | undefined {
+	if (b.length < 13 || b.toString("latin1", 0, 3) !== "GIF") return;
+	let i = 13;
+	if (b[10]! & 0x80) i += 3 * (1 << ((b[10]! & 7) + 1));
+	if (i > b.length) return;
+	let frames = 0;
+	while (i < b.length) {
+		const block = b[i]!;
+		if (block === 0x3b) return { frames, trailer: i };
+		if (block === 0x21) {
+			if (i + 2 > b.length) return;
+			i += 2;
+			const next = skipGifSubs(b, i);
+			if (next === undefined) return;
+			i = next;
+			continue;
+		}
+		if (block === 0x2c) {
+			if (i + 10 > b.length) return;
+			const packed = b[i + 9]!;
+			i += 10;
+			if (packed & 0x80) i += 3 * (1 << ((packed & 7) + 1));
+			if (i >= b.length) return;
+			i += 1;
+			const next = skipGifSubs(b, i);
+			if (next === undefined) return;
+			i = next;
+			frames += 1;
+			continue;
+		}
+		return;
+	}
+	return;
+}
+
+// APP1, APP13, and COM are where a JPEG hides EXIF, IPTC, and comments. PNG text chunks and WebP EXIF/XMP are the same kind of passenger, so the rebuilt file is the picture without them.
+function stripJpeg(b: Buffer): Buffer | undefined {
+	if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return;
+	const parts: Buffer[] = [b.subarray(0, 2)];
+	let i = 2;
+	while (i + 1 < b.length) {
+		if (b[i] !== 0xff) return;
+		const marker = b[i + 1]!;
+		if (marker === 0xd9) {
+			parts.push(b.subarray(i, i + 2));
+			break;
+		}
+		if (marker === 0xda) {
+			parts.push(b.subarray(i));
+			break;
+		}
+		if (marker === 0xff) {
+			i += 1;
+			continue;
+		}
+		if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+			parts.push(b.subarray(i, i + 2));
+			i += 2;
+			continue;
+		}
+		if (i + 4 > b.length) return;
+		const len = b.readUInt16BE(i + 2);
+		if (len < 2 || i + 2 + len > b.length) return;
+		const drop = marker === 0xe1 || marker === 0xed || marker === 0xfe;
+		if (!drop) parts.push(b.subarray(i, i + 2 + len));
+		i += 2 + len;
+	}
+	return Buffer.concat(parts);
+}
+
+function stripPng(b: Buffer): Buffer | undefined {
+	const sig = b.subarray(0, 8);
+	if (sig.length < 8 || sig[0] !== 0x89 || sig.toString("latin1", 1, 4) !== "PNG") return;
+	const parts: Buffer[] = [b.subarray(0, 8)];
+	let i = 8;
+	let sawEnd = false;
+	while (i + 12 <= b.length) {
+		const len = b.readUInt32BE(i);
+		if (len > b.length || i + 12 + len > b.length) return;
+		const type = b.toString("latin1", i + 4, i + 8);
+		const chunk = b.subarray(i, i + 12 + len);
+		i += 12 + len;
+		if (PNG_KEEP.has(type)) parts.push(chunk);
+		if (type === "IEND") {
+			sawEnd = true;
+			break;
+		}
+	}
+	if (!sawEnd) return;
+	return Buffer.concat(parts);
+}
+
+function stripWebp(b: Buffer): Buffer | undefined {
+	if (b.length < 12 || b.toString("latin1", 0, 4) !== "RIFF" || b.toString("latin1", 8, 12) !== "WEBP") return;
+	const chunks: Buffer[] = [];
+	let i = 12;
+	while (i + 8 <= b.length) {
+		const id = b.toString("latin1", i, i + 4);
+		const size = b.readUInt32LE(i + 4);
+		const end = i + 8 + size + (size & 1);
+		if (end > b.length) return;
+		if (id !== "EXIF" && id !== "XMP ") chunks.push(b.subarray(i, end));
+		i = end;
+	}
+	const body = Buffer.concat(chunks);
+	const out = Buffer.alloc(12 + body.length);
+	out.write("RIFF", 0, "latin1");
+	out.writeUInt32LE(4 + body.length, 4);
+	out.write("WEBP", 8, "latin1");
+	body.copy(out, 12);
+	return out;
+}
+
+export function acceptThemePhoto(data: Buffer): ThemePhotoResult {
+	const image = sniffImage(data);
+	if (!image || !EXT[image.mime]) return { ok: false, message: "unsupported image" };
+	if (data.length > THEME_PHOTO_MAX) return { ok: false, message: "image is too large" };
+	if (image.width < 1 || image.height < 1 || image.width > THEME_EDGE_MAX || image.height > THEME_EDGE_MAX) return { ok: false, message: "image is too large" };
+	let frames = 1;
+	if (image.mime === "image/gif") {
+		const walked = gifFrames(data);
+		if (!walked || walked.frames < 1) return { ok: false, message: "image could not be read" };
+		const tail = data.toString("latin1", walked.trailer + 1);
+		if (/<script|<html|javascript:/i.test(tail)) return { ok: false, message: "unsupported image" };
+		frames = walked.frames;
+	}
+	const pixels = image.width * image.height * frames;
+	if (!Number.isFinite(pixels) || pixels > THEME_FRAME_PIXELS) return { ok: false, message: "image is too large" };
+	let bytes = data;
+	if (image.mime === "image/jpeg") {
+		const stripped = stripJpeg(data);
+		if (!stripped || !sniffImage(stripped)) return { ok: false, message: "image could not be read" };
+		bytes = stripped;
+	} else if (image.mime === "image/png") {
+		const stripped = stripPng(data);
+		if (!stripped || !sniffImage(stripped)) return { ok: false, message: "image could not be read" };
+		bytes = stripped;
+	} else if (image.mime === "image/webp") {
+		const stripped = stripWebp(data);
+		if (!stripped || !sniffImage(stripped)) return { ok: false, message: "image could not be read" };
+		bytes = stripped;
+	}
+	return {
+		ok: true,
+		photo: { mime: image.mime as ThemeMime, ext: EXT[image.mime] as ImgExt, width: image.width, height: image.height, bytes },
+	};
+}
+
+async function writeThemePoster(id: string): Promise<boolean> {
+	const dest = posterFile(MEDIA_DIR, id);
+	try {
+		const proc = Bun.spawn(["ffmpeg", "-y", "-i", fileOf(id), "-frames:v", "1", "-q:v", "3", dest], { stdout: "ignore", stderr: "ignore" });
+		const timer = setTimeout(() => proc.kill(), 8000);
+		const code = await proc.exited;
+		clearTimeout(timer);
+		if (code !== 0) {
+			rmSync(dest, { force: true });
+			return false;
+		}
+		return true;
+	} catch {
+		rmSync(dest, { force: true });
+		return false;
+	}
+}
+
+export async function storeThemePhoto(id: string, userId: string, data: Buffer): Promise<{ ok: true; ext: ImgExt; mime: ThemeMime; width: number; height: number; size: number } | { ok: false; message: string }> {
+	if (!isId(id)) return { ok: false, message: "invalid media id" };
+	const got = acceptThemePhoto(data);
+	if (!got.ok) return got;
+	mkdirSync(MEDIA_DIR, { recursive: true });
+	writeFileSync(fileOf(id), got.photo.bytes);
+	try {
+		await sql`insert into media (id, user_id, kind, mime, size, width, height, detached)
+			values (${id}::bigint, ${userId}::bigint, 'photo', ${got.photo.mime}, ${got.photo.bytes.length}, ${got.photo.width}, ${got.photo.height}, true)`;
+	} catch {
+		rmSync(fileOf(id), { force: true });
+		return { ok: false, message: "could not store the image" };
+	}
+	if (got.photo.mime === "image/gif") await writeThemePoster(id);
+	return { ok: true, ext: got.photo.ext, mime: got.photo.mime, width: got.photo.width, height: got.photo.height, size: got.photo.bytes.length };
+}
+
+export type OwnedPhoto = { readonly ext: ImgExt; readonly poster: boolean };
+
+export async function ownedThemePhoto(userId: string, id: string): Promise<OwnedPhoto | undefined> {
+	if (!isId(id)) return;
+	const [row] = await sql`select mime, kind, state, detached, post_id::text as post from media where id = ${id}::bigint and user_id = ${userId}::bigint`;
+	if (!row || row.kind !== "photo" || row.state !== "ready" || !row.detached || row.post) return;
+	const ext = EXT[row.mime];
+	if (ext !== "png" && ext !== "gif" && ext !== "webp" && ext !== "jpg") return;
+	return { ext, poster: existsSync(posterFile(MEDIA_DIR, id)) };
+}
+
+export function themeMediaPath(id: string, ext: ImgExt): `/media/${string}.${ImgExt}` {
+	return `/media/${id}.${ext}`;
+}
+
+export function themePosterPath(id: string): `/media/poster/${string}.jpg` {
+	return `/media/poster/${id}.jpg`;
+}
 const EXT_VIDEO: Record<string, string> = { "video/mp4": "mp4" };
 export const mediaUrl = (id: string, mime: string) => `${PUBLIC_ORIGIN}/media/${id}.${EXT[mime] ?? EXT_VIDEO[mime] ?? "bin"}`;
 export const posterUrl = (id: string) => `${PUBLIC_ORIGIN}/media/poster/${id}.jpg`;
@@ -199,6 +425,20 @@ async function finalize(id: string, p: Pending): Promise<Response> {
 			return Response.json({ ...idFields(id), size: p.total, expires_after_secs: 86400, processing_info: { state: "pending", check_after_secs: 1 } });
 		}
 		let data: Buffer<ArrayBufferLike> = readFileSync(assembled);
+		if (p.category === THEME_BACKGROUND) {
+			const stored = await storeThemePhoto(id, p.userId, data);
+			if (!stored.ok) {
+				rmSync(assembled, { force: true });
+				return uploadError(stored.message);
+			}
+			return Response.json({
+				...idFields(id),
+				size: stored.size,
+				expires_after_secs: 86400,
+				image: { image_type: stored.mime, w: stored.width, h: stored.height },
+				theme_path: themeMediaPath(id, stored.ext),
+			});
+		}
 		let image = sniffImage(data);
 		if (!image) {
 			rmSync(assembled, { force: true });
@@ -231,6 +471,8 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 
 	switch (fields.command) {
 		case "INIT": {
+			const themeBg = (fields.media_category ?? "") === THEME_BACKGROUND;
+			if (themeBg && fields.source_url) return uploadError("Theme backgrounds are uploaded as files.");
 			if (fields.source_url) {
 				let source: URL;
 				try {
@@ -295,9 +537,11 @@ export async function mediaUpload(req: Request, url: URL, viewer: Viewer): Promi
 			}
 			const total = Number(fields.total_bytes);
 			const video = /^video\//.test(fields.media_type ?? "") || /video/.test(fields.media_category ?? "");
+			if (themeBg && video) return uploadError("Theme backgrounds are images.");
 			if (video && !(await videoSupported())) return uploadError("Video uploads are not available on this server.");
 			if (!video && fields.media_type && !/^image\//.test(fields.media_type)) return uploadError("Only images and videos can be uploaded.");
-			if (!Number.isInteger(total) || total <= 0 || total > (video ? maxVideoBytes() : MAX_GIF)) return uploadError("File is too large or empty.");
+			const cap = themeBg ? THEME_PHOTO_MAX : video ? maxVideoBytes() : MAX_GIF;
+			if (!Number.isInteger(total) || total <= 0 || total > cap) return uploadError("File is too large or empty.");
 			if (activeUploadCount(viewer.id) >= MAX_PENDING_PER_USER) return uploadError("Finish your other uploads first.", 429);
 			const newMedia = newId();
 			pending.set(newMedia, { userId: viewer.id, total, category: fields.media_category ?? "", video, chunks: new Map(), received: 0, started: Date.now() });
@@ -398,11 +642,20 @@ async function cacheFor(viewer: Viewer, served: Served): Promise<string | undefi
 	return !served.post && served.owner === viewer.id ? PRIVATE : undefined;
 }
 
+async function serveConversationVideo(id: string, viewer: Viewer): Promise<Response> {
+	const served = await servedOf(id);
+	const cache = served && await cacheFor(viewer, served);
+	if (!served || served.mime !== "video/mp4" || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
+	return new Response(conversationVideoMap(served.id, mediaUrl(served.id, served.mime), served.owner), { headers: { "content-type": "application/xml", "cache-control": cache, "x-content-type-options": "nosniff" } });
+}
+
 // /media/<id>[.ext], /media/banner/<id>[/<size>] and /media/poster/<id>.jpg; the
 // client asks for sizes through the query string or a path suffix, and gets the
 // original either way. Byte ranges are answered so the video player can seek.
 export async function serveMedia(req: Request, pathname: string, viewer: Viewer): Promise<Response> {
+	const cardVideo = /^\/media\/card-video\/(\d{1,19})\.xml$/.exec(pathname);
 	const poster = /^\/media\/poster\/(\d{1,19})\.jpg$/.exec(pathname);
+	if (cardVideo && isId(cardVideo[1])) return serveConversationVideo(cardVideo[1], viewer);
 	if (poster && isId(poster[1])) {
 		const body = await remoteMediaFile(poster[1], true);
 		const served = body && (await servedOf(poster[1]));
