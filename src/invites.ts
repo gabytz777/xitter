@@ -32,7 +32,7 @@ export async function createInvite(opts: { createdBy?: string; maxUses?: number;
 // Handles that would clash with the client's own pages (x.com/<name> is a
 // profile, so /home or /settings can't be one) or pretend to be staff.
 const RESERVED = new Set(
-	"all home explore notifications messages chat settings search compose i login logout signup signin register admin root api public media abs abouts about tos privacy rules appeal oembed help support account accounts verified premium jobs grok lists bookmarks communities topics hashtag intent share oauth xitter twitter x moderator mod staff system".split(" "),
+	"all home explore notifications messages chat settings search compose i login logout signup signin register admin root api public media abs abouts about tos privacy rules appeal oembed help support account accounts verified premium jobs grok lists bookmarks communities topics hashtag intent share oauth xitter twitter x moderator mod staff system healthz".split(" "),
 );
 
 export const isReserved = (name: string) => RESERVED.has(name.toLowerCase()) || superadminNameHere(name);
