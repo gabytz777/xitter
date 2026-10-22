@@ -1,39 +1,60 @@
-// Forgot password: a mailed link opens a page that sets a new one. Tokens are
-// stored hashed, last an hour and work once.
+// Forgot password: a link opens a page that sets a new one. Tokens are stored
+// hashed, last an hour and work once. The link travels by mail when this
+// instance has mail, otherwise by Discord message to a linked account
+// (discord.ts) — and a linked account can skip the link entirely by proving
+// itself to Discord.
 import { createHash } from "node:crypto";
 import { accountPage, esc } from "./account-page";
 import { sql } from "./db";
 import { PUBLIC_ORIGIN } from "./config";
+import { discordEnabled, dmUser } from "./discord";
 import { mailEnabled, sendMail } from "./mail";
 import { settings } from "./settings";
+import { issueResetToken } from "./reset-tokens";
 
 const hash = (token: string) => createHash("sha256").update(token).digest("hex");
 
 // always answers the same, so the dialog can't be used to find out who has an account
 export async function requestReset(usernameOrEmail: string): Promise<void> {
 	const who = usernameOrEmail.trim().replace(/^@/, "");
-	if (!who || !mailEnabled()) return;
+	if (!who) return;
 	const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
 	const u = await sql.begin(async (tx) => {
 		// Lock before reading the recipient and issuing the token. Changing the
 		// verified email uses the same lock and invalidates previously issued links.
 		const [account] = await tx`select id::text, screen_name, email from users
 			where (lower(screen_name) = lower(${who}) or lower(email) = lower(${who}))
-			and email is not null and status <> 'suspended' and instance is null for update`;
+			and status <> 'suspended' and instance is null for update`;
 		if (!account) return undefined;
 		const [recent] = await tx`select 1 from password_resets where user_id = ${account.id}::bigint and created_at > now() - interval '2 minutes'`;
 		if (recent) return undefined;
 		await tx`insert into password_resets (token_hash, user_id) values (${hash(token)}, ${account.id}::bigint)`;
-		return account;
+		// the DM recipient, under the same lock; a separate read keeps the lock
+		// query above exactly as upstream's issuance test waits for it
+		const [link] = await tx`select discord_id from discord_accounts where user_id = ${account.id}::bigint`;
+		return { ...account, discord_id: link?.discord_id as string | undefined };
 	});
 	if (!u) return;
 	const name = settings().instance_name;
-	await sendMail(
-		u.email,
-		`Reset your ${name} password`,
-		`Hi @${u.screen_name},\n\nSomeone asked to reset the password of your ${name} account. Open this link within an hour to choose a new one:\n\n${PUBLIC_ORIGIN}/account/reset?token=${token}\n\nIf this wasn't you, ignore this message: your password stays as it is.`,
-		{ kind: "password_reset", userId: u.id },
-	).catch((e) => console.error("password reset mail:", e.message));
+	const link = `${PUBLIC_ORIGIN}/account/reset?token=${token}`;
+	if (mailEnabled() && u.email) {
+		await sendMail(
+			u.email,
+			`Reset your ${name} password`,
+			`Hi @${u.screen_name},\n\nSomeone asked to reset the password of your ${name} account. Open this link within an hour to choose a new one:\n\n${link}\n\nIf this wasn't you, ignore this message: your password stays as it is.`,
+			{ kind: "password_reset", userId: u.id },
+		).catch((e) => console.error("password reset mail:", e.message));
+		return;
+	}
+	// no mail here: a linked Discord account gets the same link, and never the
+	// new password itself — a DM is kept forever and read on every device
+	if (u.discord_id && process.env.DISCORD_BOT_TOKEN) {
+		const sent = await dmUser(
+			u.discord_id,
+			`Someone asked to reset the password of your @${u.screen_name} account on ${name}. Open this link within an hour to choose a new one:\n\n${link}\n\nIf this wasn't you, ignore this message: your password stays as it is.`,
+		).catch(() => false);
+		if (!sent) console.error("password reset DM: could not message", u.discord_id);
+	}
 }
 
 async function valid(token: string): Promise<{ user_id: string } | undefined> {
@@ -86,6 +107,8 @@ export async function resetRoute(req: Request, url: URL): Promise<Response> {
 		await tx`delete from passkeys where user_id = ${row.user_id}::bigint`;
 		await tx`delete from passkey_challenges where user_id = ${row.user_id}::bigint`;
 		await tx`update email_confirmations set used = true where user_id = ${row.user_id}::bigint and not used`;
+		// a confirmation made before the password changed must not survive it
+		await tx`delete from step_up_grants where user_id = ${row.user_id}::bigint`;
 		return true;
 	});
 	if (!changed) return page(req, `<h1>Link expired</h1><p>This reset link is invalid or has been used. <a href="/">Back to sign in</a>, then ask for a new one.</p>`, 410);
@@ -97,12 +120,21 @@ export async function forgotRoute(req: Request, url: URL): Promise<Response> {
 	const ask = (value = "") =>
 		page(
 			req,
-			`<h1>Reset your password</h1><p>Enter your username or the email you signed up with. We'll mail you a link.</p>
+			`<h1>Reset your password</h1><p>Enter your username or the email you signed up with. We'll send you a link — by email if that account has one, by Discord message if it's linked.</p>
 <form method="post" action="/account/forgot"><input name="who" value="${esc(value)}" placeholder="Username or email" autocomplete="username" required>
-<button type="submit">Send reset link</button></form>`,
+<button type="submit">Send reset link</button></form>${
+				discordEnabled()
+					? `<p class="dim">Have Discord linked? You don't need the link: <a href="/oauth/discord?purpose=reset">confirm with Discord</a> and choose a new password right away.</p>`
+					: ""
+			}`,
 		);
 	if (req.method === "GET") return ask(url.searchParams.get("u") ?? "");
 	const f = await req.formData().catch(() => undefined);
 	await requestReset(String(f?.get("who") ?? ""));
-	return page(req, `<h1>Check your email</h1><p>If that account has an email on file, a reset link is on its way. It works for an hour.</p><p><a href="/">Back to sign in</a></p>`);
+	return page(
+		req,
+		`<h1>Check your messages</h1><p>If that account has an email or a Discord account linked, a reset link is on its way. It works for an hour.</p>
+<p class="dim">Nothing arrived? A bot can only message someone who shares a Discord server with it. <a href="/oauth/discord?purpose=reset">Confirm with Discord instead</a> — that needs no message, and it goes straight to choosing a new password.</p>
+<p><a href="/">Back to sign in</a></p>`,
+	);
 }

@@ -10,6 +10,7 @@ import { INSTANCE_ID } from "./federation";
 import { type Check, type Finding, MigrationError, check, jobs, start } from "./migration-import";
 import { codeState, createCode, revokeCodes, versionInfo } from "./migration";
 import { hit, used } from "./ratelimit";
+import { passwordOrStepUp, stepUpActive } from "./step-up";
 
 const CSS = `
 .versions{display:grid;grid-template-columns:auto 1fr 1fr;gap:4px 16px;font-size:14px}
@@ -62,6 +63,7 @@ function jobCard(j: any, open: boolean) {
 }
 
 async function home(req: Request, viewer: Viewer, opts: { notice?: string; error?: string; code?: string; status?: number } = {}) {
+	const confirmed = await stepUpActive(viewer.id);
 	const here = versionInfo();
 	const [me] = await sql`select moved_to, moved_at from users where id = ${viewer.id}::bigint`;
 	const state = await codeState(viewer.id);
@@ -110,7 +112,10 @@ ${running ? `<script>setTimeout(function(){location.reload()},2000)</script>` : 
 ${codeCard}
 <form method="post" action="/account/migrate">
 	${csrf}<input type="hidden" name="action" value="code">
-	<label for="password">Your password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+	${confirmed
+		? `<p class="dim">Confirmed with Discord. <a href="/account/discord/confirm?next=/account/migrate">Confirm again</a> if this says it ran out.</p>`
+		: `<label for="password">Your password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+	<p class="dim">No password, or forgotten it? <a href="/account/discord/confirm?next=/account/migrate">Confirm with Discord</a> first: it comes straight back here.</p>`}
 	<button type="submit">${state && !state.expired ? "Make a new code" : "Make a migration code"}</button>
 	${state && !state.expired ? `<p class="dim">A new code replaces the one above.</p>` : ""}
 </form>
@@ -178,9 +183,9 @@ export async function migrateRoute(req: Request, viewer: Viewer): Promise<Respon
 		const account = viewer.screen_name.toLowerCase();
 		if (used("password", account)) return home(req, viewer, { error: "Too many tries. Wait 15 minutes.", status: 429 });
 		const [u] = await sql`select password_hash from users where id = ${viewer.id}::bigint`;
-		if (!u || !(await Bun.password.verify(field("password"), u.password_hash).catch(() => false))) {
+		if (!u || !(await passwordOrStepUp(viewer.id, field("password"), u.password_hash))) {
 			hit("password", account);
-			return home(req, viewer, { error: "That password isn't right.", status: 400 });
+			return home(req, viewer, { error: "That password isn't right, or the Discord confirmation ran out. Confirm again, or type the password.", status: 400 });
 		}
 		return home(req, viewer, { code: await createCode(viewer.id) });
 	}

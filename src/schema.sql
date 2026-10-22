@@ -1581,3 +1581,20 @@ alter table migration_objects add column if not exists created_at timestamptz no
 -- where an account went, as handle@instance; set by the new instance when the import finished
 alter table users add column if not exists moved_to text;
 alter table users add column if not exists moved_at timestamptz;
+-- Discord sign-in (discord.ts): one Discord account per account here, and no
+-- Discord account on two of them. Deleting the account forgets the link.
+create table if not exists discord_accounts (
+	discord_id text primary key,
+	user_id bigint not null unique references users (id) on delete cascade,
+	username text,
+	global_name text,
+	avatar text,
+	created_at timestamptz not null default now()
+);
+-- fifteen minutes in which the password screens take a Discord confirmation
+-- instead (step-up.ts): one row per account, replaced when it is confirmed again
+create table if not exists step_up_grants (
+	user_id bigint primary key references users (id) on delete cascade,
+	until timestamptz not null,
+	created_at timestamptz not null default now()
+);

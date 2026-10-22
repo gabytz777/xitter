@@ -23,6 +23,19 @@ part of the repository, and neither is the runbook the operators keep.
   a dual-core Celeron with 3.7 GiB, so loose caps are deliberate: a tight cgroup
   limit kills the app mid-request.
 - **Ops scripts** — `scripts/maintenance.ts` and `scripts/set-password.ts`.
+- **Sign in with Discord** — `src/discord.ts`, `src/reset-tokens.ts`, the
+  `discord_accounts` table in `src/schema.sql`, and the button `src/shell.ts`
+  adds to X's own sign-in dialog. With `DISCORD_CLIENT_ID` and
+  `DISCORD_CLIENT_SECRET` set, an account can be linked to a Discord account
+  (`/account/discord`), a new Discord sign-in creates an account when sign-up is
+  open, and a linked account can reset its password by proving itself to
+  Discord — which is the only reset path here, since no mail is configured. The
+  same reset link is DMed through the bot (`DISCORD_BOT_TOKEN`) when the
+  forgot-password form is used. Where a screen asks for the password itself,
+  "Confirm with Discord" (`src/step-up.ts`) proves the same thing without a
+  message and comes straight back: fifteen minutes in which changing the email,
+  adding a passkey or making a migration code needs no password. No password is
+  ever sent anywhere.
 
 Upstream's own tests are unmodified and run here before every deploy: `bun run
 test:unit`, then the `scripts/test-*.ts` cases, as `.github/workflows/tests.yml`

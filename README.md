@@ -252,6 +252,8 @@ cache and autovacuum settings; adjust them for the host's memory and workload.
 | `SMTP_URL` | unset | Own mail server for sign-up codes, password resets and notifications: `smtp://user:pass@host:587` (STARTTLS) or `smtps://user:pass@host:465`; percent-encode `@` in the user; the host must be the name on the server's certificate |
 | `RESEND_API_KEY` | unset | Resend key, used when `SMTP_URL` isn't set or refused a mail; without either nothing is sent |
 | `MAIL_FROM` | `Xitter <noreply@xit.chococat.lol>` | Sender of that mail (its domain must be the mail server's, or verified in Resend) |
+| `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` | unset | Discord OAuth2 app (Developer Portal, the client secret under OAuth2): both set turns on "Continue with Discord" in the sign-in dialog, `/account/discord`, and resetting a password with Discord. The redirect URI registered there must be `<PUBLIC_ORIGIN>/oauth/discord/callback` exactly |
+| `DISCORD_BOT_TOKEN` | unset | Optional bot token: DMs the reset link from the forgot-password form. A bot can only message people it shares a server with, so this only adds convenience — the "confirm with Discord" flow (sign-in, reset, and getting past the password screens) needs nothing |
 | `ARCHIVE_DIR`, `ARCHIVE_MAX_MB` | `data/imports`, `1024` | Where uploaded X archives wait while they import, and the largest accepted |
 | `ARCHIVE_MAX_JSON_MB` | `64` | Largest JSON file in an archive (`tweets.js` and its parts) an import reads; it's parsed in memory |
 | `KLIPY_API_KEY` | unset | GIF search through [Klipy](https://klipy.com) (see `src/gifs.ts`); without it or `TENOR_API_KEY` the GIF button is hidden |

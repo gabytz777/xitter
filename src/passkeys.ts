@@ -18,6 +18,7 @@ import { requestIp } from "./login-history";
 import { hit, used } from "./ratelimit";
 import { settings } from "./settings";
 import { ALGORITHMS, b64url, challengeOf, unb64url, verifyAssertion, verifyRegistration } from "./webauthn";
+import { passwordOrStepUp, stepUpActive } from "./step-up";
 
 const MAX_PASSKEYS = 10;
 const TIMEOUT = 5 * 60 * 1000;
@@ -222,7 +223,7 @@ const MANAGE_SCRIPT = `${CLIENT}
 		e.preventDefault();err.hidden=true;
 		var button=form.querySelector("button");button.disabled=true;
 		var name=form.elements.name.value;
-		xitterPasskey.post("/account/passkeys/options",{password:form.elements.password.value}).then(function(o){
+		xitterPasskey.post("/account/passkeys/options",{password:form.elements.password?form.elements.password.value:""}).then(function(o){
 			o.challenge=xitterPasskey.dec(o.challenge);
 			o.user.id=xitterPasskey.dec(o.user.id);
 			o.excludeCredentials=o.excludeCredentials.map(function(c){return {type:c.type,id:xitterPasskey.dec(c.id)}});
@@ -254,9 +255,9 @@ export async function passkeysRoute(req: Request, url: URL, viewer: Viewer): Pro
 		const account = viewer.screen_name.toLowerCase();
 		if (used("password", account)) return fail("Too many tries for this account. Wait 15 minutes.", 429);
 		const [u] = await sql`select password_hash from users where id = ${viewer.id}::bigint`;
-		if (password.length > 1024 || !(await Bun.password.verify(password, u?.password_hash ?? "").catch(() => false))) {
+		if (!(await passwordOrStepUp(viewer.id, password, u?.password_hash ?? null))) {
 			hit("password", account);
-			return fail("That password isn't right.");
+			return fail("That password isn't right, or the Discord confirmation ran out. Confirm again, or type the password.");
 		}
 		const keys = await sql`select id, transports from passkeys where user_id = ${viewer.id}::bigint`;
 		if (keys.length >= MAX_PASSKEYS) return fail(`You can have up to ${MAX_PASSKEYS} passkeys. Remove one first.`);
@@ -322,6 +323,7 @@ export async function passkeysRoute(req: Request, url: URL, viewer: Viewer): Pro
 				)
 				.join("\n")
 		: `<p class="dim">You haven't added any passkeys yet.</p>`;
+	const confirmed = await stepUpActive(viewer.id);
 	return accountPage({
 		req,
 		viewer,
@@ -332,7 +334,10 @@ export async function passkeysRoute(req: Request, url: URL, viewer: Viewer): Pro
 ${list}
 <h2>Add a passkey</h2>
 <form id="add"><label for="pk-name">Name (optional)</label><input id="pk-name" name="name" maxlength="50" placeholder="${esc(deviceName(req))}" autocomplete="off">
-<label for="pk-password">Your password</label><input id="pk-password" type="password" name="password" autocomplete="current-password" required>
+${confirmed
+	? `<p class="dim">Confirmed with Discord. <a href="/account/discord/confirm?next=/account/passkeys">Confirm again</a> if this says it ran out.</p>`
+	: `<label for="pk-password">Your password</label><input id="pk-password" type="password" name="password" autocomplete="current-password" required>
+<p class="dim">No password, or forgotten it? <a href="/account/discord/confirm?next=/account/passkeys">Confirm with Discord</a> first: it comes straight back here.</p>`}
 <p class="error" id="add-error" hidden></p><button type="submit">Add a passkey</button></form>
 <script>${MANAGE_SCRIPT}</script>`,
 	});

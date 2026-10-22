@@ -8,6 +8,7 @@ import { isReserved, usernameProblem } from "./invites";
 import { superadminNameHere } from "./superadmins";
 import { sql } from "./db";
 import type { Viewer } from "./auth";
+import { stepUpActive } from "./step-up";
 
 const error = (code: number, message: string, status = 400) => Response.json({ errors: [{ code, message }] }, { status });
 
@@ -109,7 +110,9 @@ export async function accountSettingsRoute(method: string, path: string, viewer:
 
 	if (path === "/1.1/account/verify_password.json") {
 		const f = await body(req);
-		return (await passwordMatches(viewer.id, f.password)) ? Response.json({ status: "ok" }) : error(231, "Your password is incorrect.", 403);
+		const typed = String(f.password ?? "");
+		const ok = (await passwordMatches(viewer.id, typed)) || (await stepUpActive(viewer.id));
+		return ok ? Response.json({ status: "ok" }) : error(231, "Your password is incorrect.", 403);
 	}
 
 	if (path === "/1.1/account/deactivate.json") {

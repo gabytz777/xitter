@@ -28,6 +28,7 @@ import { platformSource } from "./platforms";
 import { badgeImage, expireSanctions } from "./moderation";
 import { appealRoute, noticesApi, noticesPage } from "./staff-notices";
 import { forgotRoute, resetRoute } from "./password-reset";
+import { discordAccountRoute, discordCallback, discordEnabled, discordStart, safeNext } from "./discord";
 import { twoFactorRoute } from "./two-factor";
 import { passkeySignInRoute, passkeysRoute } from "./passkeys";
 import { extraBadges, instanceCard } from "./badges";
@@ -436,6 +437,12 @@ async function route(req: Request): Promise<Response | undefined> {
 	const steam = /^\/public\/steam\/(\d+)\/([^/]+)$/.exec(p);
 	if (steam) return steamFile(req, steam[1]!, steam[2]!, url.searchParams.has("thumb"), !!viewer);
 	if (viewer?.role && !(await staffGate(req, viewer))) markStaff();
+	// Discord signs people in, links an account to it, and (with no mail here)
+	// stands in for a forgotten password (discord.ts). Before the maintenance
+	// gate: signing in has to work while everyone else is held at the notice,
+	// and the gate's own POST /login is let through for the same reason.
+	if (discordEnabled() && (p === "/oauth/discord" || p === "/oauth/discord/callback"))
+		return p === "/oauth/discord" ? discordStart(req, url) : discordCallback(req, url, viewer);
 	// a suspended account can't sign in, so it appeals here with its password
 	if (p === "/appeal") return appealRoute(req, server.requestIP(req)?.address ?? "");
 	// maintenance: staff carry on, everyone else waits. Signed-out visitors see
@@ -463,6 +470,13 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/account/email" || p === "/account/email/confirm") return emailRoute(req, url, viewer);
 	if (p.startsWith("/account/2fa") && viewer) return twoFactorRoute(req, url, viewer);
 	if ((p === "/account/passkeys" || p.startsWith("/account/passkeys/")) && viewer && !viewer.instance) return passkeysRoute(req, url, viewer);
+	if (discordEnabled() && (p === "/account/discord" || p === "/account/discord/unlink" || p === "/account/discord/password") && viewer) return discordAccountRoute(req, url, viewer);
+	// a step-up code without the bot: the same Discord round trip, code shown
+	if (discordEnabled() && p === "/account/discord/confirm" && viewer)
+		return new Response(null, {
+			status: 303,
+			headers: { location: `/oauth/discord?purpose=stepup&next=${encodeURIComponent(safeNext(url.searchParams.get("next")))}`, "cache-control": "no-store" },
+		});
 	if (p === "/account/passkey" || p.startsWith("/account/passkey/")) {
 		const done = await passkeySignInRoute(req, p);
 		if (done) return done;

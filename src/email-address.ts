@@ -11,6 +11,7 @@ import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { mailEnabled, sendMail } from "./mail";
 import { settings } from "./settings";
+import { passwordOrStepUp, stepUpActive } from "./step-up";
 
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,253}\.[^\s@]{2,}$/;
@@ -59,7 +60,8 @@ export async function resendConfirmation(viewer: Viewer): Promise<string | null>
 	return null;
 }
 
-function emailPage(req: Request, viewer: Viewer, current: { email: string | null; verified: boolean }, message = "", error = "") {
+async function emailPage(req: Request, viewer: Viewer, current: { email: string | null; verified: boolean }, message = "", error = "") {
+	const confirmed = await stepUpActive(viewer.id);
 	return accountPage({
 		req,
 		viewer,
@@ -72,7 +74,10 @@ function emailPage(req: Request, viewer: Viewer, current: { email: string | null
 	${message ? `<p>${esc(message)}</p>` : ""}${error ? `<p class="error">${esc(error)}</p>` : ""}
 	<input type="hidden" name="csrf" value="${esc(viewer.csrf)}">
 	<label for="email">New email</label><input id="email" name="email" type="email" autocomplete="email" required>
-	<label for="password">Your password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+	${confirmed
+		? `<p class="dim">Confirmed with Discord. <a href="/account/discord/confirm?next=/account/email">Confirm again</a> if this says it ran out.</p>`
+		: `<label for="password">Your password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+	<p class="dim">No password, or forgotten it? <a href="/account/discord/confirm?next=/account/email">Confirm with Discord</a> first: it comes straight back here.</p>`}
 	<button type="submit">Send confirmation link</button>
 	<p class="dim">The new address is used once you open the link we mail to it. <a href="/settings/email">Back to settings</a></p>
 </form>`,
@@ -130,7 +135,8 @@ export async function emailRoute(req: Request, url: URL, viewer: Viewer | undefi
 	if (String(f?.get("csrf") ?? "") !== viewer.csrf) return emailPage(req, viewer, current, "", "That form is out of date. Try again.");
 	const email = String(f?.get("email") ?? "").trim().toLowerCase();
 	if (!EMAIL.test(email) || email.length > 254) return emailPage(req, viewer, current, "", "Enter a valid email address.");
-	if (!(await Bun.password.verify(String(f?.get("password") ?? ""), u.password_hash).catch(() => false))) return emailPage(req, viewer, current, "", "That password isn't right.");
+	if (!(await passwordOrStepUp(viewer.id, String(f?.get("password") ?? ""), u.password_hash)))
+		return emailPage(req, viewer, current, "", "That password isn't right, or the Discord confirmation ran out. Confirm again, or type the password.");
 	if ((await sql`select 1 from users where lower(email) = ${email} and id <> ${viewer.id}::bigint`).length) return emailPage(req, viewer, current, "", "That email is already used by another account.");
 	if (!mailEnabled()) return emailPage(req, viewer, current, "", "This instance can't send mail, so it can't confirm a new address. Ask its staff.");
 	try {

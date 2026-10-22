@@ -8,6 +8,7 @@ import { postLimitFor } from "./textlen";
 import { CONVERSATION_CARD_CSS, CONVERSATION_CARD_SCRIPT } from "./conversation-card-ui";
 import { STICKER_PICKER_CSS, STICKER_PICKER_SCRIPT } from "./sticker-picker";
 import { PASSKEY_SCRIPT } from "./passkeys";
+import { DISCORD_SCRIPT } from "./discord";
 import { FORGOT_SCRIPT, FRESH_SCRIPT, type MenuLink, TIDY_SCRIPT, hideCss, tidyData } from "./tidy";
 import { POST_CONTEXT_SCRIPT } from "./post-context";
 import { ERROR_SCRIPT } from "./errors";
@@ -273,6 +274,7 @@ ${TIDY_SCRIPT}
 ${FRESH_SCRIPT}
 ${FORGOT_SCRIPT}
 ${signedIn ? "" : PASSKEY_SCRIPT}
+${signedIn ? "" : DISCORD_SCRIPT}
 ${PRONOUNS_SCRIPT}
 ${FLAG_PICKER_SCRIPT}
 ${signedIn ? STICKER_PICKER_SCRIPT : ""}
