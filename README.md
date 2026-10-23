@@ -90,6 +90,34 @@ copy during setup, and it stays on that machine.
   that isn't imported within a day is deleted. By default only accounts a
   week old can import, and staff approve each import first (Admin > Settings,
   Import from X)
+- X Money (Money in the side bar): every account has a wallet and sends money
+  to other accounts here, with a note. It is the instance's own play money,
+  not real currency: a wallet starts with `money.starting_cents` (default
+  $5), one payment moves up to `money.max_transfer_cents` (default $1,000),
+  each like on your posts earns you `money.like_cents` (default 50¢, once per
+  post and account). Admin > Money sets those three, shows the money in
+  circulation, the biggest balances and every payment, and has staff adjust a
+  balance or reverse a payment (Staff permissions: X Money; all recorded in
+  the audit log).
+  - Requests: ask one account for an amount (it gets a notification to pay or
+    decline), or anyone, as a "Pay @you" card in a post that anyone who sees it
+    can pay, with or without a set amount
+  - A payment's or request's link (`/i/xmoney/p/<id>`, `/i/xmoney/r/<id>`) in a
+    post by its own side shows as X's card: "$100 sent to liza", "Pay @james"
+    with a Pay button, or a purchase ("$3.52 at Taco Bell"). The composer's $
+    button adds a Pay button or one of your payments; "Share it in a post" does
+    it when sending or requesting
+  - Merchant mode (Settings > Your account > X Money), for gold organisations:
+    payments to them read as purchases under the name they choose, with their
+    banner if they like
+  - Payments show checkmarks and an affiliate's organisation badge; money
+    received, requests and declined requests come as notifications and pushes
+  - The first time Money opens, each account accepts a disclaimer: the money
+    is virtual, has no real-world value and can't be exchanged
+  - Off by default: Admin > Settings, feature switches turns it on. Switched
+    off, the Money tab, its pages, the composer's $ button, Pay buttons, like
+    earnings and its notifications go away, but cards already in posts still
+    show. `bun scripts/test-money.ts` checks it
 - Polls with a photo on each choice
 - YouTube links (videos, Shorts, live, youtu.be, with `t=` start times) become
   player cards: the thumbnail comes through `EMBED_PROXY`, and pressing play

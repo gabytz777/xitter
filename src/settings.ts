@@ -26,6 +26,7 @@ export const FEATURES = {
 	notes_everyone: "Anyone can write Community Notes (off: only accounts given access on their admin page)",
 	link_previews: "Previews of public posts and profiles when their links are shared in other apps",
 	archive_import: "Import from X: accounts upload their X archive and its posts come over (Settings > Your account)",
+	money: "X Money: accounts send each other money from the side bar (the instance's own play money, not real currency)",
 } as const;
 export type Feature = keyof typeof FEATURES;
 
@@ -50,6 +51,7 @@ const DEFAULTS = {
 		notes_everyone: true,
 		link_previews: true,
 		archive_import: false,
+		money: false,
 	} as Record<Feature, boolean>,
 	limits: { image_mb: 5, video_mb: Number(process.env.MAX_VIDEO_MB ?? 200), video_seconds: Number(process.env.MAX_VIDEO_SECONDS ?? 600) },
 	// per account per 15 minutes (ratelimit.ts); sign-in and mail limits are fixed
@@ -97,6 +99,9 @@ const DEFAULTS = {
 	invite_quota: { enabled: false, per_month: 3, uses: 1, min_age_days: 7 },
 	// archive-import.ts: who may import from X, while the feature is on; staff skip both
 	archive_import: { min_age_days: 7, approval: true },
+	// money.ts: what a new wallet holds and the most one transfer moves, in cents
+	// like_cents: what a post's author earns for each like (once per post and account)
+	money: { starting_cents: 500, max_transfer_cents: 100_000, like_cents: 50 },
 	// the client's own feature switches, set by an admin (Admin > Feature
 	// switches); they win over the build's values and Xitter's own (shell.ts)
 	switch_overrides: {} as Record<string, unknown>,

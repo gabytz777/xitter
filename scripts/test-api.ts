@@ -54,6 +54,13 @@ check((await anon("OPTIONS", "/me")).headers.get("access-control-allow-origin") 
 
 const other = await a("GET", `/users/${nameB}`);
 check(other.status === 200 && typeof other.json.data?.counts?.followers === "number", "GET /users/{name} with counts");
+const before = (await a("GET", "/me")).json.data ?? {};
+const edited = await a("PATCH", "/me", { bio: "edited over the api", location: "Kyiv" });
+check(edited.status === 200 && edited.json.data?.bio === "edited over the api" && edited.json.data?.location === "Kyiv", "PATCH /me edits bio and location", edited.json);
+check((await a("PATCH", "/me", { website: "not a url" })).status === 400, "PATCH /me refuses a bad website");
+check((await a("PATCH", "/me", { name: "" })).status === 400, "PATCH /me refuses a blank name");
+check((await ar("PATCH", "/me", { bio: "x" })).status === 403, "a read token can't edit the profile");
+await a("PATCH", "/me", { bio: before.bio ?? "", location: before.location ?? "" });
 check((await a("GET", "/users/nobody_here_at_all")).status === 404, "an unknown account is 404");
 
 // write with the read token is refused
@@ -65,6 +72,10 @@ check(up.status === 201 && !!up.json.data?.media_id, "POST /media uploads the bo
 const post = await a("POST", "/posts", { text: `api test ${Date.now()}`, media_ids: [up.json.data?.media_id] });
 const pid = post.json.data?.id;
 check(post.status === 201 && post.json.data?.media?.length === 1, "POST /posts with an image", post.json);
+const avatarUp = await a("POST", "/media", readFileSync(image), image.endsWith(".png") ? "image/png" : "image/jpeg");
+const withAvatar = await a("PATCH", "/me", { avatar_media_id: avatarUp.json.data?.media_id });
+check(withAvatar.status === 200 && String(withAvatar.json.data?.avatar_url).includes(`/media/${avatarUp.json.data?.media_id}`), "PATCH /me sets the avatar from an upload", withAvatar.json);
+check((await a("PATCH", "/me", { avatar_media_id: "1" })).status === 400, "PATCH /me refuses an upload that isn't yours");
 check((await a("POST", "/posts", { text: "" })).status === 400, "an empty post is refused with the app's message");
 const reply = await b("POST", "/posts", { text: "a reply over the api", reply_to: pid });
 check(reply.status === 201 && reply.json.data?.reply_to === pid, "B replies");
@@ -74,6 +85,8 @@ check(quote.status === 201 && quote.json.data?.quote_of === pid, "B quotes");
 // engagement
 const liked = await b("POST", `/posts/${pid}/like`);
 check(liked.json.data?.viewer?.liked === true && liked.json.data?.counts?.likes === 1, "like");
+const likers = await a("GET", `/posts/${pid}/likes`);
+check(likers.status === 200 && likers.json.data?.length === 1 && likers.json.data[0]?.screen_name?.toLowerCase() === nameB.toLowerCase(), "GET /posts/{id}/likes lists B", likers.json);
 check((await b("POST", `/posts/${pid}/repost`)).json.data?.viewer?.reposted === true, "repost");
 check((await b("POST", `/posts/${pid}/bookmark`)).json.data?.viewer?.bookmarked === true, "bookmark");
 check((await b("DELETE", `/posts/${pid}/like`)).json.data?.viewer?.liked === false, "unlike");
@@ -85,6 +98,8 @@ const one = await b("GET", `/posts/${pid}`);
 check(one.status === 200 && one.json.data?.author?.screen_name?.toLowerCase() === nameA.toLowerCase(), "GET /posts/{id}");
 const replies = await a("GET", `/posts/${pid}/replies`);
 check(replies.json.data?.some((p: any) => p.id === reply.json.data?.id), "GET /posts/{id}/replies");
+const onlyReplies = await a("GET", `/users/${nameB}/posts?replies=only&limit=20`);
+check(onlyReplies.json.data?.some((p: any) => p.id === reply.json.data?.id) && !onlyReplies.json.data?.some((p: any) => p.id === quote.json.data?.id), "GET /users/{name}/posts?replies=only has the reply, not the quote");
 const posts = await b("GET", `/users/${nameA}/posts?limit=5`);
 check(posts.json.data?.[0]?.id === pid, "GET /users/{name}/posts, newest first");
 const paged = await b("GET", `/users/${nameA}/posts?limit=1`);
@@ -92,6 +107,12 @@ const next = paged.json.next_cursor ? await b("GET", `/users/${nameA}/posts?limi
 check(!!next && next.json.data?.[0]?.id !== paged.json.data?.[0]?.id, "paging with next_cursor moves on");
 const found = await b("GET", `/search/posts?q=${encodeURIComponent("api test")}`);
 check(found.json.data?.some((p: any) => p.id === pid), "GET /search/posts");
+const extra = await b("POST", "/posts", { text: `api test paging ${Date.now()}` });
+check(extra.status === 201, "B posts a second match for top-search paging", extra.json);
+const top = `/search/posts?q=${encodeURIComponent("api test")}&sort=top&limit=1`;
+const top1 = await b("GET", top);
+const top2 = top1.json.next_cursor ? await b("GET", `${top}&cursor=${top1.json.next_cursor}`) : undefined;
+check(!!top2 && top2.json.data?.[0]?.id !== top1.json.data?.[0]?.id, "top search paging with next_cursor moves on", { first: top1.json, second: top2?.json });
 const people = await b("GET", `/search/users?q=${encodeURIComponent(nameA)}`);
 check(people.json.data?.some((u: any) => u.screen_name.toLowerCase() === nameA.toLowerCase()), "GET /search/users");
 
@@ -110,6 +131,7 @@ check((await a("POST", `/users/${nameA}/follow`)).status === 400, "following you
 check((await b("DELETE", `/posts/${pid}`)).status === 403, "B can't delete A's post");
 
 // clean up
+await b("DELETE", `/posts/${extra.json.data?.id}`);
 await b("DELETE", `/posts/${reply.json.data?.id}`);
 await b("DELETE", `/posts/${quote.json.data?.id}`);
 const del = await a("DELETE", `/posts/${pid}`);

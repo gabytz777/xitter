@@ -20,12 +20,12 @@ export async function extraBadges(viewerId: string, url: URL): Promise<Response>
 		const at = n.indexOf("@");
 		return at < 0 ? STAFF_HANDLE.test(n) : STAFF_HANDLE.test(n.slice(0, at)) && /^[a-z0-9.-]{1,253}(?::\d{1,5})?$/.test(n.slice(at + 1));
 	}))].slice(0, 50);
-	const out: Record<string, { badges: { url: string; description: string }[]; gold: boolean; labels: { text: string; url?: string; icon?: string }[] }> = {};
+	const out: Record<string, { badges: { url: string; description: string; org?: string }[]; gold: boolean; labels: { text: string; url?: string; icon?: string }[] }> = {};
 	if (names.length) {
 		const rows = await sql`select ${userCols(viewerId)} from users u where lower(u.screen_name) = any(${sql.array(names, "TEXT")})`;
 		for (const r of rows) {
 			const u = toUser(r);
-			const badges = badgeList(u).slice(labelTakesSlot(u) ? 0 : 1).map(({ url, description }) => ({ url, description }));
+			const badges = badgeList(u).slice(labelTakesSlot(u) ? 0 : 1).map(({ url, description, org }) => ({ url, description, ...(org ? { org } : {}) }));
 			const gold = u.translator === "moderator";
 			const labels = hiddenLabels(u);
 			if (badges.length || gold || labels.length) out[u.screen_name.toLowerCase()] = { badges, gold, labels };
@@ -280,7 +280,17 @@ export const BADGES_SCRIPT = String.raw`(function(){
 				var img=document.createElement("img");
 				img.src=b.url;img.alt=b.description;img.title=b.description;img.draggable=false;
 				img.style.cssText="height:1.0625em;width:1.0625em;object-fit:contain;margin-left:2px;border-radius:2px";
-				row.appendChild(img);
+				if(!b.org){row.appendChild(img);return}
+				// an organisation's badge opens it, like the one in the client's own slot
+				var a=document.createElement("a");
+				a.href="/"+b.org;a.setAttribute("aria-label",b.description);
+				a.style.cssText="display:inline-flex;cursor:pointer";
+				a.addEventListener("click",function(e){
+					e.preventDefault();e.stopPropagation();
+					if(window.__xitterGo)window.__xitterGo(a.getAttribute("href"));else location.assign(a.href);
+				});
+				a.appendChild(img);
+				row.appendChild(a);
 			});
 		}
 		if(after.nextElementSibling!==row)after.after(row);

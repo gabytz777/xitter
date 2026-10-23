@@ -12,6 +12,7 @@ import { articlesByIds } from "./articles";
 import { blockedFor, federatedHiddenFor, hasMutedWord, isBlockedEitherWay, mutedFor, outOfView, protectedFor, replyLimited, suspendedFor } from "./blocks";
 import { staffViewer } from "./staff-access";
 import { fetchPreview, linkCard, linksIn, previewable, previewsFor, statusLinkOf } from "./links";
+import { paymentCards, rewardLike } from "./money";
 import { mediaForPosts } from "./media";
 import { communityObjects } from "./community-model";
 import { webSource } from "./platforms";
@@ -155,6 +156,13 @@ async function hydrate(viewerId: string, posts: PostRow[], quotes = true): Promi
 	for (const p of posts) {
 		const preview = previews.get(linkOf(p) ?? "");
 		if (preview) p.linkCard = linkCard(preview);
+	}
+	// a payment's link put in by one of its sides, or a request's by its
+	// requester, becomes its card (money.ts)
+	const payable = posts.filter((p) => !p.linkCard && !p.poll && !p.conversationCard && !p.quote_id && !p.quoted && !p.article_id && !p.media?.length && /\/i\/xmoney\/[pr]\//.test(p.text));
+	if (payable.length) {
+		const cards = await paymentCards(payable.map((p) => ({ authorId: p.author.id, text: p.text })));
+		for (const [i, p] of payable.entries()) if (cards[i]) p.linkCard = cards[i];
 	}
 	const editedIds = posts.filter((p) => p.edit_count).map((p) => p.id);
 	if (editedIds.length) {
@@ -367,6 +375,14 @@ export async function replies(viewerId: string, id: string, limit = 100): Promis
 	return hydrate(viewerId, rows.map(toRow));
 }
 
+// who liked a post, newest first, minus the accounts the viewer can't see
+export async function likerIds(viewerId: string, id: string, limit = 100): Promise<string[]> {
+	const rows = await sql`select l.user_id::text as id from likes l where l.post_id = ${id}::bigint
+		and l.user_id not in ${blockedFor(viewerId)} and l.user_id not in ${protectedFor(viewerId)} and l.user_id not in ${outOfView(viewerId)}
+		order by l.created_at desc limit ${limit}`;
+	return rows.map((r: any) => r.id);
+}
+
 export async function repliesBelow(viewerId: string, id: string, limit = 1000): Promise<PostRow[]> {
 	const rows = await sql`${select(viewerId)} where p.id in (
 			with recursive tree as (
@@ -552,8 +568,11 @@ export async function setMark(table: Mark, userId: string, postId: string, on: b
 	// hidden): X's "not found", not a database error
 	if (on && !(await getPost(userId, postId))) throw new PostError("No status found with that ID.", 144);
 	if (table === "likes") {
-		if (on) await sql`insert into likes (user_id, post_id) values (${userId}::bigint, ${postId}::bigint) on conflict do nothing`;
-		else await sql`delete from likes where user_id = ${userId}::bigint and post_id = ${postId}::bigint`;
+		if (on) {
+			const added = await sql`insert into likes (user_id, post_id) values (${userId}::bigint, ${postId}::bigint) on conflict do nothing returning 1`;
+			// each like pays the post's author (money.ts)
+			if (added.length) await rewardLike(userId, postId);
+		} else await sql`delete from likes where user_id = ${userId}::bigint and post_id = ${postId}::bigint`;
 	} else {
 		if (on) await sql`insert into bookmarks (user_id, post_id) values (${userId}::bigint, ${postId}::bigint) on conflict do nothing`;
 		else await sql`delete from bookmarks where user_id = ${userId}::bigint and post_id = ${postId}::bigint`;

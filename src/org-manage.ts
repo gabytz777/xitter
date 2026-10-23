@@ -8,18 +8,17 @@ import { accountPage, esc } from "./account-page";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
 import { lookupRemoteUser } from "./federation-sync";
-import { localName } from "./users";
+import { isOrganizationSql, localName } from "./users";
 
 export const AFFILIATION_LIMIT = 4;
 
 type Org = { id: string; screen_name: string; name: string; self: boolean };
 
-const isOrg = (u: unknown) => sql`(${u}.verified_type in ('business', 'government') or exists (select 1 from affiliations x where x.org_id = ${u}.id))`;
 
 // the organisation this account runs: itself, or the one it manages
 async function managedOrg(viewer: Viewer): Promise<Org | undefined> {
 	const [org] = await sql`select u.id::text, u.screen_name, u.name, u.id = ${viewer.id}::bigint as self from users u
-		where ${isOrg(sql`u`)} and (u.id = ${viewer.id}::bigint
+		where ${isOrganizationSql(sql`u`)} and (u.id = ${viewer.id}::bigint
 			or u.id in (select org_id from affiliations where user_id = ${viewer.id}::bigint and manager))
 		order by u.id = ${viewer.id}::bigint desc, u.id limit 1`;
 	return org as Org | undefined;
@@ -35,7 +34,7 @@ async function view(req: Request, viewer: Viewer, error = "", notice = "") {
 	const mine = await sql`select o.id::text, o.screen_name, o.name from affiliations a join users o on o.id = a.org_id where a.user_id = ${viewer.id}::bigint order by a.created_at, a.org_id`;
 	const full = mine.length >= AFFILIATION_LIMIT;
 	const asked = await sql`select o.id::text, o.screen_name, o.name from affiliation_requests r join users o on o.id = r.org_id
-		where r.user_id = ${viewer.id}::bigint and ${isOrg(sql`o`)} order by r.created_at`;
+		where r.user_id = ${viewer.id}::bigint and ${isOrganizationSql(sql`o`)} order by r.created_at`;
 	let body = `<h1>Organisation</h1>${notice ? `<p>${esc(notice)}</p>` : ""}${error ? `<p class="error">${esc(error)}</p>` : ""}`;
 
 	if (asked.length)
@@ -95,7 +94,7 @@ export async function orgRoute(req: Request, viewer: Viewer): Promise<Response> 
 			return view(req, viewer, `You're already an affiliate of ${AFFILIATION_LIMIT} organisations. Leave one first.`);
 		const r = await sql.begin(async (tx) => {
 			const [found] = await tx`delete from affiliation_requests r using users o
-				where r.org_id = ${orgId}::bigint and r.user_id = ${viewer.id}::bigint and o.id = r.org_id and ${isOrg(sql`o`)} returning o.screen_name`;
+				where r.org_id = ${orgId}::bigint and r.user_id = ${viewer.id}::bigint and o.id = r.org_id and ${isOrganizationSql(sql`o`)} returning o.screen_name`;
 			if (found && action === "accept") await tx`insert into affiliations (org_id, user_id) values (${orgId}::bigint, ${viewer.id}::bigint) on conflict do nothing`;
 			return found;
 		});

@@ -9,13 +9,15 @@ type Endpoint = [method: string, path: string, scope: "read" | "write", what: st
 
 const ENDPOINTS: Endpoint[] = [
 	["GET", "/me", "read", "Your account."],
+	["PATCH", "/me", "write", "Edit your profile: <code>name</code>, <code>bio</code>, <code>location</code>, <code>website</code> (an empty string clears), <code>avatar_media_id</code> and <code>banner_media_id</code> from <code>POST /media</code>, <code>remove_banner: true</code>. Answers with the account."],
 	["GET", "/users/{screen_name}", "read", "An account."],
-	["GET", "/users/{screen_name}/posts", "read", "Its posts and reposts, newest first. <code>replies=true</code> includes replies."],
+	["GET", "/users/{screen_name}/posts", "read", "Its posts and reposts, newest first. <code>replies=true</code> includes replies, <code>replies=only</code> gives just the replies."],
 	["GET", "/users/{screen_name}/followers", "read", "Who follows it (up to <code>limit</code>, 200 at most)."],
 	["GET", "/users/{screen_name}/following", "read", "Who it follows."],
 	["GET", "/timeline", "read", "Posts and reposts from you and the accounts you follow, newest first."],
 	["GET", "/posts/{id}", "read", "One post."],
 	["GET", "/posts/{id}/replies", "read", "Its replies."],
+	["GET", "/posts/{id}/likes", "read", "Who liked it, newest first (up to <code>limit</code>, 200 at most)."],
 	["GET", "/search/posts?q=", "read", "Posts matching a search, with the same operators as the app (<code>from:</code>, <code>filter:media</code>, ...). <code>sort=top</code> for top posts."],
 	["GET", "/search/users?q=", "read", "Accounts matching a name or handle."],
 	["POST", "/posts", "write", "Post. Body: <code>text</code>, and optionally <code>reply_to</code> (a post id), <code>quote</code> (a post id), <code>media_ids</code> (up to 4 from <code>/media</code>), <code>sensitive</code>."],
@@ -29,6 +31,16 @@ const ENDPOINTS: Endpoint[] = [
 	["POST", "/media/{id}/segments/{segment_index}", "write", "Send one segment as the raw body. Indices start at 0; retrying an index replaces that segment."],
 	["POST", "/media/{id}/finalize", "write", "Finish an upload after sending every segment. Returns its processing state."],
 	["GET", "/media/{id}", "read", "Check your upload's processing state. Pending uploads also report <code>total_bytes</code>, <code>received_bytes</code> and <code>segments</code>."],
+	["GET", "/money", "read", "X Money, if the instance has it on: your <code>balance_cents</code>, <code>disclaimer_accepted</code>, the <code>disclaimer</code> to show, <code>max_transfer_cents</code>, <code>like_cents</code> and <code>note_max</code>. It's the instance's own play money, with no cash value."],
+	["POST", "/money/disclaimer", "write", "Accept the disclaimer, once; money doesn't move before it."],
+	["GET", "/money/activity", "read", "Your payments, newest first, each with <code>direction</code> (<code>sent</code> or <code>received</code>); the first page adds <code>earnings</code> from likes by day. Pages with <code>cursor</code>."],
+	["GET", "/money/requests", "read", "Open requests: asking you to pay, and yours waiting on others. Each says <code>can_pay</code>, <code>can_decline</code> and <code>can_cancel</code>."],
+	["POST", "/money/send", "write", "Pay. Body: <code>to</code> (a username here), <code>amount_cents</code>, <code>note</code>, a unique <code>idempotency_key</code> (8–64 letters, digits, <code>-</code> or <code>_</code>; sending it again doesn't pay twice), and <code>request_id</code> to pay a request."],
+	["POST", "/money/requests", "write", "Ask for money. Body: <code>from</code> (a username; leave it out for a \"Pay @you\" card anyone can pay), <code>amount_cents</code> (needed with <code>from</code>), <code>note</code>. Its <code>url</code> in a post shows as a card."],
+	["POST", "/money/requests/{id}/decline", "write", "Decline a request of you."],
+	["POST", "/money/requests/{id}/cancel", "write", "Cancel your own request."],
+	["GET", "/money/payments/{id}", "read", "One payment you're part of, or one its sender or recipient put in a post (the <code>/i/xmoney/p/{id}</code> address)."],
+	["GET", "/money/requests/{id}", "read", "One request (the <code>/i/xmoney/r/{id}</code> address)."],
 ];
 
 const DOCS_CSS = `table{width:100%;border-collapse:collapse}
@@ -93,7 +105,7 @@ export function apiDocsPage(req: Request): Promise<Response> {
 
 <h2>Shapes</h2>
 <p>A post: <code>id</code>, <code>text</code>, <code>created_at</code>, <code>edited_at</code>, <code>url</code>, <code>author</code> (an account), <code>reply_to</code>, <code>quote_of</code>, <code>sensitive</code>, <code>counts</code> (likes, reposts, replies, quotes, bookmarks, views), <code>viewer</code> (whether you liked, reposted, bookmarked it), <code>media</code>; in timelines a repost adds <code>reposted_by</code> and <code>reposted_at</code>.</p>
-<p>An account: <code>id</code>, <code>screen_name</code>, <code>name</code>, <code>bio</code>, <code>location</code>, <code>website</code>, <code>avatar_url</code>, <code>banner_url</code>, <code>verified_type</code>, <code>protected</code>, <code>created_at</code>, <code>url</code>, <code>counts</code> (posts, followers, following, likes) and <code>viewer</code> (following, followed_by).</p>
+<p>An account: <code>id</code>, <code>screen_name</code>, <code>name</code>, <code>bio</code>, <code>location</code>, <code>website</code>, <code>avatar_url</code>, <code>banner_url</code>, <code>verified_type</code> (<code>blue</code>, <code>business</code>, <code>government</code>, <code>government_individual</code> or null), <code>verified</code> (whether the app shows a checkmark: also true for an organisation's affiliates), <code>verified_since</code>, <code>parody_label</code> (<code>Parody</code>, <code>Commentary</code>, <code>Fan</code> or null), <code>label</code> (a label staff gave it: <code>text</code>, <code>url</code>, <code>badge_url</code>; or null), <code>automated_by</code> (a bot's owner, or null), <code>organization</code> (a business account: a business or government, or any account with affiliates) with <code>affiliates_count</code>, <code>affiliations</code> (organisations it's an affiliate of: <code>screen_name</code>, <code>name</code>, <code>badge_url</code>), <code>badges</code> (custom badges, pride flags and, for an account from another instance, a globe: <code>name</code>, <code>url</code>), <code>protected</code>, <code>created_at</code>, <code>url</code>, <code>counts</code> (posts, followers, following, likes) and <code>viewer</code> (following, followed_by).</p>
 
 <p class="dim">Posts made through the API show "Xitter API" as their app. What a token sees is what its account sees: blocks, protected accounts and suspensions apply.</p>
 `;

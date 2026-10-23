@@ -2,8 +2,16 @@ import type { User } from "./auth";
 import { blockedFor, federatedHiddenFor, isBlockedEitherWay, mutedFor, outOfView } from "./blocks";
 import { staffViewer } from "./staff-access";
 import { sql } from "./db";
+import { PUBLIC_ORIGIN } from "./config";
 import { INSTANCE_ID } from "./federation";
 import { settings } from "./settings";
+
+// a business account (isOrganization in model.ts), in SQL for the account `u` names
+export const isOrganizationSql = (u: unknown) =>
+	sql`(coalesce(${u}.verified_type in ('business', 'government'), false) or exists (select 1 from affiliations x where x.org_id = ${u}.id))`;
+
+// where a custom badge's image is served
+export const badgeUrl = (id: string) => `${PUBLIC_ORIGIN}/public/badge-${id}.png`;
 
 // an account's custom badges in order, as a json list of { id, name }
 export const badgesOf = (userId: unknown) => sql`(select json_agg(json_build_object('id', b.id::text, 'name', b.name) order by ub.position, b.name)

@@ -117,7 +117,7 @@ const TEMPLATE = {
 };
 const DEFAULTS: Record<string, string> = { mentions: "on", retweets: "on", favorites: "on", followed: "on", tweets: "on", direct_messages: "on", staff: "on" };
 // which switch each kind of notification answers to
-const SWITCH: Record<PushItem["kind"], string> = { reply: "mentions", mention: "mentions", quote: "mentions", repost: "retweets", like: "favorites", follow: "followed", bell: "tweets", staff: "staff" };
+const SWITCH: Record<PushItem["kind"], string> = { reply: "mentions", mention: "mentions", quote: "mentions", repost: "retweets", like: "favorites", follow: "followed", bell: "tweets", staff: "staff", money: "money" };
 
 const settingsReply = (current: Record<string, string>) => ({
 	push_settings: { ...DEFAULTS, ...current },

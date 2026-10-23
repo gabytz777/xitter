@@ -4,7 +4,7 @@ import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { flagValue } from "./flags";
 import { pronounsValue } from "./pronouns";
-import { badgesOf } from "./users";
+import { badgeUrl, badgesOf } from "./users";
 import { FederationError, INSTANCE_ID, type Incoming, isBlocked, isPeer, peers, signedAnswer, signedFetch, signedRawAnswer } from "./federation";
 import { newId } from "./ids";
 import { replyLimited } from "./blocks";
@@ -75,7 +75,7 @@ const USER_COUNTS = ["followers", "following", "posts", "likes"];
 const POST_COUNTS = ["likes", "reposts", "replies", "quotes", "bookmarks", "views"];
 
 async function renderUser(id: string) {
-	const [u] = await sql`select id::text, screen_name, name, bio, location, website, avatar_url, banner_url, protected, created_at, verified_type, translator, flag, pronouns, parody_label, decoration, org_badge_id::text, ${badgesOf(sql`users.id`)} as badges from users
+	const [u] = await sql`select id::text, screen_name, name, bio, location, website, avatar_url, banner_url, protected, created_at, verified_type, verified_at, translator, flag, pronouns, parody_label, decoration, org_badge_id::text, ${badgesOf(sql`users.id`)} as badges from users
 		where id = ${id}::bigint and instance is null and status <> 'suspended' and deactivated_at is null`;
 	if (!u) return { kind: "user", id, gone: true };
 	return {
@@ -88,13 +88,14 @@ async function renderUser(id: string) {
 		website: u.website ?? null,
 		counts: await userCounts(id),
 		verified_type: u.verified_type ?? null,
+		verified_at: u.verified_type && u.verified_at ? new Date(u.verified_at).toISOString() : null,
 		translator: u.translator ?? null,
 		flag: u.flag ?? null,
 		pronouns: u.pronouns ?? null,
 		parody_label: u.parody_label ?? "None",
 		decoration: parseDecoration(u.decoration),
-		badges: (u.badges ?? []).map((b: { id: string; name: string }) => ({ name: b.name, url: `${PUBLIC_ORIGIN}/public/badge-${b.id}.png` })),
-		org_badge: u.org_badge_id ? `${PUBLIC_ORIGIN}/public/badge-${u.org_badge_id}.png` : null,
+		badges: (u.badges ?? []).map((b: { id: string; name: string }) => ({ name: b.name, url: badgeUrl(b.id) })),
+		org_badge: u.org_badge_id ? badgeUrl(u.org_badge_id) : null,
 		protected: u.protected,
 		created_at: new Date(u.created_at).toISOString(),
 		avatar: await renderMedia(isLocalMediaPath(u.avatar_url)),
@@ -308,6 +309,8 @@ export async function applyUser(instance: string, u: any): Promise<string | unde
 		.map((b: any) => ({ name: b.name.slice(0, 60), url: b.url }));
 	const looks = {
 		verified_type: pick(u.verified_type, ["blue", "business", "government", "government_individual"]),
+		// older instances don't send it: then the date stays unknown
+		verified_at: typeof u.verified_at === "string" && !Number.isNaN(Date.parse(u.verified_at)) && Date.parse(u.verified_at) <= Date.now() ? new Date(u.verified_at) : null,
 		translator: pick(u.translator, ["translator", "moderator", "approver"]),
 		flag: flagValue(u.flag),
 		pronouns: pronounsValue(u.pronouns),
@@ -337,7 +340,7 @@ export async function applyUser(instance: string, u: any): Promise<string | unde
 	const avatar = await remoteMedia(instance, id, u.avatar, null, null);
 	const banner = await remoteMedia(instance, id, u.banner, null, null);
 	await sql`update users set avatar_url = ${avatar ? `/media/${avatar}` : null}, banner_url = ${banner ? `/media/banner/${banner}` : null},
-		remote_counts = ${countsOf(u.counts, USER_COUNTS)}::text::jsonb, verified_type = ${looks.verified_type}, translator = ${looks.translator}, flag = ${looks.flag}, pronouns = ${looks.pronouns}, parody_label = ${looks.parody_label}, remote_badges = ${looks.remote_badges}::text::jsonb, remote_org_badge = ${looks.org_badge}, decoration = nullif(${looks.decoration}, 'null')::jsonb
+		remote_counts = ${countsOf(u.counts, USER_COUNTS)}::text::jsonb, verified_type = ${looks.verified_type}, verified_at = ${looks.verified_type ? looks.verified_at : null}, translator = ${looks.translator}, flag = ${looks.flag}, pronouns = ${looks.pronouns}, parody_label = ${looks.parody_label}, remote_badges = ${looks.remote_badges}::text::jsonb, remote_org_badge = ${looks.org_badge}, decoration = nullif(${looks.decoration}, 'null')::jsonb
 		where id = ${id}::bigint`;
 	if (u.protected) await sql`delete from posts where user_id = ${id}::bigint`;
 	return id;

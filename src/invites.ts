@@ -37,10 +37,13 @@ const RESERVED = new Set(
 
 export const isReserved = (name: string) => RESERVED.has(name.toLowerCase()) || superadminNameHere(name);
 
+// handles staff may give an account in the admin panel: any characters up to
+// 50, except what would break a profile address, a list of names or a mention.
+// Lookalikes of another account's handle are refused separately (held.ts).
 export const STAFF_HANDLE = /^[^\s\p{C}/\\?#@%,:]{1,50}$/u;
 export const STRICT_HANDLE = /^[A-Za-z0-9_]{1,15}$/;
 export const staffHandleProblem = (name: string): string | null =>
-	STRICT_HANDLE.test(name) ? null : "Handles are 1 to 15 letters, digits or underscores.";
+	!STAFF_HANDLE.test(name) || /^\.+$/.test(name) ? "Handles are up to 50 characters, with no spaces or / \\ ? # @ % , :" : null;
 
 export class SignupError extends Error {}
 

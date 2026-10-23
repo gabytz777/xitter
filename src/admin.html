@@ -15,9 +15,18 @@
 	.app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
 	nav { border-right: 1px solid var(--line); padding: 16px 12px; position: sticky; top: 0; height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain; }
 	nav .logo { width: 128px; margin: 4px 8px 20px; display: block; }
-	nav button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px; border: 0; border-radius: 999px; background: none; color: var(--text); font: inherit; font-size: 16px; text-align: left; cursor: pointer; }
+	nav button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 7px 12px; border: 0; border-radius: 999px; background: none; color: var(--text); font: inherit; font-size: 15px; text-align: left; cursor: pointer; }
 	nav button:hover { background: var(--panel); }
 	nav button.on { font-weight: 700; }
+	/* 28 pages didn't fit a laptop screen: they sit in groups, one open at a time */
+	nav .ghead { margin-top: 6px; color: var(--dim); font-size: 14px; font-weight: 600; }
+	nav .ghead > span:first-child { flex: 1; }
+	nav .ghead .icon { transition: rotate .15s; }
+	nav .group.open .ghead { color: var(--text); }
+	nav .group.open .ghead .icon { rotate: 180deg; }
+	nav .gitems { display: none; }
+	nav .group.open .gitems, nav .group.solo .gitems { display: block; }
+	nav .end { margin-top: 12px; }
 	nav .who { margin-top: 24px; padding: 0 12px; color: var(--dim); font-size: 13px; }
 	main { padding: 20px 24px 64px; max-width: 1100px; min-width: 0; }
 	h1 { margin: 0 0 16px; font-size: 22px; }
@@ -95,6 +104,13 @@
 		nav .logo { display: none; }
 		nav button { width: auto; padding: 8px 10px; font-size: 14px; }
 		nav .who { display: none; }
+		/* the groups make one row of chips, the open one's pages a row below */
+		nav .group, nav .group.solo .gitems, nav .end { display: contents; }
+		nav .ghead { margin-top: 0; }
+		nav .ghead .icon { display: none; }
+		nav .group.open .ghead { font-weight: 700; background: var(--panel); }
+		nav .gitems { order: 1; flex-basis: 100%; }
+		nav .group.open .gitems { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
 		main { padding: 16px; }
 		/* a table's last columns (the action buttons) fell off the side of a
 		   phone, behind a sideways scroll nobody noticed: each row stacks instead */
@@ -205,6 +221,7 @@ const PAGES = {
 	apps: { icon: "devices", title: "Client apps" },
 	oauth: { icon: "key", title: "OAuth apps" },
 	federation: { icon: "hub", title: "Federation" },
+	money: { icon: "payments", title: "Money", needs: "moderator" },
 	settings: { icon: "tune", title: "Settings" },
 	errors: { icon: "bug_report", title: "Errors", needs: "errors" },
 	permissions: { icon: "admin_panel_settings", title: "Staff permissions", needs: "admin" },
@@ -214,6 +231,19 @@ const PAGES = {
 	audit: { icon: "history", title: "Audit log" },
 };
 
+const GROUPS = [
+	[null, ["overview"]],
+	["Moderation", ["reports", "appeals", "automod", "posts", "articles", "media"]],
+	["People", ["users", "orgs", "invites", "badges"]],
+	["Content", ["stickers", "hashflags", "topics", "cards"]],
+	["Instance", ["settings", "switches", "money", "email", "apps", "oauth", "federation"]],
+	["Staff and system", ["permissions", "security", "audit", "errors", "backups", "client"]],
+];
+function openGroup(g, on) {
+	g.classList.toggle("open", on);
+	g.querySelector(".ghead")?.setAttribute("aria-expanded", String(on));
+}
+
 function go(hash) { location.hash = hash; }
 window.addEventListener("hashchange", route);
 
@@ -221,6 +251,8 @@ async function route() {
 	const [page, arg] = location.hash.slice(1).split("/");
 	const name = PAGES[page] ? page : page === "user" ? "users" : "overview";
 	document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.page === name));
+	const cur = $('nav [data-page="' + name + '"]');
+	document.querySelectorAll("nav .group").forEach((g) => openGroup(g, g.contains(cur)));
 	const main = $("#main");
 	main.innerHTML = '<div class="empty">Loading…</div>';
 	try {
@@ -556,6 +588,47 @@ const RENDER = {
 		main.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
 			if (!(await ask("Delete this branded hashtag?"))) return;
 			act(() => api("deleteHashflag", { id: b.dataset.del }), "Deleted").then(route);
+		});
+	},
+
+	async money(main, q = "") {
+		const m = await api("money", { q });
+		const admin = can("saveMoney");
+		const usd = (c) => "$" + (c / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+		const dollars = (c) => String(c / 100);
+		const cards = (list) => '<div class="cards">' + list.map(([k, v]) => '<div class="card"><span>' + esc(k) + "</span><b>" + esc(v) + "</b></div>").join("") + "</div>";
+		const t = m.totals;
+		main.innerHTML = "<h1>Money</h1>" +
+			'<p class="dim">X Money, the instance\'s own play money: accounts send it to each other, ask for it and earn it from likes. It has no cash value. ' +
+			(m.enabled ? "It's on; Settings › Features turns it off." : '<b>It\'s off</b>: Settings › Features turns it on.') + "</p>" +
+			cards([["In circulation", usd(t.circulation)], ["Wallets", t.wallets], ["Payments", t.payments], ["Moved", usd(t.volume)], ["Payments this week", t.payments_week], ["Moved this week", usd(t.volume_week)], ["Paid for likes", usd(t.likes_paid)], ["Open requests", t.open_requests], ["Merchants", t.merchants]]) +
+			'<div class="grid2" style="margin-top:16px">' +
+			'<div class="box"><h2>Settings</h2>' +
+			'<div class="field"><label>Starting balance of a new wallet ($)</label><input id="ms" inputmode="decimal" value="' + esc(dollars(m.settings.starting_cents)) + '"' + (admin ? "" : " disabled") + "></div>" +
+			'<div class="field"><label>Most one payment or request moves ($)</label><input id="mx" inputmode="decimal" value="' + esc(dollars(m.settings.max_transfer_cents)) + '"' + (admin ? "" : " disabled") + "></div>" +
+			'<div class="field"><label>Paid to a post\'s author for each like ($, 0 for none)</label><input id="ml" inputmode="decimal" value="' + esc(dollars(m.settings.like_cents)) + '"' + (admin ? "" : " disabled") + "></div>" +
+			'<p class="dim small">A new starting balance applies to wallets made from now on. Likes pay once per post and account.</p>' +
+			(admin ? '<button class="btn primary" id="msave">Save</button>' : "") + "</div>" +
+			'<div class="box"><h2>Adjust a balance</h2><p class="dim small">Adds money, or takes it away with a minus (never below $0.00).</p>' +
+			'<div class="field"><label>Account</label><input id="mah" placeholder="@username"' + (admin ? "" : " disabled") + "></div>" +
+			'<div class="field"><label>Amount ($)</label><input id="maa" placeholder="20 or -5.00"' + (admin ? "" : " disabled") + "></div>" +
+			(admin ? '<button class="btn" id="madj">Apply</button>' : "") + "</div>" +
+			'<div class="box"><h2>Biggest balances</h2>' + (m.top.length ? '<div class="list">' + m.top.map((u, i) => '<p class="row" style="justify-content:space-between;flex-wrap:nowrap;gap:8px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="dim small">' + (i + 1) + '.</span> <a target="_blank" href="/' + esc(u.screen_name) + '">' + esc(u.name || u.screen_name) + "</a> " + badge(u) + ' <span class="dim small">@' + esc(u.screen_name) + "</span></span><b>" + usd(u.balance) + "</b></p>").join("") + "</div>" : '<p class="dim small">No wallets yet.</p>') + "</div>" +
+			"</div>" +
+			'<h2>Payments</h2><div class="row" style="margin-bottom:12px"><input id="mq" placeholder="Payments to or from @username" value="' + esc(q) + '" style="flex:1;min-width:200px"><button class="btn" id="mqs">Search</button></div>' +
+			'<div class="scroll">' + (m.recent.length
+				? '<table class="table"><tr><th>When</th><th>From</th><th>To</th><th>Amount</th>' + (m.notes ? "<th>Note</th>" : "") + "<th></th></tr>" +
+					m.recent.map((r) => '<tr><td class="small">' + esc(when(r.created_at)) + '</td><td><a target="_blank" href="/' + esc(r.sender) + '">@' + esc(r.sender) + '</a></td><td><a target="_blank" href="/' + esc(r.recipient) + '">@' + esc(r.recipient) + "</a></td><td><b>" + usd(r.amount) + "</b></td>" + (m.notes ? '<td class="small">' + esc(r.note) + "</td>" : "") + "<td>" +
+						(r.reversed_at ? '<span class="pill suspended">reversed</span>' : admin ? '<button class="btn danger" data-rev="' + esc(r.id) + '">Reverse</button>' : "") + "</td></tr>").join("") + "</table>"
+				: '<div class="empty">No payments' + (q ? " for @" + esc(q) : "") + ".</div>") + "</div>";
+		const again = () => this.money(main, $("#mq").value);
+		if ($("#msave")) $("#msave").onclick = () => act(() => api("saveMoney", { starting: $("#ms").value, max_transfer: $("#mx").value, like: $("#ml").value }), "Money settings saved").then(again);
+		if ($("#madj")) $("#madj").onclick = () => act(async () => { const r = await api("adjustMoney", { handle: $("#mah").value, amount: $("#maa").value }); notice("@" + r.to + " now has " + usd(r.balance)); }).then(again);
+		$("#mqs").onclick = again;
+		$("#mq").onkeydown = (e) => { if (e.key === "Enter") again(); };
+		main.querySelectorAll("[data-rev]").forEach((b) => b.onclick = async () => {
+			if (!(await ask("Reverse this payment? The money goes back to the sender, if the recipient still has it."))) return;
+			act(() => api("reverseTransfer", { id: b.dataset.rev }), "Payment reversed").then(again);
 		});
 	},
 
@@ -1273,6 +1346,12 @@ async function refreshCounts() {
 		b.querySelector(".count")?.remove();
 		if (n) b.insertAdjacentHTML("beforeend", '<span class="count">' + n + "</span>");
 	}
+	// a shut group still shows what waits inside it
+	document.querySelectorAll("nav .ghead").forEach((h) => {
+		h.querySelector(".count")?.remove();
+		const n = [...h.parentNode.querySelectorAll(".gitems .count")].reduce((sum, c) => sum + Number(c.textContent), 0);
+		if (n) h.firstChild.insertAdjacentHTML("afterend", '<span class="count">' + n + "</span>");
+	});
 }
 
 // which instances' accounts the Users and Organisations lists show (sessionStorage "userHome")
@@ -1449,11 +1528,23 @@ async function renderUser(main, id) {
 		$("#main").innerHTML = '<div class="empty">' + esc(e.message) + ' <a href="/home">Back to {{instance}}</a></div>';
 		return;
 	}
-	$("#nav").insertAdjacentHTML("beforeend", Object.entries(PAGES).filter(([, p]) => !p.needs || can(p.needs)).map(([k, p]) => '<button data-page="' + k + '"><span class="icon">' + p.icon + "</span>" + esc(p.title) + "</button>").join("") +
+	const item = (k) => '<button data-page="' + k + '"><span class="icon">' + PAGES[k].icon + "</span>" + esc(PAGES[k].title) + "</button>";
+	$("#nav").insertAdjacentHTML("beforeend", GROUPS.map(([title, keys]) => {
+		const shown = keys.filter((k) => PAGES[k] && (!PAGES[k].needs || can(PAGES[k].needs)));
+		if (!shown.length) return "";
+		return '<div class="group' + (title ? "" : " solo") + '">' +
+			(title ? '<button class="ghead" aria-expanded="false"><span>' + esc(title) + '</span><span class="icon">expand_more</span></button>' : "") +
+			'<div class="gitems">' + shown.map(item).join("") + "</div></div>";
+	}).join("") +
+		'<div class="end">' +
 		(me.superadmin_home ? '<button onclick="location.href=\'/federation/superadmin\'"><span class="icon">shield_person</span>Superadmin</button>' : "") +
 		'<button onclick="location.href=\'/home\'"><span class="icon">arrow_back</span>Back to {{instance}}</button>' +
-		'<div class="who">@' + esc(me.screen_name) + " · " + esc(me.superadmin ? "superadmin" : me.role) + "</div>");
+		'<div class="who">@' + esc(me.screen_name) + " · " + esc(me.superadmin ? "superadmin" : me.role) + "</div></div>");
 	document.querySelectorAll("nav [data-page]").forEach((b) => b.onclick = () => go(b.dataset.page));
+	document.querySelectorAll("nav .ghead").forEach((h) => h.onclick = () => {
+		const g = h.parentNode, on = !g.classList.contains("open");
+		document.querySelectorAll("nav .group").forEach((x) => openGroup(x, on && x === g));
+	});
 	refreshCounts();
 	route();
 })();

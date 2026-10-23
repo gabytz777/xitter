@@ -785,7 +785,7 @@ export const THEME_SCRIPT = String.raw`(function(){
 		var a=el("a","","Customize…");
 		a.href="/account/theme";
 		a.style.cssText="font-family:inherit;font-size:15px;line-height:20px;color:"+accent+";text-decoration:none;margin:0";
-		a.addEventListener("click",function(e){e.preventDefault();e.stopPropagation();location.assign("/account/theme")},true);
+		a.addEventListener("click",function(e){e.preventDefault();e.stopPropagation();if(window.__xitterGo)window.__xitterGo("/account/theme");else location.assign("/account/theme")},true);
 		bar.appendChild(a);
 		var host=group.parentElement;
 		if(host&&host.parentNode)host.parentNode.insertBefore(bar,host.nextSibling);

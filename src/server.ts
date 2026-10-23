@@ -71,6 +71,8 @@ import { failInterrupted } from "./migration-import";
 import { migrateRoute } from "./migration-page";
 import { acceptedEncoding, compressResponse, compressedFile } from "./compress";
 import { forgetRanking } from "./ranking";
+import { cardsApi, payMeApi, recentApi } from "./money";
+import { merchantRoute, moneyRoute } from "./money-page";
 
 const MIME: Record<string, string> = {
 	js: "text/javascript; charset=utf-8",
@@ -88,7 +90,11 @@ const MIME: Record<string, string> = {
 // dev mode it calls the bare paths.
 // The client also calls outside services on its own (grok.com checkout, ads
 // measurement). Requests from the page may only reach this instance.
-const PAGE_CSP = "connect-src 'self' blob: data:; font-src 'self'";
+const SETTINGS_PAGES = new Set(
+	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant"].map((s) => `/account/${s}`),
+);
+
+const PAGE_CSP ="connect-src 'self' blob: data:; font-src 'self'";
 
 // the instance's own files (logo, icons), open to everyone since the sign-in page uses them
 const PUBLIC_DIR = process.env.PUBLIC_DIR ?? "public";
@@ -242,6 +248,9 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	if (path === "/xitter/theme") return themeApi(req, viewer);
 	if (path === "/xitter/gif") return gifProxy(url);
 	if (path === "/xitter/stickers") return Response.json(await stickerPacks());
+	if (path === "/xitter/money/cards") return cardsApi(viewer, url);
+	if (path === "/xitter/money/recent") return recentApi(viewer);
+	if (path === "/xitter/money/payme" && req.method === "POST") return payMeApi(viewer);
 	if (path === "/xitter/client_error" && req.method === "POST") return clientError(req, viewer);
 	if (viewer.status === "restricted" && bucketsFor(req.method, path, operation, url).some((b) => b === "post" || b === "dm"))
 		return apiError(403, 326, "Your account can't post or send messages right now.");
@@ -414,11 +423,11 @@ async function route(req: Request): Promise<Response | undefined> {
 	// people sign in and up on the signed-out home page; an invite link's code
 	// is kept for the dialog, which then skips asking for it
 	// X's own add-email flow: ours is a page
-	if (p === "/i/flow/add_email") return Response.redirect("/account/email", 302);
+	if (p === "/i/flow/add_email") return Response.redirect("/settings/xitter/email", 302);
 	// and X's automated-account flow (automation.ts)
-	if (p === "/i/flow/enable_automated_account") return Response.redirect("/account/automation", 302);
+	if (p === "/i/flow/enable_automated_account") return Response.redirect("/settings/xitter/automation", 302);
 	// and X's passkey settings and flows: ours is a page (passkeys.ts)
-	if (/^\/(settings|i\/flow)\/.*passkey/i.test(p)) return Response.redirect("/account/passkeys", 302);
+	if (/^\/(settings|i\/flow)\/.*passkey/i.test(p) && !p.startsWith("/settings/xitter/")) return Response.redirect("/settings/xitter/passkeys", 302);
 	// the built-in "All" list (lists.ts)
 	if (p === "/all") return Response.redirect("/i/lists/1", 302);
 	if (p === "/login" || p === "/signup" || p.startsWith("/i/flow/")) {
@@ -455,6 +464,12 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (API_PREFIX.test(p) || req.method !== "GET") return apiError(503, 130, settings().operations.message);
 		return maintenancePage(true);
 	}
+	// opened on their own (a link, a bookmark), the settings pages come up inside
+	// the client's Settings, which frames them (tidy.ts)
+	if (viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && SETTINGS_PAGES.has(p))
+		return Response.redirect(`/settings/xitter/${p.slice("/account/".length)}${url.search}`, 302);
+	// and the side bar's pages fill the main column instead (tidy.ts FULL)
+	if (viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && (p === "/account/money" || p.startsWith("/account/money/"))) return Response.redirect(`/i/xmoney${p.slice("/account/money".length)}${url.search}`, 302);
 	if (p === "/oauth/authorize") return oauthAuthorize(req, url, viewer);
 	if (p === "/account/apps" && viewer) return connectedAppsRoute(req, viewer);
 	if (p === "/account/apps/developer" && viewer) return developerAppsRoute(req, viewer);
@@ -493,6 +508,8 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/account/decor" && viewer) return decorRoute(req, viewer);
 	if (p === "/account/theme" && viewer) return themeRoute(req, viewer);
 	if (p === "/account/migrate" && viewer) return migrateRoute(req, viewer);
+	if ((p === "/account/money" || p.startsWith("/account/money/")) && viewer) return moneyRoute(req, viewer);
+	if (p === "/account/merchant" && viewer) return merchantRoute(req, viewer);
 	if (p.startsWith("/i/ton/data/xchat_media/")) return chatMediaRoute(req, viewer, url);
 	// pictures and oEmbed for previews of public posts in other apps (embeds.ts)
 	if (p.startsWith("/embed/")) return embedImage(p);

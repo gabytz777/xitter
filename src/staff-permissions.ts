@@ -49,6 +49,7 @@ export const PERMISSIONS: Record<string, Permission> = {
 	// stack traces show the server's paths and internals
 	errors: { group: "Instance", label: "See and resolve server errors", role: "admin", actions: ["errors", "resolveErrors"] },
 	mail: { group: "Instance", label: "Send test mail and digests", role: "admin", actions: ["sendTestMail", "runMailDigests"] },
+	money: { group: "Instance", label: "Change X Money settings, adjust balances and reverse payments", role: "admin", actions: ["saveMoney", "adjustMoney", "reverseTransfer"] },
 	oauth_apps: { group: "Instance", label: "Block and unblock OAuth apps", role: "moderator", actions: ["blockOAuthApp", "unblockOAuthApp"] },
 
 	ip_addresses: { group: "Privacy", label: "See IP addresses: where accounts sign in, other accounts seen at the same address, identities held after deletion", role: "moderator", actions: ["heldIdentities"] },

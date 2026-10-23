@@ -148,7 +148,31 @@ pre{background:var(--surface);border-radius:12px;padding:12px 16px;overflow-x:au
 [hidden]{display:none!important}
 .source{padding:16px;border-top:1px solid var(--border);color:var(--muted);font-size:13px}
 @media (max-width:600px){.col{border-inline:0}}
+/* inside the client's Settings (tidy.ts): its own list replaces the tabs, and
+   the frame grows with the page, so nothing may size itself to the frame */
+html[data-in-settings],html[data-in-settings] body{overflow:hidden}
+html[data-in-settings] .col{min-height:0;width:100%;border-inline:0}
+html[data-in-settings] .bar{position:static}
+html[data-in-settings] .tabs,html[data-in-settings] .source{display:none}
 `;
+
+// Runs in the frame: our own pages stay in it, the client's pages open in the
+// client around it without a reload, other sites in a new tab
+const FRAMED = `(function(){
+	if(top===self)return;
+	// an attribute, not a class: pages have their own .framed (decor.ts)
+	document.documentElement.setAttribute("data-in-settings","");
+	document.addEventListener("click",function(e){
+		var a=e.target.closest&&e.target.closest("a[href]");
+		if(!a||e.defaultPrevented||e.button||e.metaKey||e.ctrlKey||e.shiftKey||a.target==="_blank"||a.hasAttribute("download"))return;
+		var u=new URL(a.href,location.href);
+		if(u.origin!==location.origin){e.preventDefault();window.open(u.href,"_blank","noopener");return}
+		if(u.pathname.indexOf("/account/")===0&&!a.hasAttribute("data-home"))return;
+		e.preventDefault();
+		var to=a.hasAttribute("data-home")?"/settings/account":u.pathname+u.search+u.hash;
+		try{parent.__xitterGo(to)}catch(err){top.location.assign(to)}
+	});
+})();`;
 
 const ARROW = "M7.414 13l5.043 5.04-1.414 1.42L3.586 12l7.457-7.46 1.414 1.42L7.414 11H21v2H7.414z";
 
@@ -198,10 +222,11 @@ export async function accountPage({ req, title, body, viewer, status = 200, back
 <link rel="icon" type="image/png" href="/public/favicon.png">
 ${head}
 <style>${fontFaces()}${CSS}${extra}${css}</style>
+<script>${FRAMED}</script>
 </head>
 <body>
 <div class="col">
-<header class="bar"><a class="back" href="${esc(to.href)}" aria-label="${esc(to.label)}" title="${esc(to.label)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ARROW}"/></svg></a><div class="heading"><div class="title">${esc(title)}</div><div class="sub">${esc(name)}</div></div></header>
+<header class="bar"><a class="back" href="${esc(to.href)}"${back ? "" : " data-home"} aria-label="${esc(to.label)}" title="${esc(to.label)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ARROW}"/></svg></a><div class="heading"><div class="title">${esc(title)}</div><div class="sub">${esc(name)}</div></div></header>
 ${tabs}
 <main>
 ${body}
@@ -211,8 +236,9 @@ ${body}
 </body>
 </html>`;
 	// never inside another site's frame: these pages hold one-click actions
-	// (authorizing an app, removing 2FA) a hidden frame could be clicked into
-	const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": cache, "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" });
+	// (authorizing an app, removing 2FA) a hidden frame could be clicked into.
+	// Our own client frames them in Settings.
+	const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": cache, "x-frame-options": "SAMEORIGIN", "content-security-policy": "frame-ancestors 'self'" });
 	if (referrer) headers.set("referrer-policy", referrer);
 	if (viewer) for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
 	return new Response(html, { status, headers });

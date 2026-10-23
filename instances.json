@@ -1,7 +1,14 @@
 {
 	"version": 1,
-	"sequence": 17,
+	"sequence": 19,
 	"instances": [
+		{
+			"id": "a.aagaming.me",
+			"name": "A",
+			"source_url": "https://github.com/Xittered/xitter",
+			"public_key": "obUhcaAS7l8STOxRhPjs1tWq40B7qVmdwEysNitkpXc",
+			"state": "active"
+		},
 		{
 			"id": "cro.corvine.vip",
 			"name": "CRO",
@@ -18,7 +25,7 @@
 		},
 		{
 			"id": "jr1.xitter.space",
-			"name": "jr1",
+			"name": "Xitter Staff",
 			"source_url": "https://github.com/Xittered/xitter",
 			"public_key": "MtOOU2p-wazLBbp3goandZk5MLD_BPKT9IikJcIFm5c",
 			"state": "active"
@@ -77,13 +84,6 @@
 			"name": "Xittor",
 			"source_url": "https://github.com/FlexKleks/xitter",
 			"public_key": "954Dw1wqqWqe4XIXEaMx9wmUUBRiChbbl_vPzahgxfY",
-			"state": "active"
-		},
-		{
-			"id": "xitter.opuadm.com",
-			"name": "Xitter",
-			"source_url": "https://github.com/Xittered/xitter",
-			"public_key": "FDWBt_uXkSyKKyM2J_9bYLfryG5N0bHFseMprag-Qv8",
 			"state": "active"
 		},
 		{
