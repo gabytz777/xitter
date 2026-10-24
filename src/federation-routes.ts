@@ -3,6 +3,7 @@ import { federationApi, startFederationSync } from "./federation-sync";
 import { hit, limitedResponse } from "./ratelimit";
 import { emergencyApi, endSuperadminVisits, pollEmergencies } from "./superadmin";
 import { SUPERADMINS } from "./superadmins";
+import { moneyFederationApi, startMoneyFederation } from "./money-federation";
 
 let ready = false;
 
@@ -16,7 +17,7 @@ export async function federationRoute(req: Request, url: URL): Promise<Response 
 	if (incoming instanceof Response) return incoming;
 	const h = hit("federation", incoming.from);
 	if (!h.ok) return limitedResponse(h);
-	return (await emergencyApi(incoming, req.method, p)) ?? federationApi(incoming, req.method, p, url);
+	return (await emergencyApi(incoming, req.method, p)) ?? (await moneyFederationApi(incoming, req.method, path)) ?? federationApi(incoming, req.method, p, url);
 }
 
 export async function startFederation() {
@@ -26,6 +27,7 @@ export async function startFederation() {
 	void refreshRegistry();
 	setInterval(() => void refreshRegistry(), 5 * 60_000).unref();
 	startFederationSync();
+	startMoneyFederation();
 	const meetHomes = () => Promise.all([...new Set(SUPERADMINS.map((s) => s.instance))].filter((i) => i !== INSTANCE_ID).map((i) => keyFor(i).catch(() => undefined)));
 	void meetHomes();
 	setInterval(() => void meetHomes(), 10 * 60_000).unref();

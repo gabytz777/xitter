@@ -4,6 +4,7 @@
 // and notifications. Muted words hide matching posts on the surfaces chosen.
 
 import { sql } from "./db";
+import { replyDenied } from "./reply-controls";
 import { newId } from "./ids";
 import { staffViewer } from "./staff-access";
 import { isPinnedFollowee } from "./users";
@@ -79,10 +80,7 @@ export async function setBlock(blockerId: string, blockedId: string, on: boolean
 }
 
 export async function replyLimited(conversationId: string, userId: string, db: typeof sql = sql): Promise<boolean> {
-	const [limited] = await db`select exists (select 1 from posts r where r.id = ${conversationId}::bigint and r.reply_policy is not null and r.user_id <> ${userId}::bigint and not (
-			(r.reply_policy = 'Community' and exists (select 1 from follows f where f.follower_id = r.user_id and f.followee_id = ${userId}::bigint))
-			or (r.reply_policy = 'ByInvitation' and exists (select 1 from post_mentions m where m.post_id = r.id and m.user_id = ${userId}::bigint))
-			or (r.reply_policy = 'Verified' and exists (select 1 from users x where x.id = ${userId}::bigint and (x.verified_type is not null or exists (select 1 from affiliations af where af.user_id = x.id)))))) as no`;
+	const [limited] = await db`select exists (select 1 from posts r where r.id = ${conversationId}::bigint and ${replyDenied(userId)}) as no`;
 	return limited.no;
 }
 

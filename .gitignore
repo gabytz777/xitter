@@ -10,8 +10,8 @@ server.log*
 .probe/
 # uploaded files
 media/
-CLAUDE.md
-AGENTS.md
+# personal notes for agents and people; CLAUDE.md and AGENTS.md are the shared ones
+*.local.md
 data/
 realm.env
 deploy/juicebox/verify/
@@ -34,3 +34,7 @@ deploy/juicebox/verify/
 pgdata/
 postgres-data/
 *.pgdata/
+# scripts/ci-local.sh leftovers when it is stopped half-way
+.ci-media/
+.ci-steps
+.ci-server.log

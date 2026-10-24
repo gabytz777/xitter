@@ -1,6 +1,7 @@
 // Uploads: the client's chunked upload (INIT, APPEND, FINALIZE, STATUS),
 // storage on disk, serving, and the media objects attached to posts.
-// Images are stored as uploaded (a GIF may be cropped first); GIFs are served
+// Images are stored as uploaded (a GIF may be cropped first, and with
+// compression on a photo is made smaller by media-compress.ts); GIFs are served
 // as images, so they animate without a video conversion step. Videos are
 // converted by video.ts.
 
@@ -18,6 +19,7 @@ import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { settings } from "./settings";
 import { gifProxy } from "./gifs";
+import { compressUpload } from "./media-compress";
 import { cropGif, maxVideoBytes, posterFile, progress, queueVideo, sourceFile, videoError, videoSupported } from "./video";
 
 export const MEDIA_DIR = process.env.MEDIA_DIR ?? "media";
@@ -66,7 +68,7 @@ export type MediaRow = {
 	sensitive_warning?: string[] | null;
 };
 
-type Image = { mime: string; width: number; height: number };
+export type Image = { mime: string; width: number; height: number };
 
 // type and dimensions from the file header; nothing else is trusted
 export function sniffImage(b: Buffer): Image | undefined {
@@ -95,6 +97,9 @@ export function sniffImage(b: Buffer): Image | undefined {
 	}
 	return undefined;
 }
+
+// custom badges: GIFs are kept as uploaded, so animated ones play wherever the badge shows
+export const BADGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 const fileOf = (id: string) => join(MEDIA_DIR, id);
 const EXT: Record<string, string> = { "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/jpeg": "jpg" };
@@ -449,9 +454,11 @@ async function finalize(id: string, p: Pending): Promise<Response> {
 			return uploadError("File is too large.");
 		}
 		if (image.mime === "image/gif") ({ data, image } = await croppedGif(id, data, image));
+		let compressed: boolean;
+		({ data, image, compressed } = await compressUpload(data, image));
 		writeFileSync(fileOf(id), data);
-		await sql`insert into media (id, user_id, kind, mime, size, width, height)
-			values (${id}::bigint, ${p.userId}::bigint, 'photo', ${image.mime}, ${data.length}, ${image.width}, ${image.height})`;
+		await sql`insert into media (id, user_id, kind, mime, size, width, height, compressed)
+			values (${id}::bigint, ${p.userId}::bigint, 'photo', ${image.mime}, ${data.length}, ${image.width}, ${image.height}, ${compressed})`;
 		return Response.json({
 			...idFields(id),
 			size: data.length,
@@ -615,6 +622,11 @@ type Served = { id: string; mime: string; owner: string; post: string | null; de
 // Visibility changes, blocks and deletion must apply on the next request, and
 // authorized private bytes must not persist in browser or shared caches.
 const PRIVATE = "private, no-store";
+// A public post's photos and a profile's own pictures may stay in the browser,
+// which must still ask on every view: the checks run each time as before, and
+// an unchanged file is answered 304 instead of being sent again. Without this
+// every avatar and photo was downloaded again on every page.
+const REVALIDATE = "private, no-cache";
 
 async function servedOf(id: string): Promise<Served | undefined> {
 	const [row] = await sql`select id::text, mime, user_id::text as owner, post_id::text as post, detached from media where id = ${id}::bigint`;
@@ -629,15 +641,17 @@ async function cacheFor(viewer: Viewer, served: Served): Promise<string | undefi
 	if (!served.post && !pollIds.length) {
 		// Avatars, banners and other non-post references retain their access
 		// policy. Their URL may later be attached to private content.
-		return PRIVATE;
+		const [profile] = await sql`select 1 from users where id = ${served.owner}::bigint
+			and (avatar_url = ${`/media/${served.id}`} or banner_url = ${`/media/banner/${served.id}`})`;
+		return profile ? REVALIDATE : PRIVATE;
 	}
-	const [access] = await sql`select 1 from posts post where
+	const [access] = await sql`select not post.hidden and not author.protected as open from posts post join users author on author.id = post.user_id where
 		${served.post ? sql`post.id = ${served.post}::bigint` : sql`post.poll_id = any(${sql.array(pollIds, "INT8")})`}
 		and (not post.hidden or ${staffViewer(viewer.id)})
 		and post.user_id not in ${protectedFor(viewer.id)}
 		and post.user_id not in ${suspendedFor(viewer.id)}
 		and post.user_id not in ${blockedFor(viewer.id)} limit 1`;
-	if (access) return PRIVATE;
+	if (access) return access.open ? REVALIDATE : PRIVATE;
 	// A draft/deleted poll's uploaded choices remain available to its owner.
 	return !served.post && served.owner === viewer.id ? PRIVATE : undefined;
 }
@@ -648,6 +662,17 @@ async function serveConversationVideo(id: string, viewer: Viewer): Promise<Respo
 	if (!served || served.mime !== "video/mp4" || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
 	return new Response(conversationVideoMap(served.id, mediaUrl(served.id, served.mime), served.owner), { headers: { "content-type": "application/xml", "cache-control": cache, "x-content-type-options": "nosniff" } });
 }
+
+// a file the browser may keep is tagged by its size and time, which change
+// when the file is replaced
+function tagOf(served: Served, body: Blob, cache: string): { etag?: string } {
+	// a remote file kept only in memory has no time, so a same-size swap would
+	// keep its tag; those go untagged and are always sent whole
+	const time = (body as Blob & { lastModified?: number }).lastModified;
+	if (cache !== REVALIDATE || !time) return {};
+	return { etag: `"${served.id}-${body.size.toString(36)}-${time.toString(36)}"` };
+}
+const unchanged = (req: Request, headers: Record<string, string>) => !!headers.etag && req.headers.get("if-none-match") === headers.etag;
 
 // /media/<id>[.ext], /media/banner/<id>[/<size>] and /media/poster/<id>.jpg; the
 // client asks for sizes through the query string or a path suffix, and gets the
@@ -661,7 +686,9 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 		const served = body && (await servedOf(poster[1]));
 		const cache = served && (await cacheFor(viewer, served));
 		if (!body || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-		return new Response(body, { headers: { "content-type": "image/jpeg", "cache-control": cache, "x-content-type-options": "nosniff" } });
+		const headers: Record<string, string> = { "content-type": "image/jpeg", "cache-control": cache, "x-content-type-options": "nosniff", ...tagOf(served, body, cache) };
+		if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
+		return new Response(body, { headers });
 	}
 	const m = /^\/media\/(?:banner\/)?(\d{1,19})(?:\.[a-z0-9]+)?(?:\/[\w-]+)?$/.exec(pathname);
 	const body = m && isId(m[1]) && (await remoteMediaFile(m[1]));
@@ -669,10 +696,14 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 	const served = await servedOf(m[1]);
 	const cache = served && (await cacheFor(viewer, served));
 	if (!served || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-	const headers: Record<string, string> = { "content-type": served.mime, "cache-control": cache, "x-content-type-options": "nosniff", "accept-ranges": "bytes" };
+	const headers: Record<string, string> = { "content-type": served.mime, "cache-control": cache, "x-content-type-options": "nosniff", "accept-ranges": "bytes", ...tagOf(served, body, cache) };
+	if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
 	const size = body.size;
 	const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get("range") ?? "");
-	if (range && (range[1] || range[2])) {
+	// If-Range: a part of a file that changed since would be stitched onto the
+	// old one, so anything but the current tag gets the whole file
+	const ifRange = req.headers.get("if-range");
+	if (range && (range[1] || range[2]) && (ifRange === null || ifRange === headers.etag)) {
 		// "bytes=-N" means the last N bytes
 		const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
 		const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
@@ -682,6 +713,9 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 			headers: { ...headers, "content-range": `bytes ${start}-${end}/${size}`, "content-length": String(end - start + 1) },
 		});
 	}
+	// Bun answers a Range itself when the body comes from a file, even as a
+	// stream and whatever If-Range says; piped, it goes out whole
+	if (range && ifRange !== null) return new Response(body.stream().pipeThrough(new TransformStream()), { headers: { ...headers, "content-length": String(size) } });
 	return new Response(body, { headers });
 }
 

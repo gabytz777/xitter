@@ -1,4 +1,4 @@
-// End-to-end check of X Money (/account/money) against a running server:
+// End-to-end check of Equicoins (/account/money) against a running server:
 // starting balance, sending, the note, refusals, double-pressed Send, blocks,
 // admins adjusting a balance and the side bar entry. Makes its own accounts and
 // removes them.
@@ -105,6 +105,11 @@ try {
 	check("the composer lists the payment", recent[0]?.id === payId && recent[0].url.endsWith(`/i/xmoney/p/${payId}`), recent[0]);
 	const made = await sa.gql("CreateTweet", { tweet_text: `Fast & Free Payments ${recent[0].url}` });
 	const post = made.data.create_tweet.tweet_results.result;
+	check("the post's text stops before the card's link", JSON.stringify(post.legacy?.display_text_range) === JSON.stringify([0, "Fast & Free Payments".length]), post.legacy?.display_text_range);
+	const spaced = (await sa.gql("CreateTweet", { tweet_text: `Here you go\n\n${recent[0].url}\n` })).data.create_tweet.tweet_results.result;
+	check("and before the blank lines over it", spaced.legacy?.display_text_range?.[1] === "Here you go".length, spaced.legacy?.display_text_range);
+	const middle = (await sa.gql("CreateTweet", { tweet_text: `look ${recent[0].url} wow` })).data.create_tweet.tweet_results.result;
+	check("a link with text after it stays in the text", middle.legacy?.display_text_range?.[1] === [...middle.legacy.full_text].length);
 	check("a post with the payment's link gets its card", post.card?.legacy?.name === "summary" && JSON.stringify(post.card).includes(`$12.50 sent to Money B`), post.card?.legacy?.binding_values?.[0]);
 	check("a stranger now sees the card", typeof (await sc.json(`money/cards?ids=p${payId}&by=${a}`))[`p${payId}`] === "string");
 	const html = (await sb.json(`money/cards?ids=p${payId}&by=${a}`))[`p${payId}`] as string;
@@ -158,6 +163,32 @@ try {
 	r = await admin(sa, "reverseTransfer", { id: revId });
 	check("an admin reverses a payment", r.status === 200 && (await balance(a)) === 1000 && (await balance(b)) === 0, r.status);
 	check("only once", (await admin(sa, "reverseTransfer", { id: revId })).status === 400);
+	// the payments feed
+	const feedName = `m${stamp}e`;
+	const feedId = await createUser(feedName, "Economy", "testpass123");
+	ids.push(feedId);
+	check("the feed must be an account here", (await admin(sa, "saveMoney", { starting: "5", max_transfer: "1000", like: "0.5", feed: "@nobody_here_x" })).status === 400);
+	check("the feed is set", (await admin(sa, "saveMoney", { starting: String(was.starting_cents / 100), max_transfer: String(was.max_transfer_cents / 100), like: String(was.like_cents / 100), feed: `@${feedName}` })).status === 200);
+	check("the Send screen says payments are public", (await sa.page("/send")).includes(`posted publicly by <a href="/${feedName}">`));
+	r = await sa.send({ to: b, amount: "2", note: "secret stuff" });
+	const fedId = new URL(r.headers.get("location")!, origin).searchParams.get("sent")!;
+	await Bun.sleep(500);
+	const [fed] = await sql`select id::text, text from posts where user_id = ${feedId}::bigint`;
+	check("each payment is posted by the feed account, with names", fed?.text === `Money A sent $2 to Money B! #Money http://localhost:${process.env.PORT ?? 3000}/i/xmoney/p/${fedId}`, fed?.text);
+	const fedPost = (await sb.get("TweetDetail", { focalTweetId: fed.id })) as any;
+	const fedJson = JSON.stringify(fedPost);
+	check("its post reads as the payment over the card", fedJson.includes(`"display_text_range":[0,${"Money A sent $2 to Money B! #Money".length}]`) && fedJson.includes('"name":"summary"'));
+	check("and mentions nobody", !JSON.stringify(await sb.get("NotificationsTimeline", { timeline_type: "Mentions", count: 40 })).includes("#Money") && !(await sql`select 1 from post_mentions where post_id = ${fed.id}::bigint`).length);
+	const fedCard = (await sc.json(`money/cards?ids=p${fedId}&by=${feedName}`))[`p${fedId}`] as string;
+	check("anyone sees its card", typeof fedCard === "string");
+	check("naming both sides", fedCard?.includes("Money A") && fedCard?.includes("Money B") && fedCard?.includes("sent to"));
+	check("without the note", !fedCard?.includes("secret stuff"));
+	await admin(sa, "reverseTransfer", { id: fedId });
+	check("reversing a payment takes its feed post down", !(await sql`select 1 from posts where user_id = ${feedId}::bigint`).length);
+	await admin(sa, "saveMoney", { starting: String(was.starting_cents / 100), max_transfer: String(was.max_transfer_cents / 100), like: String(was.like_cents / 100), feed: "" });
+	r = await sa.send({ to: b, amount: "1" });
+	await Bun.sleep(300);
+	check("with no feed set nothing is posted", !(await sql`select 1 from posts where user_id = ${feedId}::bigint`).length);
 	check("and both sides see it reversed", (await sa.page(`/p/${revId}`)).includes("Reversed") && (await sb.page()).includes("Reversed"));
 	await sql`update money_wallets set balance_cents = 0 where user_id = ${ids[1]}::bigint`;
 
@@ -190,6 +221,21 @@ try {
 	const [paidReq] = await sql`select status from money_requests where id = ${reqId}::bigint`;
 	check("paying it pays and closes it", r.status === 303 && paidReq.status === "paid" && (await balance(b)) === 10500, [r.status, paidReq.status]);
 	check("it can't be paid twice", (await sa.form("/account/money/send", { to: b, amount: "5", request: reqId!, idem: crypto.randomUUID() })).status >= 400 && (await balance(b)) === 10500);
+
+	// reversing a request's payment puts it back in front of its payer
+	r = await sb.form("/account/money/request", { from: a, amount: "2", note: "reverse me" });
+	const revReqId = /\/r\/(\d+)/.exec(r.headers.get("location") ?? "")?.[1];
+	r = await sa.form("/account/money/send", { to: b, amount: "2", request: revReqId!, idem: crypto.randomUUID() });
+	const revPayId = new URL(r.headers.get("location")!, origin).searchParams.get("sent")!;
+	check("a request can be paid", r.status === 303 && (await sb.page(`/r/${revReqId}`)).includes("Paid"), r.status);
+	r = await admin(sa, "reverseTransfer", { id: revPayId });
+	const [reopened] = await sql`select status, resolved_at from money_requests where id = ${revReqId}::bigint`;
+	check("reversing its payment reopens the request", r.status === 200 && reopened?.status === "open" && reopened?.resolved_at === null, [r.status, reopened]);
+	const reopenedPage = await sb.page(`/r/${revReqId}`);
+	check("and it no longer counts as paid", reopenedPage.includes("Waiting") && !reopenedPage.includes("Paid"));
+	r = await sa.form("/account/money/send", { to: b, amount: "2", request: revReqId!, idem: crypto.randomUUID() });
+	check("so the payer can pay it again", r.status === 303, r.status);
+
 	r = await sb.form("/account/money/request", { from: a, amount: "3", note: "" });
 	const declineId = /\/r\/(\d+)/.exec(r.headers.get("location") ?? "")?.[1];
 	await sa.form(`/account/money/r/${declineId}`, { action: "decline" });
@@ -210,8 +256,11 @@ try {
 	check("its owner's Pay button opens the request instead", ownCard.includes("xm-pay") && ownCard.includes(`/account/money/r/${openId}`) && !ownCard.includes("send?request="));
 	check("the card leads to the account to pay", payCard.includes(`data-xm-go="/${b}"`));
 	r = await sc.form("/account/money/send", { to: b, amount: "2.25", request: openId, idem: crypto.randomUUID() });
+	const openPayC = new URL(r.headers.get("location")!, origin).searchParams.get("sent")!;
 	r = await sa.form("/account/money/send", { to: b, amount: "1", request: openId, idem: crypto.randomUUID() });
 	check("anyone pays it, as often as they like", (await sb.page(`/r/${openId}`)).includes("2 times"));
+	await admin(sa, "reverseTransfer", { id: openPayC });
+	check("a reversed payment no longer counts toward an open request", (await sb.page(`/r/${openId}`)).includes("1 time · $1.00"));
 	const copiedPay = (await sc.gql("CreateTweet", { tweet_text: `pay them ${payMe.url}` })).data.create_tweet.tweet_results.result;
 	check("someone else's post with it gets no card", !copiedPay.card);
 
@@ -245,6 +294,8 @@ try {
 	await sql`insert into blocks (blocker_id, blocked_id) values (${ids[2]}::bigint, ${ids[1]}::bigint) on conflict do nothing`;
 	const forB = await (await fetch(`${origin}/account/money/people?q=${c}`, { headers: sb.headers })).json();
 	check("not accounts that blocked you", Array.isArray(forB) && !forB.some((p: any) => p.screen_name === c));
+	const bSend = await sb.page("/send");
+	check("quick picks leave out accounts that blocked you", !bSend.includes(`data-handle="${c}"`), bSend.match(/data-handle="[^"]+"/g));
 	await sql`delete from blocks where blocker_id = ${ids[2]}::bigint and blocked_id = ${ids[1]}::bigint`;
 	check("odd input lists nothing", (await people("%_")).length === 0 && (await people("")).length === 0);
 
@@ -256,6 +307,8 @@ try {
 	await sql`update users set status = 'restricted' where id = ${ids[2]}::bigint`;
 	const refused = await sc.form("/account/money/request", { from: a, amount: "1", note: "" });
 	check("a restricted account can't ask for money", refused.status === 400 && (await refused.text()).includes("can't ask for money"));
+	const payMeRefused = await fetch(`${origin}/i/api/xitter/money/payme`, { method: "POST", headers: { ...sc.headers, "x-csrf-token": csrfOf(sc) } });
+	check("and its Pay button gets a clean refusal", payMeRefused.status === 403 && (await payMeRefused.text()).includes("can't ask for money"), payMeRefused.status);
 	await sql`update users set status = 'active' where id = ${ids[2]}::bigint`;
 	await sql`update users set role = 'moderator' where id = ${ids[1]}::bigint`;
 	const modView = await (await admin(sb, "money")).json();

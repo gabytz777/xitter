@@ -31,7 +31,7 @@ const ENDPOINTS: Endpoint[] = [
 	["POST", "/media/{id}/segments/{segment_index}", "write", "Send one segment as the raw body. Indices start at 0; retrying an index replaces that segment."],
 	["POST", "/media/{id}/finalize", "write", "Finish an upload after sending every segment. Returns its processing state."],
 	["GET", "/media/{id}", "read", "Check your upload's processing state. Pending uploads also report <code>total_bytes</code>, <code>received_bytes</code> and <code>segments</code>."],
-	["GET", "/money", "read", "X Money, if the instance has it on: your <code>balance_cents</code>, <code>disclaimer_accepted</code>, the <code>disclaimer</code> to show, <code>max_transfer_cents</code>, <code>like_cents</code> and <code>note_max</code>. It's the instance's own play money, with no cash value."],
+	["GET", "/money", "read", "Equicoins, if the instance has it on: your <code>balance_cents</code>, <code>disclaimer_accepted</code>, the <code>disclaimer</code> to show, <code>max_transfer_cents</code>, <code>like_cents</code> and <code>note_max</code>. It's the instance's own play money, with no cash value."],
 	["POST", "/money/disclaimer", "write", "Accept the disclaimer, once; money doesn't move before it."],
 	["GET", "/money/activity", "read", "Your payments, newest first, each with <code>direction</code> (<code>sent</code> or <code>received</code>); the first page adds <code>earnings</code> from likes by day. Pages with <code>cursor</code>."],
 	["GET", "/money/requests", "read", "Open requests: asking you to pay, and yours waiting on others. Each says <code>can_pay</code>, <code>can_decline</code> and <code>can_cancel</code>."],

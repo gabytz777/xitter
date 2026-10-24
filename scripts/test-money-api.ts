@@ -1,4 +1,4 @@
-// X Money through the public API (/api/v1/money), against a migrated,
+// Equicoins through the public API (/api/v1/money), against a migrated,
 // disposable local database: the switch and the disclaimer, paying (once per
 // idempotency key, never past the balance), requests of one account and
 // "Pay @you" cards, who sees which payment, blocks, and earnings from likes.
@@ -114,7 +114,7 @@ try {
 	const earned = (await call(tok.a, "GET", "/money/activity")).earnings;
 	assert.deepEqual([earned[0].likes, earned[0].cents], [1, settings().money.like_cents]);
 
-	console.log("X Money API checks passed");
+	console.log("Equicoins API checks passed");
 } finally {
 	await setSetting("features", features);
 	await sql`delete from users where id = any(${sql.array(Object.values(people), "INT8")})`;

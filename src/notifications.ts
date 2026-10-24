@@ -86,7 +86,7 @@ async function items(viewerId: string, opts: { before?: number; after?: number; 
 			where user_id = ${viewerId}::bigint and resolved_at >= ${lo} and resolved_at < ${hi} order by resolved_at desc limit ${opts.limit}`;
 		for (const r of appeals)
 			out.push({ kind: "staff", key: `appeal-${r.id}`, at: ms(r.at), text: `${team[0].toUpperCase()}${team.slice(1)} ${r.status === "accepted" ? "accepted" : "turned down"} your appeal.` });
-		// X Money's, while it is switched on (money.ts)
+		// Equicoins, while it is switched on (money.ts)
 		if (feature("money")) {
 			const paid = await sql`select t.id, t.sender_id, t.amount_cents, t.note, t.created_at as at from money_transfers t
 				where t.recipient_id = ${viewerId}::bigint and t.sender_id not in ${hidden} and t.created_at >= ${lo} and t.created_at < ${hi}
@@ -102,6 +102,12 @@ async function items(viewerId: string, opts: { before?: number; after?: number; 
 			const declined = await sql`select q.id, q.payer_id, q.amount_cents, q.resolved_at as at from money_requests q
 				where q.requester_id = ${viewerId}::bigint and q.status = 'declined' and q.payer_id not in ${hidden} and q.resolved_at >= ${lo} and q.resolved_at < ${hi}
 				order by q.resolved_at desc limit ${opts.limit}`;
+			// something bought in the shop for the viewer, once staff delivered it
+			const gifts = await sql`select o.id, o.user_id, o.item_name, o.reviewed_at as at from money_shop_orders o
+				where o.recipient_id = ${viewerId}::bigint and o.status = 'approved' and o.user_id not in ${hidden} and o.reviewed_at >= ${lo} and o.reviewed_at < ${hi}
+				order by o.reviewed_at desc limit ${opts.limit}`;
+			for (const r of gifts)
+				out.push({ kind: "money", key: `gift-${r.id}`, at: ms(r.at), users: [String(r.user_id)], path: "/i/xmoney/shop", text: `gave you “${clip(r.item_name)}”` });
 			for (const r of declined)
 				out.push({ kind: "money", key: `declined-${r.id}`, at: ms(r.at), users: [String(r.payer_id)], path: `/i/xmoney/r/${r.id}`, text: `declined your request for ${formatCents(Number(r.amount_cents))}` });
 		}

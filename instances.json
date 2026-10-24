@@ -1,6 +1,6 @@
 {
 	"version": 1,
-	"sequence": 19,
+	"sequence": 21,
 	"instances": [
 		{
 			"id": "a.aagaming.me",
@@ -31,13 +31,6 @@
 			"state": "active"
 		},
 		{
-			"id": "nidus.fourteentrees.net",
-			"name": "Nidus",
-			"source_url": "https://github.com/Xittered/xitter",
-			"public_key": "kgTDVqZmPWxdWqkSo_cuWcYYmkFnk-YqWMz2RYwKY4w",
-			"state": "active"
-		},
-		{
 			"id": "social.opsex.best",
 			"name": "Xitter",
 			"source_url": "https://github.com/gabytz777/xitter",
@@ -49,6 +42,13 @@
 			"name": "social.pixelatedaria.space",
 			"source_url": "https://github.com/xittered/xitter",
 			"public_key": "yTE4xnSExcGTOgq_JAhElkvce0vif-MxTZefmy-8IeY",
+			"state": "active"
+		},
+		{
+			"id": "twitter.meowing.zip",
+			"name": "NOT Twitter",
+			"source_url": "https://github.com/10kbcat/xitter",
+			"public_key": "umKV5puos6jxSWboWpvR3vgXcvVB-1EAx7U-nSFAW8E",
 			"state": "active"
 		},
 		{
@@ -84,6 +84,13 @@
 			"name": "Xittor",
 			"source_url": "https://github.com/FlexKleks/xitter",
 			"public_key": "954Dw1wqqWqe4XIXEaMx9wmUUBRiChbbl_vPzahgxfY",
+			"state": "active"
+		},
+		{
+			"id": "xitter.girlskissing.gay",
+			"name": "xitter: lesbian edition",
+			"source_url": "https://git.iambrdn.dev/braiden/xitter-custom",
+			"public_key": "kgTDVqZmPWxdWqkSo_cuWcYYmkFnk-YqWMz2RYwKY4w",
 			"state": "active"
 		},
 		{

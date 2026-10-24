@@ -446,7 +446,10 @@ async function applyPair(instance: string, e: any) {
 	}
 	const [owner] = await sql`select user_id::text from posts where id = ${post}::bigint`;
 	if (owner && (await blockedBetween(actor, owner.user_id))) return;
-	if (e.kind === "like") await sql`insert into likes (user_id, post_id) values (${actor}::bigint, ${post}::bigint) on conflict do nothing`;
+	if (e.kind === "like") {
+		const added = await sql`insert into likes (user_id, post_id) values (${actor}::bigint, ${post}::bigint) on conflict do nothing returning 1`;
+		if (added.length) await import("./money").then(({ rewardLike }) => rewardLike(actor, post, instance));
+	}
 	else await sql`insert into reposts (id, user_id, post_id) values (${newId()}::bigint, ${actor}::bigint, ${post}::bigint) on conflict do nothing`;
 	await sql`insert into federation_outbox (kind, a) select 'post', p.id from posts p join users u on u.id = p.user_id where p.id = ${post}::bigint and u.instance is null`;
 }

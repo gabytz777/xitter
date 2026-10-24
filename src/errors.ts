@@ -59,11 +59,16 @@ export async function clientError(req: Request, viewer: Viewer): Promise<Respons
 }
 
 // the page's uncaught errors, a few per page load; the client's own telemetry
-// goes to X's formats, which aren't kept
+// goes to X's formats, which aren't kept. Requests that never reached the
+// server (the browser offline: code 1004, or the fetch itself failing) say
+// nothing about the server, so they're dropped as the client's own reporter does.
 export const ERROR_SCRIPT = `(function(){
-	var left=10,seen={};
+	var left=10,seen={},offline=/HTTP-0 codes:\\[1004\\]|Failed to fetch|Load failed|NetworkError when attempting to fetch|TypeError: network error/i,resizeLoop=/^ResizeObserver loop completed with undelivered notifications\\.?$/;
 	function send(message,stack){
-		if(!message||left<=0||seen[message])return;
+		// Chromium reports this when it defers observer work to the next frame;
+		// it is a browser warning, not an uncaught application exception.
+		if(!message||resizeLoop.test(String(message))||left<=0||seen[message])return;
+		if(navigator.onLine===false||offline.test(String(message)))return;
 		left--;seen[message]=1;
 		var csrf=(document.cookie.match(/(?:^|; )ct0=([^;]+)/)||[])[1]||"";
 		try{fetch("/i/api/xitter/client_error",{method:"POST",credentials:"same-origin",keepalive:true,headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({message:String(message),stack:String(stack||""),page:location.href})})}catch(e){}

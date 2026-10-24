@@ -16,6 +16,7 @@ import { absolute, mediaUpload, mediaUrl, posterUrl } from "./media";
 import { type PostRow, badgeList, isOrganization, isVerified, verifiedSince } from "./model";
 import { PostError, feed, getPost, likerIds, postsByIds, replies, type FeedItem } from "./posts";
 import { setProfileImage, updateProfileText } from "./rest";
+import { ReplyControlError } from "./reply-controls";
 import { type Bucket, limitHeaders, limitedResponse, noteRefusal, take } from "./ratelimit";
 import { searchPosts, searchUsers } from "./search";
 import { feature, settings } from "./settings";
@@ -30,6 +31,7 @@ import {
 	closeRequest,
 	disclaimerAccepted,
 	disclaimerText,
+	economy,
 	paymentUrl,
 	payments,
 	requestMoney,
@@ -277,12 +279,12 @@ async function uploadMedia(req: Request, v: Viewer) {
 	return { media_id: id, processing: done.processing_info?.state ?? "succeeded" };
 }
 
-// ---- X Money (money.ts): the instance's own play money, with no cash value
+// ---- Equicoins (money.ts): the instance's own play money, with no cash value
 
 // on for this instance and, before any money moves, the disclaimer accepted
 async function moneyOn(v: Viewer, { accepted = true } = {}) {
-	if (!feature("money")) throw new ApiError(404, `X Money isn't on for ${settings().instance_name}.`);
-	if (accepted && !(await disclaimerAccepted(v.id))) throw new ApiError(403, "Accept X Money's disclaimer first: POST /money/disclaimer.");
+	if (!feature("money")) throw new ApiError(404, `Equicoins isn't on for ${settings().instance_name}.`);
+	if (accepted && !(await disclaimerAccepted(v.id))) throw new ApiError(403, "Accept Equicoins' disclaimer first: POST /money/disclaimer.");
 }
 async function moneyCall<T>(f: () => Promise<T>): Promise<T> {
 	try {
@@ -364,8 +366,8 @@ const MONEY_ROUTES: Route[] = [
 		method: "GET", pattern: /^\/money$/, scope: "read",
 		run: async (v) => {
 			await moneyOn(v, { accepted: false });
-			const m = settings().money;
-			return { data: { name: `${settings().instance_name} Money`, balance_cents: await balanceOf(v.id), disclaimer_accepted: await disclaimerAccepted(v.id), disclaimer: disclaimerText(), max_transfer_cents: m.max_transfer_cents, like_cents: m.like_cents, note_max: NOTE_MAX } };
+			const m = economy();
+			return { data: { name: `${settings().instance_name} Equicoins`, balance_cents: await balanceOf(v.id), disclaimer_accepted: await disclaimerAccepted(v.id), disclaimer: disclaimerText(), max_transfer_cents: m.max_transfer_cents, like_cents: m.like_cents, note_max: NOTE_MAX } };
 		},
 	},
 	{
@@ -444,7 +446,7 @@ const op = async (name: string, v: Viewer, vars: Record<string, unknown>) => {
 	try {
 		return await callOperation(name, v, vars);
 	} catch (e) {
-		if (e instanceof PostError) throw new ApiError(e.code === 144 ? 404 : 400, e.message);
+		if (e instanceof PostError || e instanceof ReplyControlError) throw new ApiError(e.code === 144 ? 404 : 400, e.message);
 		throw e;
 	}
 };

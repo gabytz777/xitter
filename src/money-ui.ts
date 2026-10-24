@@ -1,4 +1,4 @@
-// X Money in the client (money.ts): payment and "Pay @name" cards drawn over
+// Equicoins in the client (money.ts): payment and "Pay @name" cards drawn over
 // the summary card of a post carrying a payment's or request's link, the
 // composer's $ button that puts a Pay button or one of your payments in the
 // post, and opening the composer with one in it from the Money pages
@@ -48,13 +48,12 @@ img.xm-sq{border-radius:8px!important}
 
 export const MONEY_UI_CSS = `${CARD_CSS}
 [data-xm-hidden]{display:none!important}
-[data-xm-link]{font-size:0!important;line-height:0!important}
 [data-xm-compose]{position:relative;margin:4px 0 8px}
 [data-xm-compose] .xm-card{margin-top:0;cursor:default}
 [data-xm-compose] .xm-card:hover{background:none}
 .xm-remove{position:absolute;top:8px;right:8px;z-index:1;display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:50%;background:rgb(15 20 25 / .75);color:#fff;font:20px/1 -apple-system,"Segoe UI",sans-serif;cursor:pointer;backdrop-filter:blur(4px)}
 .xm-remove:hover{background:rgb(39 44 48 / .75)}
-[data-xm-compose] .xm-req{padding-right:56px}
+[data-xm-compose] .xm-card:not(.xm-shop){padding-right:56px}
 [data-xm-compose] .xm-req .xm-pay{pointer-events:none}
 #xitter-pay{position:fixed;z-index:10000;width:360px;max-width:calc(100vw - 16px);max-height:min(440px,calc(100vh - 16px));display:flex;flex-direction:column;border-radius:16px;overflow:hidden;font-family:TwitterChirp,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:15px;box-shadow:rgba(101,119,134,.2) 0 0 15px,rgba(101,119,134,.15) 0 0 3px 1px}
 #xitter-pay .xp-head{padding:12px 16px;font-weight:800;font-size:17px;border-bottom:1px solid color-mix(in srgb,currentColor 15%,transparent)}
@@ -89,21 +88,13 @@ export const MONEY_UI_SCRIPT = `(function(){
 		go("/compose/post");
 	};
 	function editorOf(root){return root&&root.querySelector('[contenteditable="true"][data-testid^="tweetTextarea_"]')}
-	function insert(editor,text){
-		editor.focus();
-		var sel=getSelection(),range=document.createRange();
-		range.selectNodeContents(editor);range.collapse(false);
-		sel.removeAllRanges();sel.addRange(range);
-		var before=(editor.innerText||"").replace(/\\n+$/,"");
-		document.execCommand("insertText",false,(before&&!/\\s$/.test(before)?" ":"")+text);
-	}
 	function pending(){
 		var text;try{text=sessionStorage.getItem("xitter-compose")}catch(e){}
 		if(!text)return;
 		var editor=document.querySelector('[role="dialog"] [contenteditable="true"][data-testid="tweetTextarea_0"]')||document.querySelector('[contenteditable="true"][data-testid="tweetTextarea_0"]');
 		if(!editor)return;
 		try{sessionStorage.removeItem("xitter-compose")}catch(e){}
-		setTimeout(function(){insert(editor,text)},50);
+		setTimeout(function(){attach(editor,text)},50);
 	}
 
 	// cards: fetched as HTML per payment and the author it speaks for
@@ -126,6 +117,8 @@ export const MONEY_UI_SCRIPT = `(function(){
 	function cards(){
 		var want={};
 		document.querySelectorAll('[data-testid="card.wrapper"]:not([data-xm-hidden])').forEach(function(w){
+			// posts only: the composer's own link preview is the composer's business
+			if(!w.closest("article"))return;
 			var a=[].find.call(w.querySelectorAll("a[href]"),function(a){return keyOf(a.getAttribute("href"))});
 			if(!a)return;
 			var id=keyOf(a.getAttribute("href")),by=authorOf(w),key=id+"|"+by;
@@ -164,7 +157,7 @@ export const MONEY_UI_SCRIPT = `(function(){
 		close();
 		var box=el("div");box.id="xitter-pay";
 		box.style.background=bg();box.style.color=getComputedStyle(document.body).color;
-		box.appendChild(el("div","xp-head","X Money"));
+		box.appendChild(el("div","xp-head","Equicoins"));
 		var list=el("div","xp-list");
 		function action(title,sub,run){
 			var b=el("button","xp-item");b.type="button";
@@ -175,7 +168,7 @@ export const MONEY_UI_SCRIPT = `(function(){
 		// a "Pay @you" card anyone who sees the post can pay
 		action("Add a Pay button","Anyone who sees the post can pay you",function(){
 			fetch("/i/api/xitter/money/payme",{method:"POST",credentials:"include",headers:{"x-csrf-token":csrf()}}).then(function(r){return r.json()}).then(function(d){
-				close();var ed=editorOf(rootOf(toolbar));if(ed&&d.url)insert(ed,d.url);
+				close();var ed=editorOf(rootOf(toolbar));if(ed&&d.url)attach(ed,d.url);
 			},function(){});
 		});
 		action("Request money","Ask for an amount, from anyone or one account",function(){close();go("/account/money/request")});
@@ -200,7 +193,7 @@ export const MONEY_UI_SCRIPT = `(function(){
 				t.appendChild(el("div",null,p.amount+(p.shop?" at ":p.sent?" sent to ":" from ")+p.name));
 				t.appendChild(el("div","xp-dim",(p.note?"\\u201c"+p.note+"\\u201d \\u00b7 ":"")+p.date));
 				b.appendChild(t);
-				b.onclick=function(){close();var ed=editorOf(rootOf(toolbar));if(ed)insert(ed,p.url)};
+				b.onclick=function(){close();var ed=editorOf(rootOf(toolbar));if(ed)attach(ed,p.url)};
 				list.appendChild(b);
 			});
 		},function(){loading.textContent="Couldn't load your payments."});
@@ -225,41 +218,73 @@ export const MONEY_UI_SCRIPT = `(function(){
 		});
 	}
 
-	// The composer: a payment's or request's link in the post being written
-	// shows as its card under the text, as the post will, with the link itself
-	// out of sight; the card's × takes the link out of the post.
+	// The composer. A payment or request added from the $ menu or a Money page
+	// never enters the text: it is the post's attachment, shown as its card
+	// under the text, and its link goes on the end of the text as the post
+	// leaves (withLink below). X's editor (Draft.js) owns the text, so this
+	// only ever types into it as a person would: with nothing else written,
+	// an invisible character keeps the Post button on, and never leaves. A
+	// payment link typed or pasted stays as written, its card shown under it
+	// as X shows any link's.
 	var me="";
 	try{var S=window.__INITIAL_STATE__;me=S.entities.users.entities[S.session.user_id].screen_name.toLowerCase()}catch(e){}
+	var ZW="\\u200b";
 	function linkIn(text){
 		var base=location.origin+"/i/xmoney/",at=text.indexOf(base);
 		var m=at<0?null:/^[pr]\\/\\d{1,19}/.exec(text.slice(at+base.length));
 		return m?base+m[0]:null;
 	}
-	// the smallest element holding the link and nothing else, if the editor gives it one
-	function linkNode(editor,url){
-		return [].find.call(editor.querySelectorAll("span"),function(n){return n.textContent===url&&!(n.firstElementChild&&n.firstElementChild.textContent===url)});
-	}
-	function drop(editor,url){
-		var n=linkNode(editor,url);
-		if(!n)return;
+	function plain(t){return String(t||"").split(ZW).join("").replace(/\\s+/g," ").trim()}
+	function caretAtEnd(editor){
 		editor.focus();
-		var range=document.createRange();range.selectNodeContents(n);
+		var range=document.createRange();range.selectNodeContents(editor);range.collapse(false);
 		var sel=getSelection();sel.removeAllRanges();sel.addRange(range);
-		document.execCommand("delete");
+	}
+	var attached=[],dismissed=[];
+	function attachmentOf(editor){return attached.find(function(a){return a.editor===editor})}
+	function attach(editor,url){
+		var key=keyOf(url);
+		if(!key)return;
+		var a=attachmentOf(editor);
+		if(a){a.url=url;a.key=key}else attached.push({editor:editor,url:url,key:key});
+		// pasted: the editor takes a paste into its own state, where typing by
+		// script would change the page under it
+		if(!plain(editor.textContent)&&editor.textContent.indexOf(ZW)<0){
+			caretAtEnd(editor);
+			var dt=new DataTransfer();dt.setData("text/plain",ZW);
+			editor.dispatchEvent(new ClipboardEvent("paste",{clipboardData:dt,bubbles:true,cancelable:true}));
+		}
+		composers();
+	}
+	function detach(editor){
+		attached=attached.filter(function(a){return a.editor!==editor});
+		// the invisible character, by a Backspace the editor handles itself
+		if(!plain(editor.textContent)&&editor.textContent.indexOf(ZW)>=0){
+			caretAtEnd(editor);
+			var e=new KeyboardEvent("keydown",{key:"Backspace",code:"Backspace",bubbles:true,cancelable:true});
+			Object.defineProperty(e,"keyCode",{get:function(){return 8}});Object.defineProperty(e,"which",{get:function(){return 8}});
+			editor.dispatchEvent(e);
+		}
 	}
 	function composers(){
+		attached=attached.filter(function(a){return a.editor.isConnected});
 		document.querySelectorAll('[contenteditable="true"][data-testid^="tweetTextarea_"]').forEach(function(editor){
 			var root=editor;
 			while(root.parentElement&&!root.parentElement.querySelector('[data-testid="toolBar"]'))root=root.parentElement;
 			var shown=root.parentElement&&[].find.call(root.parentElement.children,function(c){return c.hasAttribute("data-xm-compose")});
-			var url=linkIn(editor.textContent||""),key=url&&keyOf(url);
-			[].forEach.call(editor.querySelectorAll("[data-xm-link]"),function(n){if(n.textContent!==url){n.removeAttribute("data-xm-link")}});
+			var a=attachmentOf(editor),typed=a?null:linkIn(editor.textContent||"");
+			var key=a?a.key:typed&&dismissed.indexOf(typed)<0?keyOf(typed):null;
+			// X's own preview of a payment link the person typed: ours stands in for it
+			var area=root.parentElement;
+			if(area)[].forEach.call(area.querySelectorAll('[data-testid="card.wrapper"]'),function(w){
+				var money=[].some.call(w.querySelectorAll("a[href]"),function(l){return keyOf(l.getAttribute("href"))});
+				if(money&&key&&!w.hasAttribute("data-xm-hidden"))w.setAttribute("data-xm-hidden","");
+				else if(!key&&w.hasAttribute("data-xm-hidden"))w.removeAttribute("data-xm-hidden");
+			});
 			if(!key||!root.parentElement){if(shown)shown.remove();return}
 			var ck=key+"|"+me+"|preview";
 			if(cache[ck]===undefined){fetchCards(me,[key],true);return}
-			if(!cache[ck]){if(shown)shown.remove();return}
-			var n=linkNode(editor,url);
-			if(n&&!n.hasAttribute("data-xm-link"))n.setAttribute("data-xm-link","");
+			if(!cache[ck]){if(shown)shown.remove();if(a)detach(editor);return}
 			if(shown&&shown.getAttribute("data-xm-compose")===key)return;
 			if(shown)shown.remove();
 			var box=document.createElement("div");
@@ -267,14 +292,44 @@ export const MONEY_UI_SCRIPT = `(function(){
 			box.style.setProperty("--xm-bg",bg());box.style.setProperty("--xm-fg",getComputedStyle(document.body).color);
 			box.innerHTML=cache[ck];
 			// a mockup: nothing in it opens or pays while writing
-			[].forEach.call(box.querySelectorAll("[data-xm-go]"),function(a){a.removeAttribute("data-xm-go");a.removeAttribute("href");a.removeAttribute("tabindex")});
+			[].forEach.call(box.querySelectorAll("[data-xm-go]"),function(x){x.removeAttribute("data-xm-go");x.removeAttribute("href");x.removeAttribute("tabindex")});
 			var x=document.createElement("button");
-			x.type="button";x.className="xm-remove";x.setAttribute("aria-label","Remove");x.textContent="\u00d7";
-			x.addEventListener("click",function(e){e.preventDefault();e.stopPropagation();drop(editor,url);box.remove()});
+			x.type="button";x.className="xm-remove";x.setAttribute("aria-label","Remove payment");x.textContent="\\u00d7";
+			x.addEventListener("click",function(e){
+				e.preventDefault();e.stopPropagation();
+				if(attachmentOf(editor))detach(editor);else dismissed.push(typed);
+				box.remove();
+			});
 			box.appendChild(x);
 			root.parentNode.insertBefore(box,root.nextSibling);
 		});
 	}
+	// the post on its way: its link back at the end of its text, the invisible character out
+	var POSTING=/\\/graphql\\/[^/]+\\/(CreateTweet|CreateNoteTweet|CreateScheduledTweet|EditScheduledTweet|CreateDraftTweet|EditDraftTweet)(?:\\?|$)/;
+	function withLink(url,body){
+		if(typeof body!=="string"||!POSTING.test(String(url)))return body;
+		try{
+			var b=JSON.parse(body),v=b.variables||{};
+			var holder=typeof v.tweet_text==="string"?v:v.post_tweet_request&&typeof v.post_tweet_request.status==="string"?v.post_tweet_request:null;
+			if(!holder)return body;
+			var field=holder===v?"tweet_text":"status",text=holder[field];
+			var live=attached.filter(function(a){return a.editor.isConnected});
+			var a=live.length===1?live[0]:live.find(function(x){return plain(x.editor.textContent)===plain(text)});
+			text=text.split(ZW).join("");
+			if(a&&text.indexOf(a.url)<0)text=text.replace(/\\s+$/,"")?text.replace(/\\s+$/,"")+" "+a.url:a.url;
+			if(text===holder[field])return body;
+			holder[field]=text;
+			return JSON.stringify(b);
+		}catch(e){return body}
+	}
+	var send=window.fetch;
+	window.fetch=function(input,init){
+		if(on&&init&&typeof init.body==="string")init=Object.assign({},init,{body:withLink(typeof input==="string"?input:input&&input.url,init.body)});
+		return send.call(this,input,init);
+	};
+	var xopen=XMLHttpRequest.prototype.open,xsend=XMLHttpRequest.prototype.send;
+	XMLHttpRequest.prototype.open=function(method,url){this.__xmUrl=url;return xopen.apply(this,arguments)};
+	XMLHttpRequest.prototype.send=function(body){return xsend.call(this,on?withLink(this.__xmUrl,body):body)};
 
 	var timer;
 	function run(){timer=null;cards();if(on){pending();composers();buttons()}}

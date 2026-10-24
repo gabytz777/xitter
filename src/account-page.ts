@@ -205,7 +205,8 @@ export async function accountPage({ req, title, body, viewer, status = 200, back
 	}
 	const theme = paletteOf(look, night);
 	const path = new URL(req.url).pathname;
-	const links = viewer ? await menuLinks(viewer.id) : [];
+	// the admin panel is in the menu, but isn't one of these pages
+	const links = viewer ? (await menuLinks(viewer.id)).filter((l) => l.href.startsWith("/account/")) : [];
 	const tabs = links.length
 		? `<nav class="tabs" aria-label="Account pages">${links
 				.map((l) => `<a href="${l.href}"${path === l.href || path.startsWith(`${l.href}/`) ? ' aria-current="page"' : ""}><span>${esc(l.text)}</span></a>`)

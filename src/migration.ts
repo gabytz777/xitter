@@ -226,6 +226,7 @@ export async function migrationApi(req: Request, url: URL): Promise<Response> {
 			return { deactivated };
 		});
 		if (!done) return fail(409, "This move was already finished.");
+		void import("./money").then(({ moveBalance }) => moveBalance(who.userId, to)).catch((e) => console.error("Equicoins balance move:", e instanceof Error ? e.message : e));
 		return Response.json({ ok: true, ...done }, { headers: { "cache-control": "no-store" } });
 	}
 	return fail(404, "Unknown migration call.");

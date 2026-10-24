@@ -22,9 +22,9 @@ export function newCode(): string {
 
 export const normalizeCode = (code: string) => code.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/(.{4})(?=.)/g, "$1-");
 
-export async function createInvite(opts: { createdBy?: string; maxUses?: number; expiresAt?: Date; orgId?: string } = {}): Promise<string> {
+export async function createInvite(opts: { createdBy?: string; maxUses?: number; expiresAt?: Date; orgId?: string } = {}, db: typeof sql = sql): Promise<string> {
 	const code = newCode();
-	await sql`insert into invites (code, created_by, max_uses, expires_at, org_id)
+	await db`insert into invites (code, created_by, max_uses, expires_at, org_id)
 		values (${code}, ${opts.createdBy ?? null}::bigint, ${opts.maxUses ?? 1}, ${opts.expiresAt ?? null}, ${opts.orgId ?? null}::bigint)`;
 	return code;
 }

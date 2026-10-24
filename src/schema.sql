@@ -1567,6 +1567,8 @@ create table if not exists account_migrations (
 );
 create index if not exists account_migrations_user_idx on account_migrations (user_id, created_at desc);
 create unique index if not exists account_migrations_running_idx on account_migrations (user_id) where state = 'running';
+-- when the old instance's wallet came over (money-federation.ts): once per move
+alter table account_migrations add column if not exists balance_moved_at timestamptz;
 create table if not exists migration_objects (
 	user_id bigint not null references users (id) on delete cascade,
 	source text not null,
@@ -1598,7 +1600,7 @@ create table if not exists step_up_grants (
 	until timestamptz not null,
 	created_at timestamptz not null default now()
 );
--- X Money (money.ts): each account's balance in cents, made on first use with
+-- Equicoins (money.ts): each account's balance in cents, made on first use with
 -- the instance's starting balance, and every transfer between accounts
 create table if not exists money_wallets (
 	user_id bigint primary key references users (id) on delete cascade,
@@ -1616,6 +1618,33 @@ create table if not exists money_transfers (
 	created_at timestamptz not null default now(),
 	check (sender_id <> recipient_id)
 );
+alter table money_transfers add column if not exists federation_status text not null default 'complete';
+alter table money_transfers drop constraint if exists money_transfers_federation_status_check;
+alter table money_transfers add constraint money_transfers_federation_status_check check (federation_status in ('pending', 'complete', 'failed'));
+create table if not exists money_federation_outbox (
+	transfer_id bigint primary key references money_transfers(id) on delete cascade,
+	destination text not null,
+	sender_id bigint not null references users(id) on delete cascade,
+	recipient_id bigint not null,
+	amount_cents bigint not null check (amount_cents > 0),
+	note text not null default '',
+	attempts int not null default 0,
+	next_attempt timestamptz not null default now(),
+	last_error text,
+	created_at timestamptz not null default now()
+);
+create index if not exists money_federation_outbox_due_idx on money_federation_outbox (next_attempt);
+create table if not exists money_federation_receipts (
+	origin text not null,
+	transfer_id bigint not null,
+	created_at timestamptz not null default now(),
+	primary key (origin, transfer_id)
+);
+-- what each peer sent, for money.peer_daily_cents; a moved account's balance doesn't count
+alter table money_federation_receipts add column if not exists amount_cents bigint not null default 0;
+alter table money_federation_receipts add column if not exists move boolean not null default false;
+create index if not exists money_federation_receipts_day_idx on money_federation_receipts (origin, created_at);
+alter table money_federation_outbox add column if not exists move boolean not null default false;
 create unique index if not exists money_transfers_idem_idx on money_transfers (sender_id, idem);
 create index if not exists money_transfers_sender_idx on money_transfers (sender_id, id desc);
 create index if not exists money_transfers_recipient_idx on money_transfers (recipient_id, id desc);
@@ -1636,7 +1665,7 @@ create table if not exists money_requests (
 create index if not exists money_requests_requester_idx on money_requests (requester_id, id desc);
 create index if not exists money_requests_payer_idx on money_requests (payer_id, id desc) where payer_id is not null;
 alter table money_transfers add column if not exists request_id bigint references money_requests (id) on delete set null;
--- merchant mode (Settings > X Money), for gold organisations: payments to
+-- merchant mode (Settings > Equicoins), for gold organisations: payments to
 -- them read as purchases ("$3.52 at Taco Bell")
 create table if not exists money_merchants (
 	user_id bigint primary key references users (id) on delete cascade,
@@ -1654,8 +1683,157 @@ create table if not exists money_like_rewards (
 	primary key (post_id, liker_id)
 );
 create index if not exists money_like_rewards_author_idx on money_like_rewards (author_id, created_at desc);
--- when the account accepted X Money's disclaimer (money-page.ts), shown the first time Money opens
+-- Equicoins shop: listings can award an existing custom badge or submit an
+-- instance announcement for staff approval. Orders hold the price until reviewed.
+create table if not exists money_shop_items (
+	id bigint primary key,
+	name text not null check (char_length(name) between 1 and 60),
+	description text not null default '' check (char_length(description) <= 240),
+	price_cents bigint not null check (price_cents > 0),
+	kind text not null check (kind in ('badge', 'custom_badge', 'announcement', 'checkmark', 'invite', 'hashflag', 'sticker_pack', 'explore_card', 'boost')),
+	badge_id bigint references custom_badges(id) on delete set null,
+	active boolean not null default true,
+	status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+	created_by bigint references users(id) on delete set null,
+	approved_by bigint references users(id) on delete set null,
+	approved_at timestamptz,
+	created_at timestamptz not null default now(),
+	check ((kind = 'badge' and badge_id is not null) or kind <> 'badge')
+);
+alter table money_shop_items add column if not exists status text not null default 'pending';
+alter table money_shop_items add column if not exists created_by bigint references users(id) on delete set null;
+alter table money_shop_items add column if not exists approved_by bigint references users(id) on delete set null;
+alter table money_shop_items add column if not exists approved_at timestamptz;
+alter table money_shop_items drop constraint if exists money_shop_items_status_check;
+alter table money_shop_items add constraint money_shop_items_status_check check (status in ('pending', 'approved', 'rejected'));
+-- Existing listings must be reviewed under the new policy before anyone can buy them.
+update money_shop_items set active = false where status = 'pending';
+alter table money_shop_items drop constraint if exists money_shop_items_kind_check;
+alter table money_shop_items add constraint money_shop_items_kind_check check (kind in ('badge', 'custom_badge', 'announcement', 'checkmark', 'invite', 'hashflag', 'sticker_pack', 'explore_card', 'boost'));
+alter table money_shop_items drop constraint if exists money_shop_items_check;
+alter table money_shop_items add constraint money_shop_items_check check ((kind = 'badge' and badge_id is not null) or kind <> 'badge');
+-- Federated listings are cached for review on every receiving instance. They
+-- stay hidden until a local moderator approves them, and source changes reset
+-- that approval so edited listings are reviewed again.
+create table if not exists money_remote_shop_items (
+	origin text not null,
+	remote_id bigint not null,
+	name text not null,
+	description text not null default '',
+	price_cents bigint not null check (price_cents > 0),
+	kind text not null check (kind in ('badge', 'custom_badge', 'announcement', 'checkmark', 'invite', 'hashflag', 'sticker_pack', 'explore_card', 'boost')),
+	badge_name text,
+	badge_image bytea,
+	badge_mime text,
+	source_active boolean not null default true,
+	status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+	active boolean not null default false,
+	reviewed_by bigint references users(id) on delete set null,
+	reviewed_at timestamptz,
+	updated_at timestamptz not null default now(),
+	primary key (origin, remote_id),
+	check ((kind = 'badge' and badge_name is not null and badge_image is not null and badge_mime is not null) or kind <> 'badge')
+);
+create index if not exists money_remote_shop_visible_idx on money_remote_shop_items (origin, updated_at desc) where source_active and active and status = 'approved';
+create table if not exists money_shop_orders (
+	id bigint primary key,
+	user_id bigint not null references users(id) on delete cascade,
+	item_id bigint references money_shop_items(id) on delete set null,
+	item_name text not null,
+	price_cents bigint not null check (price_cents > 0),
+	kind text not null check (kind in ('badge', 'custom_badge', 'announcement', 'checkmark', 'invite', 'hashflag', 'sticker_pack', 'explore_card', 'boost')),
+	payload jsonb not null default '{}'::jsonb,
+	status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+	created_at timestamptz not null default now(),
+	reviewed_at timestamptz,
+	reviewed_by bigint references users(id) on delete set null
+);
+alter table money_shop_orders drop constraint if exists money_shop_orders_kind_check;
+alter table money_shop_orders add constraint money_shop_orders_kind_check check (kind in ('badge', 'custom_badge', 'announcement', 'checkmark', 'invite', 'hashflag', 'sticker_pack', 'explore_card', 'boost'));
+create index if not exists money_shop_orders_pending_idx on money_shop_orders (created_at) where status = 'pending';
+create index if not exists money_shop_orders_user_idx on money_shop_orders (user_id, id desc);
+alter table money_remote_shop_items drop constraint if exists money_remote_shop_items_kind_check;
+alter table money_remote_shop_items add constraint money_remote_shop_items_kind_check check (kind in ('badge', 'custom_badge', 'announcement', 'checkmark', 'invite', 'hashflag', 'sticker_pack', 'explore_card', 'boost'));
+-- a checkmark, hashflag, Explore card or boost lasts this many days
+alter table money_shop_items add column if not exists days integer check (days between 1 and 365);
+alter table money_remote_shop_items add column if not exists days integer;
+alter table money_shop_orders add column if not exists days integer;
+-- a gift: delivered to this account instead of the buyer
+alter table money_shop_orders add column if not exists recipient_id bigint references users(id) on delete cascade;
+create index if not exists money_shop_orders_gift_idx on money_shop_orders (recipient_id, reviewed_at desc) where recipient_id is not null;
+-- pictures sent with a request (a sticker pack, a hashflag's emoji, an Explore
+-- card's picture), kept until staff review it
+create table if not exists money_shop_order_files (
+	order_id bigint not null references money_shop_orders(id) on delete cascade,
+	position integer not null,
+	name text not null default '',
+	image bytea not null,
+	mime text not null,
+	primary key (order_id, position)
+);
+-- a blue checkmark bought in the shop comes off when this passes (money-shop.ts);
+-- one staff give has none
+alter table users add column if not exists shop_verified_until timestamptz;
+-- boosted posts: For you shows one, marked as an ad, on each page until ends_at
+create table if not exists post_boosts (
+	id bigint primary key,
+	post_id bigint not null references posts(id) on delete cascade,
+	user_id bigint not null references users(id) on delete cascade,
+	order_id bigint references money_shop_orders(id) on delete set null,
+	created_at timestamptz not null default now(),
+	ends_at timestamptz not null
+);
+create index if not exists post_boosts_ends_idx on post_boosts (ends_at);
+-- when the account accepted Equicoins' disclaimer (money-page.ts), shown the first time Equicoins opens
 alter table money_wallets add column if not exists disclaimer_at timestamptz;
 -- a payment staff reversed (Admin > Money): the money went back to its sender
 alter table money_transfers add column if not exists reversed_at timestamptz;
 alter table money_transfers add column if not exists reversed_by bigint references users (id) on delete set null;
+-- a file media-compress.ts has already made smaller (or tried to): the sweep
+-- over stored files passes it by, so a photo isn't encoded again and again
+alter table media add column if not exists compressed boolean not null default false;
+
+alter table posts add column if not exists reply_selections text[] not null default '{}';
+alter table posts add column if not exists reply_allowed_values text[] not null default '{}';
+
+do $$ begin
+	if to_regclass('reply_country_catalog') is null then
+		create table reply_country_catalog (value text primary key, account_count bigint not null);
+		insert into reply_country_catalog (value, account_count)
+		select value, count(*) from users u cross join lateral
+			(select distinct trim(v) as value from unnest(array[u.country, u.based_in_override]) v where nullif(trim(v), '') is not null) c
+		group by value;
+	end if;
+end $$;
+
+create or replace function update_reply_country_catalog() returns trigger language plpgsql as $$
+declare
+	previous_values text[] := '{}';
+	next_values text[] := '{}';
+	entry text;
+	delta integer;
+begin
+	if TG_OP <> 'INSERT' then
+		select array_agg(distinct trim(v)) into previous_values from unnest(array[OLD.country, OLD.based_in_override]) v where nullif(trim(v), '') is not null;
+	end if;
+	if TG_OP <> 'DELETE' then
+		select array_agg(distinct trim(v)) into next_values from unnest(array[NEW.country, NEW.based_in_override]) v where nullif(trim(v), '') is not null;
+	end if;
+	previous_values := coalesce(previous_values, '{}');
+	next_values := coalesce(next_values, '{}');
+	for entry in select distinct unnest(previous_values || next_values) order by 1 loop
+		delta := (entry = any(next_values))::integer - (entry = any(previous_values))::integer;
+		if delta = 1 then
+			insert into reply_country_catalog (value, account_count) values (entry, 1)
+				on conflict (value) do update set account_count = reply_country_catalog.account_count + 1;
+		elsif delta = -1 then
+			update reply_country_catalog set account_count = account_count - 1 where value = entry;
+			delete from reply_country_catalog where value = entry and account_count = 0;
+		end if;
+	end loop;
+	return null;
+end $$;
+
+drop trigger if exists users_reply_country_catalog on users;
+create trigger users_reply_country_catalog after insert or delete or update of country, based_in_override on users
+	for each row execute function update_reply_country_catalog();

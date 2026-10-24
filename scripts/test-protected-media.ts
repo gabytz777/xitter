@@ -46,7 +46,7 @@ try {
 	check("signed out doesn't", (await fetch(`${origin}/media/${hidden}.gif`)).status === 404);
 	const pub = await get(`pf${stamp}`, open);
 	// A public upload can become protected or be deleted at the same URL.
-	check("public media also avoids persistent or shared caching", pub.status === 200 && pub.headers.get("cache-control") === "private, no-store", pub.headers.get("cache-control"));
+	check("public media is privately cached but revalidated", pub.status === 200 && pub.headers.get("cache-control") === "private, no-cache", pub.headers.get("cache-control"));
 	await sql`delete from posts where id = ${openPost}::bigint`;
 	check("a deleted post's media is immediately gone for others", (await get(`pf${stamp}`, open)).status === 404);
 	check("but its owner still gets it", (await get(`ps${stamp}`, open)).status === 200);

@@ -386,6 +386,7 @@ export type PostRow = {
 	// the viewer may not reply to this conversation
 	reply_limited?: boolean;
 	conversation_policy?: string | null;
+	conversation_selections?: string[] | null;
 	conversation_owner?: string | null;
 	edited_at?: Date | null;
 	// ids the post went by before each edit, oldest first
@@ -455,8 +456,8 @@ export function hashtags(text: string) {
 // where the client reads limitedActionResults from
 export function tweetResult(p: PostRow, withTypename = true): Record<string, unknown> {
 	const tweet = plainTweet(p, withTypename);
+	const audience = p.conversation_policy === "Community" ? `Accounts @${p.conversation_owner} follows can reply` : p.conversation_policy === "MyNetwork" ? `Accounts @${p.conversation_owner} follows and accounts they follow can reply` : p.conversation_policy === "Followers" ? `Accounts following @${p.conversation_owner} can reply` : ["Verified", "Premium"].includes(p.conversation_policy ?? "") ? "Verified accounts can reply" : ["Country", "CountryOfOrigin"].includes(p.conversation_policy ?? "") ? `Accounts based in ${(p.conversation_selections ?? []).join(", ")} can reply` : `Accounts @${p.conversation_owner} mentioned can reply`;
 	if ((!p.reply_limited && !p.notice) || !withTypename) return tweet;
-	const who = p.conversation_policy === "Community" ? "follows" : p.conversation_policy === "Verified" ? "allows (verified accounts only)" : "mentioned";
 	return {
 		__typename: "TweetWithVisibilityResults",
 		tweet,
@@ -469,7 +470,7 @@ export function tweetResult(p: PostRow, withTypename = true): Record<string, unk
 						__typename: "CtaLimitedActionPrompt",
 						cta_type: "SeeConversation",
 						headline: { text: "Who can reply?", entities: [] },
-						subtext: { text: `Accounts @${p.conversation_owner} ${who} can reply`, entities: [] },
+						subtext: { text: audience + (p.conversation_policy === "ByInvitation" ? "" : ". Accounts mentioned in the original post can also reply."), entities: [] },
 					},
 				},
 			],
@@ -502,6 +503,16 @@ function noticePivot(n: { type: string; text: string; url?: string }) {
 		url: link,
 		landingUrl: link,
 	};
+}
+
+// A money card's link closing the text is the card's own, as X does with a
+// card's link: the shown text stops before it and the space before it
+// (money.ts), so the post doesn't end in a blank line over its card.
+function shownUpTo(p: PostRow, shown: string, textLength: number) {
+	const link = (p.linkCard as { rest_id?: unknown } | undefined)?.rest_id;
+	if (typeof link !== "string" || !link.includes("/i/xmoney/")) return textLength;
+	const kept = shown.trimEnd();
+	return kept.endsWith(link) ? [...kept.slice(0, kept.length - link.length).trimEnd()].length : textLength;
 }
 
 function plainTweet(p: PostRow, withTypename: boolean): Record<string, unknown> {
@@ -542,7 +553,7 @@ function plainTweet(p: PostRow, withTypename: boolean): Record<string, unknown> 
 		core: { user_results: { result: userResult(p.author) } },
 		edit_control: editControl(p),
 		...(p.conversation_policy
-			? { conversation_control: { policy: p.conversation_policy, conversation_owner_results: { result: { __typename: "User", legacy: { screen_name: p.conversation_owner } } } } }
+			? { conversation_control: { policy: p.conversation_policy === "CountryOfOrigin" ? "Co" : p.conversation_policy, conversation_owner_results: { result: { __typename: "User", legacy: { screen_name: p.conversation_owner } } } }, ...(["Country", "CountryOfOrigin"].includes(p.conversation_policy) ? { conversation_control_details: { mode: p.conversation_policy, allowed_country_codes: p.conversation_selections ?? [] } } : {}) }
 			: {}),
 		grok_analysis_button: false,
 		grok_annotations: {},
@@ -552,7 +563,7 @@ function plainTweet(p: PostRow, withTypename: boolean): Record<string, unknown> 
 			bookmarked: p.bookmarked,
 			conversation_id_str: p.conversation_id,
 			created_at: apiDate(p.created_at),
-			display_text_range: [0, textLength],
+			display_text_range: [0, shownUpTo(p, shown, textLength)],
 			entities: {
 				...(media.length ? { media } : {}),
 				...(mentions.length ? { user_mentions: mentions } : {}),
@@ -679,6 +690,28 @@ export const tweetEntry = (p: PostRow, sortIndex: string) => itemEntry(p.id, twe
 // the client lifts an entry to the top of a profile only when it carries this label
 export const pinnedEntry = (p: PostRow, sortIndex: string) =>
 	itemEntry(p.id, tweetResult(p), sortIndex, { type: "TimelineGeneralContext", contextType: "Pin", text: "Pinned" });
+
+// A boosted post (the shop's Post boost) as X's ad entry: the client marks
+// one carrying promotedMetadata "Ad", with its author as the advertiser.
+export const promotedEntry = (p: PostRow, sortIndex: string) => ({
+	content: {
+		__typename: "TimelineTimelineItem",
+		entryType: "TimelineTimelineItem",
+		itemContent: {
+			...tweetItem(tweetResult(p)),
+			promotedMetadata: {
+				advertiser_results: { result: userResult(p.author) },
+				disclosureType: "NoDisclosure",
+				experimentValues: [],
+				impressionId: BigInt(sortIndex).toString(16),
+				impressionString: BigInt(sortIndex).toString(16),
+				clickTrackingInfo: { urlParams: [] },
+			},
+		},
+	},
+	entryId: `promoted-tweet-${p.id}-${sortIndex}`,
+	sortIndex,
+});
 
 // a post or a repost from feed(); entry ids are item ids, so both fit in one timeline.
 // `topic`: the followed topic that brought a stranger's post into "For you".

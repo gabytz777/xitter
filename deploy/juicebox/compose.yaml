@@ -21,7 +21,7 @@ services:
       database:
         condition: service_healthy
   verify:
-    image: oven/bun:1.4.2
+    image: oven/bun:1.4.4
     profiles: ["verify"]
     env_file: ./realm.env
     environment:

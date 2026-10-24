@@ -2,6 +2,7 @@
 // (status, media_ids, reply target, ...); it is kept as sent and replayed when
 // the time comes.
 
+import { replyControl, replyCountrySelections } from "./reply-controls";
 import { conversationCard } from "./conversation-cards";
 import { checkConversationCard } from "./conversation-card-moderation";
 import type { Viewer } from "./auth";
@@ -35,6 +36,12 @@ function cleanPart(value: unknown, draft = false): Vars {
 		media_ids: ids(r.media_ids).slice(0, 4),
 		exclude_reply_user_ids: ids(r.exclude_reply_user_ids).slice(0, 50),
 	};
+	const selections = replyCountrySelections(r.conversation_control_region_codes);
+	const control = replyControl(r.conversation_control, selections);
+	if (r.conversation_control !== undefined) {
+		out.conversation_control = control.policy ? r.conversation_control : "all";
+		out.conversation_control_region_codes = control.selections;
+	}
 	if (r.xitter_conversation_card !== undefined) {
 		try { out.xitter_conversation_card = conversationCard(r.xitter_conversation_card, () => false, draft); }
 		catch (error) { throw new PostError(error instanceof Error ? error.message : "Invalid conversation card.", 214); }
@@ -286,7 +293,7 @@ export async function runDue(lookupMention: (handle: string) => Promise<unknown>
 				await tx.savepoint(async (publication) => {
 					let replyTo = request.in_reply_to_status_id;
 					for (const part of parts(request)) {
-						const id = await createPost(row.user_id, part.status.trim(), { replyToId: replyTo, quoteId: quoteOf(part), db: publication, skipPreview: true });
+						const id = await createPost(row.user_id, part.status.trim(), { replyToId: replyTo, quoteId: quoteOf(part), replyPolicy: part.conversation_control, replySelections: part.conversation_control_region_codes, db: publication, skipPreview: true });
 						await attachMedia(row.user_id, id, part.media_ids, { db: publication, strict: true });
 						if (part.xitter_conversation_card) await publication`update posts set conversation_card = ${JSON.stringify(part.xitter_conversation_card)}::text::jsonb where id = ${id}::bigint`;
 						if (part.possibly_sensitive) await publication`update posts set sensitive = true where id = ${id}::bigint`;

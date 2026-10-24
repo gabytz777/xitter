@@ -10,7 +10,7 @@ import { loadBuild } from "./build";
 import { INSTANCE_ID, isPeer } from "./federation";
 import { sql } from "./db";
 import { newId } from "./ids";
-import { MEDIA_DIR, sniffImage } from "./media";
+import { BADGE_TYPES, MEDIA_DIR, sniffImage } from "./media";
 import { NOTICE_TYPES } from "./model";
 import { hateIn, hateInName } from "./hate";
 import { forgetHeld } from "./held";
@@ -76,8 +76,8 @@ export const toolActions: Record<string, Action> = {
 			if (!encoded || encoded.length > 350_000 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new AdminError("Upload an image up to 256 KB.");
 			const image = Buffer.from(encoded, "base64");
 			const info = sniffImage(image);
-			if (image.length > 256 * 1024 || !info || !["image/png", "image/jpeg", "image/webp"].includes(info.mime) || info.width > 1024 || info.height > 1024)
-				throw new AdminError("Use a PNG, JPEG or WebP up to 1024×1024 and 256 KB.");
+			if (image.length > 256 * 1024 || !info || !BADGE_TYPES.includes(info.mime) || info.width > 1024 || info.height > 1024)
+				throw new AdminError("Use a PNG, JPEG, WebP or GIF up to 1024×1024 and 256 KB.");
 			const id = newId();
 			await sql`insert into custom_badges (id, name, image, mime) values (${id}::bigint, ${name}, ${image}, ${info.mime})`;
 			await audit(a, "create_badge", id, { name });
@@ -227,6 +227,61 @@ export const toolActions: Record<string, Action> = {
 			await sql`update staff_messages set revoked_at = now() where id = ${id}::bigint`;
 			await audit(a, "revoke_strike", m.user_id, { message: id });
 			return {};
+		},
+	},
+	bulkStrike: {
+		role: "moderator",
+		run: async (a, b) => {
+			const body = textOf(b.body);
+			if (b.include_alts === true && !allows(a.role, "ip_addresses")) throw new AdminError("IP address permission is required to include alts.", 403);
+			if ((b.ids !== undefined && !Array.isArray(b.ids)) || (b.handles !== undefined && !Array.isArray(b.handles))) throw new AdminError("Provide lists of ids or handles.");
+			if ((b.ids?.length ?? 0) + (b.handles?.length ?? 0) > 50) throw new AdminError("At most 50 handles or ids at a time.");
+			const wanted = new Map<string, string>();
+			const missing: string[] = [];
+			for (const x of b.ids ?? []) wanted.set(idOf(x), "");
+			if ((b.handles ?? []).some((h: unknown) => typeof h !== "string")) throw new AdminError("Handles must be text.");
+			const names: string[] = [...new Set<string>((b.handles ?? []).map((h: string) => h.trim().replace(/^@+/, "").toLowerCase()).filter(Boolean))];
+			if (names.some((n) => n.length > 80)) throw new AdminError("Invalid handle.");
+			if (names.length) {
+				const rows = await sql`select id::text, screen_name from users where lower(screen_name) = any(${sql.array(names, "TEXT")})`;
+				const byName = new Map(rows.map((r) => [r.screen_name.toLowerCase(), r]));
+				for (const n of names) {
+					const r = byName.get(n);
+					if (r) wanted.set(r.id, r.screen_name);
+					else missing.push(n);
+				}
+			}
+			if (!wanted.size && !missing.length) throw new AdminError("Pick at least one account.");
+			let withAlts = false;
+			if (b.include_alts === true && wanted.size) {
+				const rows = await sql`select distinct u.id::text as id, u.screen_name from login_events mine
+					join login_events other on other.ip = mine.ip and other.user_id <> mine.user_id and other.created_at > now() - interval '90 days'
+					join users u on u.id = other.user_id
+					where mine.user_id = any(${sql.array([...wanted.keys()], "BIGINT")}) and mine.ip is not null and mine.created_at > now() - interval '90 days'
+					order by id limit 51`;
+				for (const r of rows) if (!wanted.has(r.id)) { wanted.set(r.id, r.screen_name); withAlts = true; }
+				if (wanted.size > 50) throw new AdminError("That's over 50 accounts with alts included. Strike fewer at a time.");
+			}
+			const results: { id: string; screen_name: string; ok: boolean; why?: string; delivered?: boolean; error?: boolean; strikes?: number; outcome?: string; hours?: number }[] = [];
+			for (const [id, name] of wanted) {
+				if (id === a.id) { results.push({ id, screen_name: name || a.screen_name, ok: false, why: "your own account" }); continue; }
+				let delivered = false;
+				let screenName = name;
+				try {
+					const u = await guard(a, id, true);
+					screenName = u.screen_name;
+					const message = newId();
+					await sql`insert into staff_messages (id, user_id, actor_id, kind, body) values (${message}::bigint, ${id}::bigint, ${a.id}::bigint, 'strike', ${body})`;
+					delivered = true;
+					const escalation = b.escalate !== false ? await escalate(id, a.id, `bulk strike from @${a.screen_name}`) : undefined;
+					results.push({ id, screen_name: screenName, ok: true, strikes: escalation?.strikes, outcome: escalation?.outcome, hours: escalation?.hours });
+				} catch (e) {
+					results.push({ id, screen_name: screenName, ok: false, delivered, error: !(e instanceof AdminError), why: e instanceof AdminError ? e.message : delivered ? "Strike sent, but escalation failed. Review the account before retrying." : "Could not send the strike." });
+				}
+			}
+			const struck = results.filter((r) => r.ok || r.delivered);
+			await audit(a, "bulk_strike", null, { count: struck.length, ids: struck.map((r) => r.id), results, missing, escalate: b.escalate !== false, alts: withAlts });
+			return { results, missing };
 		},
 	},
 
@@ -414,8 +469,11 @@ export const toolActions: Record<string, Action> = {
 
 	media: {
 		role: "support",
-		run: async (_a, b) => ({ media: await sql`select m.id::text, m.user_id::text, u.screen_name, m.kind, m.mime, m.size, m.state, m.created_at, m.post_id::text
-			from media m join users u on u.id = m.user_id order by m.id desc limit 60 offset ${Math.max(0, Number(b.offset) || 0)}` }),
+		// everything, or one account's uploads (Users > an account > media)
+		run: async (_a, b) => ({ media: await sql`select m.id::text, m.user_id::text, u.screen_name, m.kind, m.mime, m.size, m.state, m.created_at, m.post_id::text,
+				u.avatar_url = '/media/' || m.id as avatar, u.banner_url = '/media/banner/' || m.id as banner
+			from media m join users u on u.id = m.user_id ${b.user ? sql`where m.user_id = ${idOf(b.user)}::bigint` : sql``}
+			order by m.id desc limit 60 offset ${Math.max(0, Number(b.offset) || 0)}` }),
 	},
 	deleteMedia: {
 		role: "moderator",

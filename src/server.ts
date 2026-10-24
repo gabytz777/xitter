@@ -39,6 +39,7 @@ import { startScheduler } from "./scheduled";
 import { federationRoute, startFederation } from "./federation-routes";
 import { acceptTicket, superadminHomeRoute } from "./superadmin";
 import { gifProxy } from "./gifs";
+import { gifSettingsRoute } from "./gif-settings";
 import { cardImage } from "./explore-cards";
 import { rememberIp, requestIp } from "./login-history";
 import { bucketsFor, hit, isMutation, limitApi, limitedResponse } from "./ratelimit";
@@ -73,6 +74,7 @@ import { acceptedEncoding, compressResponse, compressedFile } from "./compress";
 import { forgetRanking } from "./ranking";
 import { cardsApi, payMeApi, recentApi } from "./money";
 import { merchantRoute, moneyRoute } from "./money-page";
+import { expireShopCheckmarks } from "./money-shop";
 
 const MIME: Record<string, string> = {
 	js: "text/javascript; charset=utf-8",
@@ -91,10 +93,10 @@ const MIME: Record<string, string> = {
 // The client also calls outside services on its own (grok.com checkout, ads
 // measurement). Requests from the page may only reach this instance.
 const SETTINGS_PAGES = new Set(
-	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant"].map((s) => `/account/${s}`),
+	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant", "gifs"].map((s) => `/account/${s}`),
 );
 
-const PAGE_CSP ="connect-src 'self' blob: data:; font-src 'self'";
+const PAGE_CSP = "connect-src 'self' blob: data:; font-src 'self'";
 
 // the instance's own files (logo, icons), open to everyone since the sign-in page uses them
 const PUBLIC_DIR = process.env.PUBLIC_DIR ?? "public";
@@ -264,7 +266,7 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 		let body = raw;
 		try {
 			body = decodeURIComponent(raw.replace(/\+/g, " "));
-		} catch {}
+		} catch { }
 		for (const m of body.matchAll(/.{0,160}(?:[Ee]rror|exception|stack).{0,400}/g)) console.log(`client-report ${path}: ${m[0]}`);
 	}
 	if (/^\/(i|1\.1)\/media\/upload2?\.json$/.test(path)) return mediaUpload(req, url, viewer);
@@ -302,6 +304,15 @@ setInterval(
 			recordError("job", e, { path: "sanction expiry" });
 		}),
 	30_000,
+).unref();
+// a checkmark bought in the shop comes off when its days are up
+setInterval(
+	() =>
+		expireShopCheckmarks().catch((e) => {
+			console.error("shop checkmark expiry failed", e.message);
+			recordError("job", e, { path: "shop checkmark expiry" });
+		}),
+	10 * 60_000,
 ).unref();
 await loadSettings();
 await resumeVideos(MEDIA_DIR);
@@ -472,6 +483,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && (p === "/account/money" || p.startsWith("/account/money/"))) return Response.redirect(`/i/xmoney${p.slice("/account/money".length)}${url.search}`, 302);
 	if (p === "/oauth/authorize") return oauthAuthorize(req, url, viewer);
 	if (p === "/account/apps" && viewer) return connectedAppsRoute(req, viewer);
+	if (p === "/account/gifs" && viewer) return gifSettingsRoute(req, viewer);
 	if (p === "/account/apps/developer" && viewer) return developerAppsRoute(req, viewer);
 	if (p === "/federation/superadmin" || p.startsWith("/federation/superadmin/")) return superadminHomeRoute(req, url, viewer);
 	if (p === "/account/reset") return resetRoute(req, url);

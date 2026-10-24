@@ -94,7 +94,7 @@ export async function pushTo(sub: Pick<Subscription, "id" | "endpoint" | "p256dh
 
 // The settings screen's switches, X's template format. Values are "on"/"off".
 const TEMPLATE = {
-	checksum: "xitter-1",
+	checksum: "xitter-2",
 	template: {
 		settings: [
 			{
@@ -106,6 +106,7 @@ const TEMPLATE = {
 					{ id: "followed", name: "New followers", control_type: "on_off", scribe_component: "followed" },
 					{ id: "tweets", name: "Posts", control_type: "tweet_control", scribe_component: "tweets" },
 					{ id: "direct_messages", name: "Direct messages", control_type: "on_off", scribe_component: "direct_messages" },
+					{ id: "money", name: "Equicoins", control_type: "on_off", scribe_component: "money" },
 				],
 			},
 			{
@@ -115,7 +116,7 @@ const TEMPLATE = {
 		],
 	},
 };
-const DEFAULTS: Record<string, string> = { mentions: "on", retweets: "on", favorites: "on", followed: "on", tweets: "on", direct_messages: "on", staff: "on" };
+const DEFAULTS: Record<string, string> = { mentions: "on", retweets: "on", favorites: "on", followed: "on", tweets: "on", direct_messages: "on", money: "on", staff: "on" };
 // which switch each kind of notification answers to
 const SWITCH: Record<PushItem["kind"], string> = { reply: "mentions", mention: "mentions", quote: "mentions", repost: "retweets", like: "favorites", follow: "followed", bell: "tweets", staff: "staff", money: "money" };
 

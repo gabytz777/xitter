@@ -78,6 +78,12 @@ try {
 		!!(await sub.post("/1.1/notifications/settings/login.json", { push_device_info: { ...device, token: "https://evil.example/x" } })) && !(await sql`select 1 from push_subscriptions where endpoint = 'https://evil.example/x'`).length);
 	const login = await sub.post("/1.1/notifications/settings/login.json", { push_device_info: device });
 	check("subscribing answers the settings screen", login.push_settings?.followed === "on" && login.push_settings_template?.template?.settings?.[0]?.section_entries?.length > 0, login.push_settings);
+	const moneySwitch = login.push_settings_template?.template?.settings
+		?.flatMap((section: any) => section.section_entries ?? [])
+		.find((entry: any) => entry.id === "money");
+	check("money notifications have a switch", login.push_settings?.money === "on" && !!moneySwitch, login.push_settings);
+	const moneySaved = await sub.post("/1.1/notifications/settings/save.json", { push_device_info: { ...device, settings: { money: "off" } } });
+	check("the money switch is saved", moneySaved.push_settings.money === "off", moneySaved.push_settings);
 	check("and keeps the subscription", (await sql`select 1 from push_subscriptions where endpoint = ${endpoint} and user_id = ${subId}::bigint`).length === 1);
 	const saved = await sub.post("/1.1/notifications/settings/save.json", { push_device_info: { ...device, settings: { mentions: "off", nonsense: "on" } } });
 	check("switches are saved", saved.push_settings.mentions === "off" && !("nonsense" in saved.push_settings), saved.push_settings);

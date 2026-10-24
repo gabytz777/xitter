@@ -8,7 +8,8 @@ import { automationHandlers } from "./automation";
 import { analyticsHandlers } from "./analytics";
 import { bookmarkFolderHandlers } from "./bookmark-folders";
 import { communityHandlers } from "./communities";
-import { countryName, regionName } from "./countries";
+import { conversationSettings, replyControl, ReplyControlError } from "./reply-controls";
+import { countryDisplayName, countryName, regionName } from "./countries";
 import { gifHandlers } from "./gifs";
 import { listHandlers } from "./lists";
 import { placeById } from "./places";
@@ -24,7 +25,7 @@ import { sql } from "./db";
 import { trendScope } from "./explore-settings";
 import { activeCards, cardsEntry } from "./explore-cards";
 import { isBlockedEitherWay, blockedIds, blockedFor, outOfView, protectedFor } from "./blocks";
-import { settings } from "./settings";
+import { feature, settings } from "./settings";
 import { freshAsOf, rankedFeed } from "./ranking";
 import * as articles from "./articles";
 import type { Viewer } from "./auth";
@@ -32,7 +33,7 @@ import { notificationsTimeline, unreadCount } from "./notifications";
 import { cachedTrends, searchPosts, searchUsers } from "./search";
 import { isId, newId } from "./ids";
 import { attachMedia } from "./media";
-import { type ThreadItem, cursorEntry, feedEntry, gridAppend, gridEntry, pinnedEntry, showMoreThreadsEntry, threadEntry, threadItems, tombstoneEntry, tweetEntry, tweetResult, userEntry, userResult } from "./model";
+import { type ThreadItem, cursorEntry, feedEntry, gridAppend, gridEntry, pinnedEntry, promotedEntry, showMoreThreadsEntry, threadEntry, threadItems, tombstoneEntry, tweetEntry, tweetResult, userEntry, userResult } from "./model";
 import { MORE_PER_PAGE, type Placed, THREADS_PER_PAGE, conversationThreads } from "./threads";
 import {
 	PostError,
@@ -135,6 +136,18 @@ const homeResponse = (entries: unknown[], feedbackActions: unknown[] = []) => ({
 });
 
 // the post an admin pinned for everyone, on top of the first page
+// One boosted post (the shop's Post boost) on each page of "For you": not the
+// viewer's own, nor one the page shows already.
+async function boostedPost(viewer: Viewer, onPage: string[]) {
+	if (!feature("money")) return undefined;
+	const [b] = await sql`select b.post_id::text as id from post_boosts b join posts p on p.id = b.post_id
+		where b.ends_at > now() and not p.hidden and p.user_id <> ${viewer.id}::bigint
+			and p.user_id not in ${blockedFor(viewer.id)} and p.user_id not in ${outOfView(viewer.id)}
+			and not (b.post_id = any(${sql.array(onPage, "INT8")}))
+		order by random() limit 1`;
+	return b ? getPost(viewer.id, b.id) : undefined;
+}
+
 async function globalPin(viewer: Viewer, entries: unknown[], first: boolean) {
 	const id = settings().operations.global_pin;
 	if (!first || !id) return;
@@ -158,16 +171,19 @@ const forYou: Handler = async (viewer, vars) => {
 	const asOf = ranked ? ranked[2] : await freshAsOf(viewer.id);
 	const offset = ranked ? Number(ranked[1]) : 0;
 	const page = await rankedFeed(viewer.id, { asOf, offset, limit: count });
-	// sort indexes run down from asOf in ranked order, below anything newer
+	// sort indexes run down from asOf in ranked order, below anything newer,
+	// two apart so a boosted post fits between two of them
 	const base = BigInt(asOf);
 	const topics = await topicsForPosts(viewer.id, page.items.filter((i) => !i.repost).map((i) => ({ id: i.post.id, authorId: i.post.author.id })));
 	const feedbackActions = [...new Map([...topics.values()].map((t) => [t.id, t])).values()].flatMap(topicFeedbackActions);
 	const entries: unknown[] = page.items.map((item, i) => {
 		const topic = item.repost ? undefined : topics.get(item.post.id);
-		return feedEntry(item, (base - BigInt(offset + i) - 1n).toString(), topic && { context: topicContext(topic), feedbackKeys: topicFeedbackKeys(topic) });
+		return feedEntry(item, (base - 2n * BigInt(offset + i) - 2n).toString(), topic && { context: topicContext(topic), feedbackKeys: topicFeedbackKeys(topic) });
 	});
+	const boosted = page.items.length > 2 ? await boostedPost(viewer, page.items.map((i) => i.post.id)) : undefined;
+	if (boosted) entries.splice(2, 0, promotedEntry(boosted, (base - 2n * BigInt(offset + 2) - 1n).toString()));
 	if (!ranked) entries.unshift(cursorEntry("Top", `t${asOf}`, inc(asOf)));
-	if (page.next !== undefined) entries.push(cursorEntry("Bottom", `r${page.next}.${asOf}`, (base - BigInt(page.next) - 1n).toString()));
+	if (page.next !== undefined) entries.push(cursorEntry("Bottom", `r${page.next}.${asOf}`, (base - 2n * BigInt(page.next) - 1n).toString()));
 	await globalPin(viewer,entries,!cursor);
 	return homeResponse(entries, feedbackActions);
 };
@@ -356,7 +372,7 @@ const createTweet: Handler = async (viewer, vars) => {
 		return { data: { create_tweet: { tweet_results: { result: tweetResult((await getPost(viewer.id, previous))!, false) } } } };
 	}
 	if (replyTo !== undefined && !isId(replyTo)) throw new PostError("Invalid post id.", 144);
-	id = await createPost(viewer.id, text, { replyToId: replyTo, quoteId, source: viewer.postSource, communityId, placeId: placeById(vars.geo?.place_id) ? vars.geo.place_id : undefined, replyPolicy: ["Community", "ByInvitation", "Verified"].includes(vars.conversation_control?.mode) ? vars.conversation_control.mode : undefined });
+	id = await createPost(viewer.id, text, { replyToId: replyTo, quoteId, source: viewer.postSource, communityId, placeId: placeById(vars.geo?.place_id) ? vars.geo.place_id : undefined, replyPolicy: vars.conversation_control?.mode, replySelections: vars.conversation_control?.allowed_country_codes });
 	if (sharedConversation) {
 		try {
 			await sql`update posts set conversation_card_post_id = ${sharedConversation.id}::bigint, sensitive = ${!!sharedConversation.sensitive} where id = ${id}::bigint`;
@@ -494,9 +510,20 @@ const likes: Handler = async (viewer, vars) => {
 const follows =
 	(kind: "following" | "followers" | "verified_followers" | "known_followers"): Handler =>
 	async (viewer, vars) => {
-		const users = vars.cursor ? [] : await followList(viewer.id, userId(vars), kind);
+		const cursor = typeof vars.cursor === "string" ? vars.cursor : "";
+		const match = /^b(\d{1,6})$/.exec(cursor);
+		if (cursor && !match) return userTimeline([]);
+		const offset = match ? Number(match[1]) : 0;
+		const pageSize = 200;
+		const users = await followList(viewer.id, userId(vars), kind, pageSize + 1, offset);
+		const page = users.slice(0, pageSize);
 		const base = BigInt(newId());
-		return userTimeline(wholeList(users.map((u, i) => userEntry(u, (base - BigInt(i) - 1n).toString())), base));
+		const entries = page.map((u, i) => userEntry(u, (base - BigInt(i) - 1n).toString()));
+		return userTimeline([
+			...entries,
+			cursorEntry("Top", "t0", (base + 1n).toString()),
+			...(users.length > pageSize ? [cursorEntry("Bottom", `b${offset + pageSize}`, (base - BigInt(entries.length) - 2n).toString())] : []),
+		]);
 	};
 
 // Settings > Privacy > Blocked and Muted accounts; both lists come back whole
@@ -729,7 +756,7 @@ const handlers: Record<string, Handler> = {
 						about_profile: {
 							affiliate_username: user.org?.screen_name ?? null,
 							account_based_in: extra.based_in_override ?? basedIn(extra.country, extra.location_pref),
-							...(extra.signup_country && countryName(extra.signup_country) ? { created_country: countryName(extra.signup_country), created_country_accurate: true } : {}),
+							...(extra.signup_country ? { created_country: countryDisplayName(extra.signup_country), created_country_accurate: true } : {}),
 							...(extra.source ? { source: extra.source } : {}),
 							learn_more_url: `${PUBLIC_ORIGIN}/rules`,
 							location_accurate: true,
@@ -832,8 +859,22 @@ const handlers: Record<string, Handler> = {
 		const [row] = await sql`select 1 from highlights where user_id = ${v.id}::bigint and post_id = ${id}::bigint`;
 		return { data: { tweet_result_by_rest_id: { result: { __typename: "Tweet", id: Buffer.from(`Tweet:${id}`).toString("base64"), rest_id: id, highlights_info: { highlighted: !!row } } } } };
 	},
-	// who-can-reply choices beyond the built-in ones: none here
-	ConversationControlsQuery: () => ({ data: { get_conversation_control_settings: { settings: [] } } }),
+	ConversationControlsQuery: () => conversationSettings(),
+	ConversationControlChange: async (viewer, vars) => {
+		const id = postId(vars);
+		const control = replyControl(vars.mode, vars.allowed_country_codes);
+		const rows = await sql`update posts set reply_policy = ${control.policy}, reply_selections = ${sql.array(control.selections, "TEXT")}, reply_allowed_values = ${sql.array(control.values, "TEXT")}
+			where id = ${id}::bigint and user_id = ${viewer.id}::bigint and conversation_id = id returning id`;
+		if (!rows.length) throw new PostError("You can only change reply controls on your own conversation.", 144);
+		return { data: { conversation_control_change: { __typename: "ConversationControlChangeResult", tweet_results: { result: tweetResult((await getPost(viewer.id, id))!) } } } };
+	},
+	ConversationControlDelete: async (viewer, vars) => {
+		const id = postId(vars);
+		const rows = await sql`update posts set reply_policy = null, reply_selections = '{}', reply_allowed_values = '{}'
+			where id = ${id}::bigint and user_id = ${viewer.id}::bigint and conversation_id = id returning id`;
+		if (!rows.length) throw new PostError("You can only change reply controls on your own conversation.", 144);
+		return { data: { conversation_control_delete: { __typename: "ConversationControlDeleteResult", tweet_results: { result: tweetResult((await getPost(viewer.id, id))!) } } } };
+	},
 	CreateHighlight: async (v, vars) => ({ data: { tweet_highlights_put: { success: await setHighlight(v.id, postId(vars), true) } } }),
 	DeleteHighlight: async (v, vars) => ({ data: { tweet_highlights_delete: { success: await setHighlight(v.id, postId(vars), false) } } }),
 
@@ -1146,7 +1187,7 @@ export async function runOperation(name: string, viewer: Viewer, vars: Vars): Pr
 		if (e instanceof ChatError) return Response.json({ errors: [{ message: e.message, code: e.code }], data: {} });
 		// the main client takes the code from extensions and shows the message
 		// after its first ": ", as in X's "_Missing: No status found with that ID."
-		if (e instanceof PostError || e instanceof articles.ArticleError) {
+		if (e instanceof PostError || e instanceof ReplyControlError || e instanceof articles.ArticleError) {
 			const missing = e.code === 144;
 			return Response.json({
 				errors: [{ message: `${missing ? "_Missing" : "Error"}: ${e.message}`, code: e.code, kind: missing ? "NotFound" : "Validation",

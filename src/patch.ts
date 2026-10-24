@@ -4,6 +4,7 @@
 import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
 import { vapidPublicKey } from "./push";
 import { settings } from "./settings";
+import { patchCountryAudience } from "./reply-control-client";
 
 // X's VAPID public key, which the client subscribes to push with; pushes can
 // only be signed with the private half, so the instance's own goes in its place
@@ -18,6 +19,17 @@ const API_HOSTS = ["api", "upload", "caps", "jf"].flatMap((s) => [`${s}.x.com`, 
 const inRegex = (url: string) => url.replace(/[/.]/g, (c) => "\\" + c);
 
 const RULES: [RegExp, string][] = [
+	// The Settings search index is built from X's route list: add our custom GIF
+	// provider page so searching "gif" can open it from the results.
+	[/\blet (\w+)=\(0,[\w$]+\.[\w$]+\)\(\),(\w+)=\[\];(?=for\(let \w+ of \1\)for\(let \w+ of\(\2\.push\()/g, '$&$1.find(group=>group.path==="/settings/account")?.items.push({id:"xitterGifProvider",path:"/settings/xitter/gifs",title:"GIF provider",synonyms:["gif","provider","klipy","tenor","giphy"],isSearchable:true,items:[]});'],
+	[/(Co:\{id:"co",Icon:([\w$]+)\.default,IconSelected:([\w$]+)\.default,label:[^,]+,description:[^,]+,source:"remote",type:"navigate",order:60\})(?!,Country:\{)/g, '$1,Country:{id:"country",Icon:$2.default,IconSelected:$3.default,label:"Country",description:"Only accounts from selected countries can reply",source:"remote",type:"navigate",order:70}'],
+	[/"co"===([\w$]+)\.conversation_control\?\{mode:"CountryOfOrigin",allowed_country_codes:\1\.conversation_control_region_codes\?\?\[\]\}/g, '"country"===$1.conversation_control?{mode:"Country",allowed_country_codes:$1.conversation_control_region_codes??[]}:"co"===$1.conversation_control?{mode:"CountryOfOrigin",allowed_country_codes:$1.conversation_control_region_codes??[]}'],
+	[/"co"===([\w$]+)&&\(([\w$]+)="CountryOfOrigin"\)/g, '("country"===$1?$2="Country":"co"===$1&&($2="CountryOfOrigin"))'],
+	[/allowed_country_codes:"co"===([\w$]+)\?([\w$]+):void 0/g, 'allowed_country_codes:["co","country"].includes($1)?$2:void 0'],
+	[/conversation_control_details:"co"===([\w$]+)\.meta\.policy\?\{mode:"CountryOfOrigin",allowed_country_codes:\1\.meta\.regionCodes\}/g, 'conversation_control_details:["co","country"].includes($1.meta.policy)?{mode:$1.meta.policy==="country"?"Country":"CountryOfOrigin",allowed_country_codes:$1.meta.regionCodes}'],
+	[/case"Co":return"co";/g, 'case"Co":return"co";case"Country":return"country";'],
+	[/\["co","CountryOfOrigin"\](?=\])/g, '["co","CountryOfOrigin"],["country","Country"]'],
+	[/(?<![\w$.])([\w$]+)\.includes\("CountryOfOrigin"\)(?!\|\|\1\.includes\("Country"\))/g, '($1.includes("CountryOfOrigin")||$1.includes("Country"))'],
 	[/(restID:\w+\.rest_id,tweetCreateRequest:)(\w+)(,userMentions:\w+\}\))/g, '$1($2?.xitter_conversation_card&&!$2.status?{...$2,status:window.__XITTER_CONVERSATION_DRAFT_LABEL__?.($2.xitter_conversation_card)||"Conversation card"}:$2)$3'],
 	[/(\w+)=(\w+)\.status\|\|"",(\w+)="Failed"===/g, '$1=$2.status||($2.xitter_conversation_card&&window.__XITTER_CONVERSATION_DRAFT_LABEL__?.($2.xitter_conversation_card))||"",$3="Failed"==='],
 	[/(_handleClick=(\w+)=>\(\)=>\{)(let \w+=\2\.scheduling_info&&\2\.scheduling_info\.execute_at;if\(!this\.isDraftsTab)/g, '$1document.dispatchEvent(new CustomEvent("xitter:restore-conversation-cards",{detail:$2.tweet_create_request}));$3'],
@@ -138,8 +150,15 @@ export function brandText(text: string, name: string, code = false): string {
 
 export function patchText(text: string, chat = false): string {
 	let out = text;
-	for (const [re, to] of chat ? [...CHAT_RULES, ...RULES] : RULES) out = out.replace(re, to);
-	return out;
+	let re: RegExp, to: string;
+	for ([re, to] of chat ? [...CHAT_RULES, ...RULES] : RULES) out = out.replace(re, to);
+	out = patchCountryAudience(out);
+	if (!out.includes("ConversationControlsQuery")) return out;
+	return out.replace(/function [\w$]+\(\{onApply:[\w$]+,onBack:[\w$]+,options:([\w$]+),value:[\w$]+\}\)\{let\[[\w$]+,[\w$]+\]=([\w$]+)\.useState\([\s\S]{0,16000}?(?=let [\w$]+=[\w$]+\.A\.create)/g, (picker, options, react) => {
+		const jsx = /\(0,([\w$]+)\.jsxs\)/.exec(picker)?.[1];
+		if (!jsx) return picker;
+		return picker.replace(/\{let\[/, `{let[xitterCountrySearch,xitterSetCountrySearch]=${react}.useState(""),[`).replace('children:[', `children:[(0,${jsx}.jsx)("input",{type:"search","aria-label":"Search countries or regions",placeholder:"Search countries or regions",value:xitterCountrySearch,onChange:e=>xitterSetCountrySearch(e.target.value),style:{boxSizing:"border-box",width:"100%",padding:12,marginBottom:12,border:"1px solid currentColor",borderRadius:8,background:"transparent",color:"inherit",font:"inherit"}}),`).replace(`children:${options}.map`, `children:${options}.filter(e=>e.label.toLocaleLowerCase().includes(xitterCountrySearch.toLocaleLowerCase())||e.value.toLocaleLowerCase().includes(xitterCountrySearch.toLocaleLowerCase())).map`);
+	});
 }
 
 const MAX_PATCH_CACHE_BYTES = 64 * 1024 * 1024;

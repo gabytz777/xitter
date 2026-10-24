@@ -128,6 +128,7 @@ const HOST_SWITCHES = ["responsive_web_media_upload_host"];
 const ownSwitches = (): Record<string, { value: unknown }> => ({
 	responsive_web_birdwatch_note_writing_enabled: { value: true },
 	responsive_web_pinned_replies_enabled: { value: true },
+	composer_add_geo_network_conversation_controls: { value: true },
 	responsive_web_sidebar_ttf_enabled: { value: true },
 	// the side bar has one slot for both: History (its Bookmarks tab inside) when
 	// the feature is on, the client's own Bookmarks link when it is off

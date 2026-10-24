@@ -1,4 +1,4 @@
-FROM oven/bun:1.4.2
+FROM oven/bun:1.4.4
 # ffmpeg converts uploaded video; pg_dump (from PGDG, matching the server's
 # Postgres 18) makes the scheduled backups
 RUN apt-get update \

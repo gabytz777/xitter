@@ -1,4 +1,4 @@
-// X Money's pages (money.ts): the balance and activity at /account/money,
+// Equicoins pages (money.ts): the balance and activity at /account/money,
 // opened from the side bar (tidy.ts); sending, requesting, a payment's and a
 // request's own page under it; and merchant mode at /account/merchant, in
 // Settings.
@@ -6,7 +6,8 @@
 import { accountPage, esc } from "./account-page";
 import type { Viewer } from "./auth";
 import { sql } from "./db";
-import { absolute } from "./media";
+import { peers } from "./federation";
+import { BADGE_TYPES, absolute } from "./media";
 import { CARD_CSS } from "./money-ui";
 import {
 	MoneyError,
@@ -18,6 +19,7 @@ import {
 	disclaimerAccepted,
 	disclaimerText,
 	date,
+	economy,
 	face,
 	formatCents,
 	merchantOf,
@@ -38,6 +40,7 @@ import {
 import { hit } from "./ratelimit";
 import { feature, settings } from "./settings";
 import { MONEY_ICON } from "./tidy";
+import { buyShopItem, myShopOrders, shopItems, shopView, ShopError } from "./money-shop";
 
 const CSS = `
 main{padding:0;gap:0}
@@ -123,6 +126,37 @@ dt{color:var(--muted)}
 dd{margin:0;text-align:right;overflow-wrap:anywhere;display:flex;justify-content:flex-end;align-items:center;gap:4px}
 .settings{padding:16px;display:grid;gap:16px}
 .settings h2{margin:8px 0 0}
+.shop-hero .amount{font-size:36px;line-height:44px;letter-spacing:-1px}
+.shop-hero .dim{margin:8px 0 0}
+.shop-page{display:grid;gap:12px;padding:16px 16px 32px}
+.shop-page h2{margin:0;font-size:20px}
+.shop-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.shop-item{display:grid;grid-template-rows:1fr auto;gap:12px;min-width:0;padding:12px;border:1px solid var(--border);border-radius:16px}
+.shop-item h3{margin:0;font-size:15px;line-height:20px;overflow-wrap:anywhere}
+.shop-item-description{margin:2px 0 0;color:var(--muted);font-size:14px;line-height:18px;overflow-wrap:anywhere}
+.shop-meta{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;margin-top:8px}
+.shop-price{font-weight:700;font-variant-numeric:tabular-nums}
+.shop-kind{color:var(--muted);font-size:13px}
+.shop-badge-preview{display:block;width:40px;height:40px;object-fit:contain;margin:0 0 8px}
+.shop-remote{color:var(--muted);font-size:13px;line-height:17px}
+.shop-form{display:grid;gap:8px;align-content:end}
+.shop-form label{margin:0;color:var(--muted);font-size:13px}
+.shop-hint{color:var(--muted);font-size:12px;line-height:16px}
+.shop-form input:not([type=file]),.shop-form textarea{width:100%;min-width:0}
+.shop-form textarea{min-height:88px}
+.shop-form .pill{width:100%;padding:0 12px}
+.shop-upload input[type=file]{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+.shop-upload label{display:flex;align-items:center;gap:8px;min-height:44px;padding:0 12px;border:1px solid var(--field);border-radius:4px;color:var(--text);font-weight:700;cursor:pointer}
+.shop-upload input:focus-visible+label{outline:2px solid var(--accent);outline-offset:2px}
+.shop-upload label>span:first-child{flex:none}
+.shop-upload-name{min-width:0;overflow:hidden;color:var(--muted);font-size:14px;font-weight:400;text-overflow:ellipsis;white-space:nowrap}
+.shop-history{display:grid;margin-top:12px}
+.order{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;padding:12px 0;border-bottom:1px solid var(--border)}
+.order-name{font-weight:700;overflow-wrap:anywhere}
+.order-status{color:var(--muted);font-size:13px}
+.order-status.approved{color:var(--success)}
+.order-price{grid-row:1/3;grid-column:2;font-weight:700;font-variant-numeric:tabular-nums}
+@media(max-width:560px){.shop-grid{grid-template-columns:1fr}}
 .preview{display:grid;gap:12px}
 .xm-badge{width:18px;height:18px;flex:none}
 .xm-card{margin:0;--xm-bg:var(--bg);--xm-fg:var(--text)}
@@ -137,6 +171,7 @@ const SCRIPT = `document.addEventListener("click",function(e){
 	var g=e.target.closest("[data-xm-go]");
 	if(g){e.preventDefault();var to=g.getAttribute("data-xm-go");if(to.indexOf("/account/")===0)location.href=to;else try{parent.__xitterGo(to)}catch(x){top.location.href=to}}
 });
+document.querySelectorAll(".shop-file-input").forEach(function(input){input.addEventListener("change",function(){var name=input.nextElementSibling&&input.nextElementSibling.querySelector("[data-file-name]");var n=input.files?input.files.length:0;if(name)name.textContent=n>1?n+" images":n?input.files[0].name:"No image chosen"})});
 document.querySelectorAll(".pick").forEach(function(p){p.addEventListener("click",function(){var to=document.getElementById("to");to.value="@"+p.dataset.handle;document.querySelectorAll(".pick").forEach(function(q){q.setAttribute("aria-pressed",q===p?"true":"false")});document.getElementById("amount").focus()})});
 var amt=document.getElementById("amount");if(amt){var fit=function(){amt.style.width=Math.max(1,amt.value.length)*0.62+0.4+"em"};amt.addEventListener("input",fit);fit();if(!amt.value)amt.focus()}
 var auto=document.querySelector("[data-compose][data-auto]");if(auto)auto.click();
@@ -178,7 +213,7 @@ document.querySelectorAll("input[data-people]").forEach(function(input){
 		if(!q){show(false);return}
 		if(q===asked&&items.length){show(true);return}
 		asked=q;
-		fetch("/account/money/people?q="+encodeURIComponent(q),{credentials:"same-origin"}).then(function(r){return r.ok?r.json():[]}).then(function(list){
+		fetch("/account/money/people?q="+encodeURIComponent(q)+(input.hasAttribute("data-local")?"&local=1":""),{credentials:"same-origin"}).then(function(r){return r.ok?r.json():[]}).then(function(list){
 			if(asked===q&&document.activeElement===input)draw(list);
 		},function(){});
 	}
@@ -197,7 +232,7 @@ document.querySelectorAll("input[data-people]").forEach(function(input){
 const POST_ICON = "M23 3c-6.62-.1-10.38 2.421-13.05 6.03C7.29 12.61 6 17.331 6 22h2c0-1.007.07-2.012.19-3H12c4.1 0 7.48-3.082 7.94-7.054C22.79 10.147 23.17 6.359 23 3zm-7 8h-1.5v2H16c.63-.016 1.2-.08 1.72-.188C16.95 15.24 14.68 17 12 17H8.55c.57-2.512 1.57-4.851 3-6.78 2.16-2.912 5.29-4.911 9.45-5.187C20.95 8.079 19.9 11 16 11zM4 9V6H1V4h3V1h2v3h3v2H6v3H4z";
 const HEART = "M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.03-3.7.477-4.82-.561-1.13-1.666-1.84-2.908-1.91z";
 const tile = `<span class="tile" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${MONEY_ICON}"/></svg></span>`;
-const HOME = { href: "/account/money", label: "Back to Money" };
+const HOME = { href: "/account/money", label: "Back to Equicoins" };
 const page = (req: Request, viewer: Viewer, title: string, body: string, status = 200, back = HOME) =>
 	accountPage({ req, viewer, status, title, back, css: CSS, head: `<script>addEventListener("DOMContentLoaded",function(){${SCRIPT}})</script>`, body });
 const who = (p: Party) => `<span class="who"><span>${esc(p.merchant?.name ?? p.name)}</span>${badges(p)}</span>`;
@@ -218,7 +253,7 @@ async function activity(userId: string) {
 		if (!t) continue;
 		const sent = t.sender.id === userId;
 		const other = sent ? t.recipient : t.sender;
-		const what = t.reversed ? "Reversed" : sent ? (other.merchant ? "Purchase" : "Sent") : "Received";
+		const what = t.reversed ? "Reversed" : t.status === "pending" ? "Sending…" : t.status === "failed" ? "Transfer failed · refunded" : sent ? (other.merchant ? "Purchase" : "Sent") : "Received";
 		items.push({
 			at: t.at,
 			html: `<a class="tx" href="/account/money/p/${t.id}">${face(other)}<div>${who(other)}<div class="sub">${t.reversed ? "Reversed" : t.note ? esc(t.note) : what} · ${date(t.at)}</div></div>
@@ -264,14 +299,14 @@ async function home(req: Request, viewer: Viewer, status = 200, notice = "", err
 					return head + i.html;
 				})
 				.join("\n")
-		: `<p class="empty">No activity yet.<br>Money you send, receive and earn shows up here.</p>`;
-	const likes = settings().money.like_cents;
+		: `<p class="empty">No activity yet.<br>Equicoins you send, receive and earn shows up here.</p>`;
+	const likes = economy().like_cents;
 	return page(
 		req,
 		viewer,
-		"Money",
+		"Equicoins",
 		`<section class="hero" aria-label="Balance">${tile}<div class="label">Balance</div><div class="amount">${formatCents(balance)}</div>
-${viewer.actor ? `<p class="dim">Only @${esc(viewer.screen_name)} can send money from this account.</p>` : `<div class="actions"><a class="pill primary" href="/account/money/send">Send</a><a class="pill" href="/account/money/request">Request</a></div>`}
+${viewer.actor ? `<p class="dim">Only @${esc(viewer.screen_name)} can send money from this account.</p>` : `<div class="actions"><a class="pill primary" href="/account/money/send">Send</a><a class="pill" href="/account/money/request">Request</a>${settings().money_shop.enabled ? `<a class="pill" href="/account/money/shop">Shop</a>` : ""}</div>`}
 ${likes > 0 ? `<p class="dim" style="margin-top:12px">You earn ${likes < 100 ? `${likes}¢` : formatCents(likes)} for each like on your posts.</p>` : ""}</section>
 ${notice ? `<div class="notice" role="status">${notice}</div>` : ""}${error ? `<div class="notice error" role="alert">${esc(error)}</div>` : ""}
 ${asks.length ? `<section aria-label="Requests"><div class="month">Requests</div>${asks.join("\n")}</section>` : ""}
@@ -291,19 +326,24 @@ async function quickPicks(userId: string) {
 				union all select followee_id, created_at - interval '100 years' from follows where follower_id = ${userId}::bigint
 			) x group by o order by at desc limit 8
 		) p join users u on u.id = p.o
-		where u.instance is null and u.status <> 'suspended' and u.deactivated_at is null order by p.at desc`;
+		where u.instance is null and u.status <> 'suspended' and u.deactivated_at is null
+			and not exists (select 1 from blocks b where (b.blocker_id = u.id and b.blocked_id = ${userId}::bigint) or (b.blocker_id = ${userId}::bigint and b.blocked_id = u.id))
+		order by p.at desc`;
 	const found = await parties(rows.map((r: any) => r.id));
 	return rows.map((r: any) => found.get(r.id)).filter((p: Party | undefined): p is Party => !!p);
 }
 
 // GET /account/money/people?q=: accounts for the To and From fields' list,
-// matched by handle or name; people the viewer follows and has paid first
-async function peopleApi(viewer: Viewer, query: string): Promise<Response> {
-	const q = query.trim().replace(/^@/, "").toLowerCase().slice(0, 50);
+// matched by handle or name; people the viewer follows and has paid first.
+// Money goes to accounts here and on peers; requests (`local`) stay here.
+async function peopleApi(viewer: Viewer, query: string, local: boolean): Promise<Response> {
+	const q = query.trim().replace(/^@/, "").toLowerCase().slice(0, 300);
 	if (!q) return Response.json([]);
 	const like = `${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+	const reachable = local ? [] : peers().map((p) => p.id);
 	const rows = await sql`select u.id::text from users u
-		where u.instance is null and u.status <> 'suspended' and u.deactivated_at is null and u.id <> ${viewer.id}::bigint
+		where u.status <> 'suspended' and u.deactivated_at is null and u.id <> ${viewer.id}::bigint
+			and (u.instance is null or u.instance = any(${sql.array(reachable, "TEXT")}))
 			and (lower(u.screen_name) like ${like} or lower(u.name) like ${like} or lower(u.name) like ${`% ${like}`})
 			and not exists (select 1 from blocks b where (b.blocker_id = u.id and b.blocked_id = ${viewer.id}::bigint) or (b.blocker_id = ${viewer.id}::bigint and b.blocked_id = u.id))
 		order by lower(u.screen_name) = ${q} desc,
@@ -357,7 +397,9 @@ ${
 <div class="field"><input id="note" name="note" maxlength="${NOTE_MAX}" placeholder=" " value="${esc(note)}"><label for="note">What's it for?</label></div>
 <label class="check">Share it in a post<input type="checkbox" name="share" value="1"></label>
 <button type="submit" class="pill primary wide">${q ? "Pay" : "Send"}</button>
-<p class="fine">Instant and free. ${esc(settings().instance_name)} Money has no cash value.</p>
+<p class="fine">Instant and free. ${esc(settings().instance_name)} Equicoins has no cash value.${
+	settings().money.feed ? ` Payments are posted publicly by <a href="/${esc(settings().money.feed)}">@${esc(settings().money.feed)}</a>, without your note.` : ""
+}</p>
 </form>`,
 		status,
 	);
@@ -374,7 +416,7 @@ async function requestView(req: Request, viewer: Viewer, status = 200, form: { f
 <form method="post" action="/account/money/request" class="send" autocomplete="off">
 <div class="big"><span>$</span><input id="amount" name="amount" inputmode="decimal" placeholder="0" aria-label="Amount" value="${esc(form.amount ?? "")}"></div>
 <div class="balance">Leave it at 0 to let people choose</div>
-<div class="field"><input id="from" name="from" placeholder=" " value="${esc(from)}" autocapitalize="off" autocomplete="off" spellcheck="false" data-people role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="people"><label for="from">From (@username, or empty for anyone)</label></div>
+<div class="field"><input id="from" name="from" placeholder=" " value="${esc(from)}" autocapitalize="off" autocomplete="off" spellcheck="false" data-people data-local role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="people"><label for="from">From (@username, or empty for anyone)</label></div>
 <div class="field"><input id="note" name="note" maxlength="${NOTE_MAX}" placeholder=" " value="${esc(form.note ?? "")}"><label for="note">What's it for?</label></div>
 <label class="check"><span>Share it in a post<small>A Pay button anyone who sees the post can use</small></span><input type="checkbox" name="share" value="1" checked></label>
 <button type="submit" class="pill primary wide">Request</button>
@@ -403,7 +445,7 @@ ${mine ? `<div class="row">${postButton(paymentUrl(t.id), "Post", post)}<a class
 <dt>To</dt><dd>${link(t.recipient)}</dd>
 <dt>Amount</dt><dd>${formatCents(t.amount)}</dd>
 <dt>Date</dt><dd>${t.at.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}</dd>
-<dt>Status</dt><dd${t.reversed ? "" : ' style="color:var(--success)"'}>${t.reversed ? "Reversed: the money went back to the sender" : "Completed"}</dd>
+<dt>Status</dt><dd${t.reversed || t.status !== "complete" ? "" : ' style="color:var(--success)"'}>${t.reversed ? "Reversed: the money went back to the sender" : t.status === "pending" ? "Waiting for the recipient’s instance to confirm" : t.status === "failed" ? "Could not deliver; the money was refunded" : "Completed"}</dd>
 </dl>`,
 	);
 }
@@ -439,9 +481,9 @@ ${!q.payer && mine ? `<dt>Paid</dt><dd>${q.paidCount} time${q.paidCount === 1 ? 
 	);
 }
 
-// Settings > X Money: merchant mode, for gold organisations
+// Settings > Equicoins: merchant mode, for gold organisations
 export async function merchantRoute(req: Request, viewer: Viewer): Promise<Response> {
-	if (!feature("money") || viewer.instance) return accountPage({ req, viewer, status: 404, title: "X Money", body: `<p>X Money isn't available on ${esc(settings().instance_name)}.</p>` });
+	if (!feature("money") || viewer.instance) return accountPage({ req, viewer, status: 404, title: "Equicoins", body: `<p>Equicoins isn't available on ${esc(settings().instance_name)}.</p>` });
 	let notice = "";
 	let error = "";
 	if (req.method === "POST") {
@@ -467,7 +509,7 @@ export async function merchantRoute(req: Request, viewer: Viewer): Promise<Respo
 	return accountPage({
 		req,
 		viewer,
-		title: "X Money",
+		title: "Equicoins",
 		back: { href: "/settings/account", label: "Back to Settings" },
 		css: CSS,
 		body: `<section class="settings">${tile}
@@ -487,14 +529,14 @@ ${
 	});
 }
 
-// The first time Money opens, before anything else: what its money is. The
+// The first time Equicoins opens, before anything else: what its money is. The
 // page asked for comes back once it's accepted.
 function disclaimer(req: Request, viewer: Viewer, back: string) {
-	const name = esc(`${settings().instance_name} Money`);
+	const name = esc(`${settings().instance_name} Equicoins`);
 	return page(
 		req,
 		viewer,
-		"Money",
+		"Equicoins",
 		`<section class="settings" style="padding:32px 16px">${tile}
 <h1>Welcome to ${name}</h1>
 <p><b>Disclaimer:</b> ${esc(disclaimerText())}</p>
@@ -507,9 +549,27 @@ function disclaimer(req: Request, viewer: Viewer, back: string) {
 
 export async function moneyRoute(req: Request, viewer: Viewer): Promise<Response> {
 	if (!feature("money") || viewer.instance)
-		return accountPage({ req, viewer, status: 404, title: "Money", body: `<h1>Money</h1><p>X Money isn't available on ${esc(settings().instance_name)}.</p>` });
+		return accountPage({ req, viewer, status: 404, title: "Equicoins", body: `<h1>Equicoins</h1><p>Equicoins isn't available on ${esc(settings().instance_name)}.</p>` });
 	const url = new URL(req.url);
 	const p = url.pathname;
+	const remoteBadge = /^\/account\/money\/shop\/badge\/([^/]{1,300})\/(\d{1,19})$/.exec(p);
+	if (req.method === "GET" && remoteBadge) {
+		let origin = "";
+		try { origin = decodeURIComponent(remoteBadge[1]).toLowerCase(); } catch {}
+		if (!/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::\d{1,5})?$/.test(origin)) return new Response("Not found", { status: 404 });
+		const [image] = await sql`select badge_image, badge_mime from money_remote_shop_items
+			where origin = ${origin} and remote_id = ${remoteBadge[2]}::bigint and source_active and active and status = 'approved'`;
+		if (!image?.badge_image || !BADGE_TYPES.includes(image.badge_mime)) return new Response("Not found", { status: 404 });
+		return new Response(image.badge_image, { headers: { "content-type": image.badge_mime, "cache-control": "private, max-age=300", "x-content-type-options": "nosniff" } });
+	}
+	// a picture sent with a shop request, for the staff who review it (Admin > Equicoins)
+	const orderFile = /^\/account\/money\/shop\/file\/(\d{1,19})\/(\d{1,2})$/.exec(p);
+	if (req.method === "GET" && orderFile) {
+		if (viewer.role !== "admin" && viewer.role !== "moderator") return new Response("Not found", { status: 404 });
+		const [f] = await sql`select image, mime from money_shop_order_files where order_id = ${orderFile[1]}::bigint and position = ${Number(orderFile[2])}`;
+		if (!f) return new Response("Not found", { status: 404 });
+		return new Response(f.image, { headers: { "content-type": f.mime, "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
+	}
 	if (!(await disclaimerAccepted(viewer.id))) {
 		if (req.method !== "POST") return disclaimer(req, viewer, p + url.search);
 		const form = await req.formData();
@@ -546,7 +606,50 @@ export async function moneyRoute(req: Request, viewer: Viewer): Promise<Response
 			throw e;
 		}
 	}
-	if (p === "/account/money/people") return peopleApi(viewer, url.searchParams.get("q") ?? "");
+	if (p === "/account/money/shop") {
+		if (!settings().money_shop.enabled) return page(req, viewer, "Equicoins shop", `<p class="empty">The shop is closed.</p>`, 404);
+		let error = "";
+		if (req.method === "POST") {
+			if (viewer.actor) error = `Only @${esc(viewer.screen_name)} can buy from this account.`;
+			else if (!hit("write", viewer.id).ok) error = "You're sending requests too fast. Wait a few minutes and try again.";
+			else {
+				const form = await req.formData();
+				const text = (k: string) => String(form.get(k) ?? "");
+				const image = async (f: FormDataEntryValue | null) => (f instanceof File && f.size ? Buffer.from(await f.arrayBuffer()) : undefined);
+				try {
+					const stickers: Buffer[] = [];
+					for (const f of form.getAll("stickers").slice(0, 7)) {
+						const b = await image(f);
+						if (b) stickers.push(b);
+					}
+					const bought = await buyShopItem(viewer.id, text("item"), {
+						text: text("text"),
+						link: text("link"),
+						badgeName: text("badgeName"),
+						badgeImage: await image(form.get("badgeImage")),
+						gift: text("gift"),
+						hashtag: text("hashtag"),
+						emoji: await image(form.get("emoji")),
+						packName: text("packName"),
+						stickers,
+						title: text("title"),
+						summary: text("summary"),
+						query: text("query"),
+						picture: await image(form.get("picture")),
+						post: text("post"),
+					});
+					return new Response(null, { status: 303, headers: { location: `/account/money/shop?${bought.auto ? "ready" : "requested"}=1` } });
+				} catch (e) {
+					if (e instanceof ShopError) error = e.message;
+					else throw e;
+				}
+			}
+		}
+		const [items, orders, balance] = await Promise.all([shopItems(true), myShopOrders(viewer.id), balanceOf(viewer.id)]);
+		const notice = url.searchParams.has("ready") ? "It's ready: find it under Your requests." : url.searchParams.has("requested") ? "Your request is waiting for staff approval." : "";
+		return page(req, viewer, "Equicoins shop", await shopView(items, orders, balance, error, notice));
+	}
+	if (p === "/account/money/people") return peopleApi(viewer, url.searchParams.get("q") ?? "", url.searchParams.has("local"));
 	const sending = p === "/account/money/send";
 	if (!sending && p !== "/account/money") return new Response("not found", { status: 404 });
 	if (req.method !== "POST") {

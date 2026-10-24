@@ -187,7 +187,7 @@ export async function knownFollowerCount(viewerId: string, userId: string): Prom
 	return r?.n ?? 0;
 }
 
-export async function followList(viewerId: string, userId: string, kind: "following" | "followers" | "verified_followers" | "known_followers", limit = 200): Promise<User[]> {
+export async function followList(viewerId: string, userId: string, kind: "following" | "followers" | "verified_followers" | "known_followers", limit = 200, offset = 0): Promise<User[]> {
 	// a protected account's lists are for itself and its followers
 	if (userId !== viewerId) {
 		const [hidden] = await sql`select 1 from users u where u.id = ${userId}::bigint and not ${staffViewer(viewerId)} and (
@@ -197,13 +197,13 @@ export async function followList(viewerId: string, userId: string, kind: "follow
 	}
 	const rows =
 		kind === "known_followers"
-			? await sql`select ${userCols(viewerId)} ${knownFollowers(viewerId, userId)} order by f.created_at desc limit ${limit}`
+			? await sql`select ${userCols(viewerId)} ${knownFollowers(viewerId, userId)} order by f.created_at desc, f.follower_id desc limit ${limit} offset ${offset}`
 			: kind === "following"
 			? await sql`select ${userCols(viewerId)} from follows f join users u on u.id = f.followee_id
-				where f.follower_id = ${userId}::bigint and u.id not in ${outOfView(viewerId)} order by f.created_at desc limit ${limit}`
+				where f.follower_id = ${userId}::bigint and u.id not in ${outOfView(viewerId)} order by f.created_at desc, f.followee_id desc limit ${limit} offset ${offset}`
 			: await sql`select ${userCols(viewerId)} from follows f join users u on u.id = f.follower_id
 				where f.followee_id = ${userId}::bigint and u.id not in ${outOfView(viewerId)}
-				${kind === "verified_followers" ? sql`and u.verified_type is not null` : sql``} order by f.created_at desc limit ${limit}`;
+				${kind === "verified_followers" ? sql`and u.verified_type is not null` : sql``} order by f.created_at desc, f.follower_id desc limit ${limit} offset ${offset}`;
 	return rows.map(toUser);
 }
 

@@ -2,11 +2,18 @@
 // timeline, subscribe, privacy, pinning, delete. Removes what it creates.
 // usage: bun scripts/test-lists.ts <user A> <user B> <password of both>
 
+import { sql } from "../src/db";
+import { newId } from "../src/ids";
+
 export {};
 
 const origin = `http://localhost:${process.env.PORT ?? 3000}`;
 const [nameA, nameB, password] = process.argv.slice(2);
 if (!nameA || !nameB || !password) throw new Error("usage: bun scripts/test-lists.ts <user A> <user B> <password>");
+
+// The built-in All list needs an instance admin; the CI database has none.
+const adminTag = Date.now().toString(36);
+await sql`insert into users (id, screen_name, name, password_hash, role) values (${newId()}::bigint, ${`${adminTag}admin`}, 'List admin fixture', 'x', 'admin')`;
 
 async function session(username: string) {
 	const r = await fetch(`${origin}/login`, { method: "POST", body: new URLSearchParams({ username, password }), redirect: "manual" });
@@ -61,6 +68,23 @@ check("list timeline hides non-members", !tweetIds.includes(other));
 
 const members = entriesOf((await a.get("ListMembers", { listId: id, count: 20 })).data.list.members_timeline.timeline);
 check("members list", members.some((e) => e.content?.itemContent?.user_results?.result?.rest_id === userB.rest_id));
+
+// more members than the first page; the cursor has to fetch the rest
+const pageTag = Date.now().toString(36);
+const pageIds = Array.from({ length: 201 }, () => newId());
+for (const [i, userId] of pageIds.entries()) {
+	await sql`insert into users (id, screen_name, name, password_hash) values (${userId}::bigint, ${`lp${pageTag}${i}`}, ${`Page ${i}`}, 'x')`;
+	await sql`insert into list_members (list_id, user_id) values (${id}::bigint, ${userId}::bigint)`;
+}
+const memberIds = (entries: any[]) => entries.flatMap((e) => (e.content?.itemContent?.user_results?.result?.rest_id ? [e.content.itemContent.user_results.result.rest_id] : []));
+const first = entriesOf((await a.get("ListMembers", { listId: id, count: 20 })).data.list.members_timeline.timeline);
+const firstIds = memberIds(first);
+const bottom = first.find((e) => e.content?.cursorType === "Bottom")?.content?.value;
+const second = bottom ? entriesOf((await a.get("ListMembers", { listId: id, count: 20, cursor: bottom })).data.list.members_timeline.timeline) : [];
+const secondIds = memberIds(second);
+const paged = new Set([...firstIds, ...secondIds]);
+check("members page past the first 200", firstIds.length === 200 && secondIds.length >= 2 && pageIds.every((u) => paged.has(u)), { first: firstIds.length, second: secondIds.length, bottom });
+await sql`delete from users where screen_name like ${`lp${pageTag}%`}`;
 
 const owned = await a.get("ListOwnerships", { userId: userA.rest_id, isListMemberTargetUserId: userB.rest_id, count: 100 });
 const ownedList = listsIn(owned.data.user.result.timeline.timeline).find((l) => l.id_str === id);
@@ -120,6 +144,7 @@ check("deleted list is gone", !!gone.errors?.length);
 for (const p of [post]) await b.gql("DeleteTweet", { tweet_id: p });
 await a.gql("DeleteTweet", { tweet_id: other });
 for (const m of made) await a.gql("DeleteList", { listId: m });
+await sql`delete from users where screen_name = ${`${adminTag}admin`}`;
 
 console.log(failures ? `${failures} FAILED` : "all passed");
 process.exit(failures ? 1 : 0);

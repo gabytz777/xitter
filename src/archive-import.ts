@@ -33,6 +33,7 @@ import { sql } from "./db";
 import { hateIn, hateInName } from "./hate";
 import { idTime, isId, newId } from "./ids";
 import { MEDIA_DIR, sniffImage } from "./media";
+import { compressUpload } from "./media-compress";
 import { automodStrike } from "./moderation";
 import { blockedNameIn, blockedWordIn } from "./names";
 import { RateLimitError, chargePostCost, limitOf } from "./ratelimit";
@@ -195,13 +196,14 @@ const photoMax = () => settings().limits.image_mb * MB;
 const videoMax = () => settings().limits.video_mb * MB;
 
 async function savePhoto(userId: string, data: Buffer, post: { id: string; position: number } | null): Promise<string | undefined> {
-	const image = sniffImage(data);
-	if (!image || data.length > photoMax()) return undefined;
+	const found = sniffImage(data);
+	if (!found || data.length > photoMax()) return undefined;
+	const { data: bytes, image, compressed } = await compressUpload(data, found);
 	const id = newId();
 	mkdirSync(MEDIA_DIR, { recursive: true });
-	writeFileSync(join(MEDIA_DIR, id), data);
-	await sql`insert into media (id, user_id, kind, mime, size, width, height, post_id, position)
-		values (${id}::bigint, ${userId}::bigint, 'photo', ${image.mime}, ${data.length}, ${image.width}, ${image.height}, ${post?.id ?? null}::bigint, ${post?.position ?? null})`;
+	writeFileSync(join(MEDIA_DIR, id), bytes);
+	await sql`insert into media (id, user_id, kind, mime, size, width, height, post_id, position, compressed)
+		values (${id}::bigint, ${userId}::bigint, 'photo', ${image.mime}, ${bytes.length}, ${image.width}, ${image.height}, ${post?.id ?? null}::bigint, ${post?.position ?? null}, ${compressed})`;
 	return id;
 }
 

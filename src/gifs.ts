@@ -1,79 +1,142 @@
-// GIF search through Klipy, or Tenor when only TENOR_API_KEY is set; both speak
-// Tenor's v2 API. The browser may only talk to this origin, and a picked GIF is
-// downloaded by the client and uploaded like any other media, so results point
-// at /i/api/xitter/gif, which fetches from the provider's own hosts only.
-// Without a key the composer's GIF button is hidden.
+// GIF search uses one provider at a time. Result images are fetched through
+// the host-checked proxy so the browser only talks to this origin.
 
 import type { Viewer } from "./auth";
+import { sql } from "./db";
 
-const KLIPY = { id: "klipy", display_name: "Klipy", api: process.env.KLIPY_API_URL ?? "https://api.klipy.com/v2", key: process.env.KLIPY_API_KEY ?? "", hosts: /(^|\.)klipy\.com$/ };
-const TENOR = { id: "tenor", display_name: "Tenor", api: process.env.TENOR_API_URL ?? "https://tenor.googleapis.com/v2", key: process.env.TENOR_API_KEY ?? "", hosts: /(^|\.)tenor\.com$|^tenor\.googleapis\.com$/ };
-const SOURCE = KLIPY.key ? KLIPY : TENOR;
-const API = SOURCE.api;
-export const gifKey = () => SOURCE.key;
+export type GifSource = { id: string; display_name: string; api: string; key: string; hosts: RegExp; kind: "klipy" | "tenor" | "giphy" };
+
+const KLIPY: GifSource = { id: "klipy", display_name: "Klipy", api: process.env.KLIPY_API_URL ?? "https://api.klipy.com/v2", key: process.env.KLIPY_API_KEY ?? "", hosts: /(^|\.)klipy\.com$/, kind: "klipy" };
+const TENOR: GifSource = { id: "tenor", display_name: "Tenor", api: process.env.TENOR_API_URL ?? "https://api.tenor.com/v1", key: process.env.TENOR_API_KEY ?? "3Z0688EVWYKH", hosts: /(^|\.)tenor\.com$|^tenor\.googleapis\.com$/, kind: "tenor" };
+const GIPHY: GifSource = { id: "giphy", display_name: "Giphy", api: process.env.GIPHY_API_URL ?? "https://api.giphy.com/v1/gifs", key: process.env.GIPHY_API_KEY ?? "Gc7131jiJuvI7IdN0HZ1D7nh0ow5BU6g", hosts: /(^|\.)giphy\.com$/, kind: "giphy" };
+const SOURCES = [KLIPY, TENOR, GIPHY];
+const preferred = SOURCES.find((source) => source.id === process.env.GIF_PROVIDER?.toLowerCase());
+const DEFAULT_SOURCE = (preferred?.key ? preferred : undefined) ?? SOURCES.find((source) => source.key) ?? null;
+export const gifAvailable = () => DEFAULT_SOURCE !== null;
+export const gifProviders = () => SOURCES.filter((source) => source.key).map(({ id, display_name }) => ({ id, display_name }));
+
+export async function gifProviderPreference(userId: string): Promise<string> {
+	const [row] = await sql`select preferences->>'gif_provider' as provider from users where id = ${userId}::bigint`;
+	const value = row?.provider;
+	return value === "auto" || SOURCES.some((source) => source.key && source.id === value) ? value : "auto";
+}
+
+async function gifSourceForUser(userId: string): Promise<GifSource | null> {
+	const choice = await gifProviderPreference(userId);
+	return choice === "auto" ? DEFAULT_SOURCE : SOURCES.find((source) => source.key && source.id === choice) ?? DEFAULT_SOURCE;
+}
 
 type Vars = Record<string, any>;
 
-const PROVIDER = { id: SOURCE.id, display_name: SOURCE.display_name };
-
-export const gifHostAllowed = (host: string) => SOURCE.hosts.test(host) || host === new URL(API).host;
+export const gifHostAllowed = (host: string) => SOURCES.some((source) => source.key && (source.hosts.test(host) || host === new URL(source.api).host));
 
 const proxied = (url: string) => `/i/api/xitter/gif?u=${encodeURIComponent(url)}`;
 
-function image(format: any, still: string | undefined) {
+function image(format: any, still?: string) {
 	if (!format?.url) return null;
 	const [width, height] = Array.isArray(format.dims) ? format.dims : [0, 0];
 	return { url: proxied(format.url), width, height, still_image_url: proxied(still ?? format.url) };
 }
 
-function item(r: any) {
-	const gif = r.media_formats?.gif ?? r.media_formats?.mediumgif;
-	const tiny = r.media_formats?.tinygif ?? gif;
-	const still = r.media_formats?.gifpreview?.url ?? tiny?.url;
+function item(source: GifSource, r: any) {
+	let gif: any;
+	let tiny: any;
+	let still: string | undefined;
+	if (source.kind === "giphy") {
+		const images = r.images ?? {};
+		const sized = (format: any) => format?.url ? { url: format.url, dims: [Number(format.width) || 0, Number(format.height) || 0] } : undefined;
+		gif = sized(images.original);
+		tiny = sized(images.fixed_width) ?? gif;
+		still = images.fixed_width_still?.url;
+	} else if (source.kind === "tenor" && !r.media_formats) {
+		const media = r.media?.[0] ?? {};
+		gif = media.gif ?? media.mediumgif;
+		tiny = media.tinygif ?? gif;
+		still = gif?.preview ?? tiny?.preview;
+	} else {
+		gif = r.media_formats?.gif ?? r.media_formats?.mediumgif;
+		tiny = r.media_formats?.tinygif ?? gif;
+		still = r.media_formats?.gifpreview?.url;
+	}
 	const full = image(gif, still);
 	const thumb = image(tiny, still);
 	if (!full || !thumb) return null;
 	return {
-		id: `${SOURCE.id}_${r.id}`,
-		provider: PROVIDER,
-		alt_text: r.content_description ?? r.title ?? "",
+		id: `${source.id}_${r.id}`,
+		provider: { id: source.id, display_name: source.display_name },
+		alt_text: r.content_description ?? r.title ?? r.h1_title ?? "",
 		full_image: full,
 		preview_image: thumb,
 		thumbnail_images: [thumb],
 	};
 }
 
-async function provider(path: string, params: Record<string, string>) {
-	const key = gifKey();
-	if (!key) return { results: [], next: "" };
-	const url = new URL(`${API}${path}`);
-	for (const [k, v] of Object.entries({ key, client_key: "xitter", media_filter: "gif,tinygif,gifpreview", contentfilter: "medium", ...params })) url.searchParams.set(k, v);
+type ProviderPage = { items: any[]; next: string | null };
+
+async function provider(source: GifSource, trending: boolean, query: string, limit: number, cursor?: string): Promise<ProviderPage> {
+	const api = source.api.replace(/\/$/, "");
+	const path = source.kind === "giphy" ? (trending ? "trending" : "search") : source.kind === "tenor" && !api.includes("googleapis.com") ? (trending ? "trending" : "search") : (trending ? "featured" : "search");
+	const url = new URL(`${api}/${path}`);
+	let params: Record<string, string>;
+	if (source.kind === "giphy") {
+		params = { api_key: source.key, limit: String(limit), offset: cursor || "0", rating: "pg-13", lang: "en" };
+		if (query) params.q = query;
+	} else {
+		params = {
+			key: source.key,
+			limit: String(limit),
+			media_filter: "gif,tinygif,gifpreview",
+			contentfilter: "medium",
+			...(source.kind === "klipy" || api.includes("googleapis.com") ? { client_key: "xitter" } : { locale: "en_US" }),
+			...(query ? { q: query } : {}),
+			...(cursor ? { pos: cursor } : {}),
+		};
+	}
+	for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 	const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-	if (!r.ok) throw new Error(`${SOURCE.id} ${r.status}`);
-	return (await r.json()) as { results?: any[]; next?: string };
+	if (!r.ok) throw new Error(`${source.id} ${r.status}`);
+	const data = await r.json() as any;
+	const results = source.kind === "giphy" ? data.data ?? [] : data.results ?? [];
+	let next: string | null = data.next || null;
+	if (source.kind === "giphy") {
+		const offset = Number(cursor ?? 0);
+		const total = Number(data.pagination?.total_count);
+		next = results.length && (!Number.isFinite(total) || offset + results.length < total) ? String(offset + results.length) : null;
+	}
+	return { items: results.map((result: any) => item(source, result)).filter(Boolean), next };
 }
 
-const slice = (data: { results?: any[]; next?: string }) => ({
-	items: (data.results ?? []).map(item).filter(Boolean),
-	slice_info: data.next ? { next_cursor: data.next } : {},
-});
+function readCursor(value: unknown, source: GifSource): string | undefined {
+	if (typeof value !== "string" || !value || value.length > 4096) return undefined;
+	try {
+		const parsed = JSON.parse(decodeURIComponent(value));
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+			return parsed.provider === source.id && typeof parsed.cursor === "string" ? parsed.cursor : undefined;
+	} catch { }
+	return value;
+}
+
+async function search(userId: string, query: string, limit: number, cursor: unknown, trending = false) {
+	const source = await gifSourceForUser(userId);
+	if (!source) return { items: [], slice_info: {} };
+	const page = await provider(source, trending, query, limit, readCursor(cursor, source));
+	return {
+		items: page.items,
+		slice_info: page.next ? { next_cursor: encodeURIComponent(JSON.stringify({ provider: source.id, cursor: page.next })) } : {},
+	};
+}
 
 const count = (vars: Vars) => String(Math.min(Math.max(Number(vars.count) || 20, 1), 50));
-const cursor = (vars: Vars): Record<string, string> => (typeof vars.cursor === "string" && vars.cursor ? { pos: vars.cursor } : {});
 
 export const gifHandlers = {
 	GifSearch: async (_v: Viewer, vars: Vars) => {
 		const q = String(vars.rawQuery ?? vars.raw_query ?? vars.query ?? vars.searchTerm ?? "").trim().slice(0, 100);
 		if (!q) return { data: { gif_search_slice: { items: [], slice_info: {} } } };
-		return { data: { gif_search_slice: slice(await provider("/search", { q, limit: count(vars), ...cursor(vars) })) } };
+		return { data: { gif_search_slice: await search(_v.id, q, Number(count(vars)), vars.cursor) } };
 	},
 	GifEnumerateCategory: async (_v: Viewer, vars: Vars) => {
 		const category = String(vars.category ?? vars.categoryName ?? "trending");
-		const data =
-			category === "trending"
-				? await provider("/featured", { limit: count(vars), ...cursor(vars) })
-				: await provider("/search", { q: category, limit: count(vars), ...cursor(vars) });
-		return { data: { gif_enumerate_category_slice: slice(data) } };
+		return { data: { gif_enumerate_category_slice: await search(_v.id, category === "trending" ? "" : category, Number(count(vars)), vars.cursor, category === "trending") } };
 	},
 };
 
@@ -126,7 +189,7 @@ export async function gifProxy(url: URL): Promise<Response> {
 			chunks.push(value);
 		}
 	} finally {
-		await reader.cancel().catch(() => {});
+		await reader.cancel().catch(() => { });
 	}
 	return new Response(new Blob(chunks), { headers: { "content-type": type, "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff" } });
 }
