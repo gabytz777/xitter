@@ -12,8 +12,9 @@ part of the repository, and neither is the runbook the operators keep.
   service in `compose.yaml`. The account named by `GROK_HANDLE` answers posts that
   mention it, with a completion from a small local model (SmolLM2 135M) served by
   llama.cpp. Unset `GROK_HANDLE` and it is off entirely.
-- **Pinned follows** — `src/users.ts` and `src/blocks.ts`. Accounts named in
-  `PINNED_FOLLOWS` cannot be unfollowed or blocked, by anyone including staff.
+- **Pinned follows** — `src/users.ts` and `src/blocks.ts`. Accounts in the
+  `pinned_follows` setting (Admin > Settings > Sign-up, seeded from
+  `PINNED_FOLLOWS`) cannot be unfollowed or blocked, by anyone including staff.
 - **A rickroll for unknown profiles** — `src/server.ts`, with the reserved names it
   has to skip in `src/invites.ts`. A profile URL for a handle nobody has redirects
   to a music video; `RICKROLL=0` turns that off. Maintenance mode also covers
