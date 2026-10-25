@@ -1,6 +1,7 @@
 // A suspended account disappears for everyone but staff: search, feeds,
 // conversations, lists of people, reactions, recommendations, notifications.
-// Its own profile shows "Account suspended". Run against the live server.
+// Its own profile shows "Account suspended", except to admins, who open it
+// with a Suspended label. Run against the live server.
 // usage: bun scripts/test-suspended.ts   (needs pozo as admin, password testpass123)
 import { createUser } from "../src/auth";
 import { sql } from "../src/db";
@@ -48,7 +49,14 @@ try {
 		check(`${who}: post search hides its posts`, !leaks(top, word));
 		const typeahead = await s.rest(`/1.1/search/typeahead.json?q=${badName}&src=search_box&result_type=events,users,topics`);
 		check(`${who}: typeahead hides it`, !leaks(typeahead, `"screen_name":"${badName}"`), typeahead);
-		if (staff) continue;
+		if (staff) {
+			// an admin opens its profile, labelled, and its posts there; nowhere else
+			const profile = (await s.get("UserByScreenName", { screen_name: badName })).data?.user?.result;
+			check(`${who}: opens its profile, labelled Suspended`, profile?.__typename === "User" && profile.affiliates_highlighted_label?.label?.description === "Suspended", profile);
+			check(`${who}: sees its posts on the profile`, leaks(await s.get("UserTweets", { userId: bad, count: 20 }), word));
+			check(`${who}: Following still hides its posts`, !leaks(await s.get("HomeLatestTimeline", { count: 50 }), word));
+			continue;
+		}
 		const all = await s.get("ListLatestTweetsTimeline", { listId: "1", count: 50 });
 		check(`${who}: the All feed hides its posts`, !leaks(all, word));
 		const home = await s.get("HomeLatestTimeline", { count: 50 });

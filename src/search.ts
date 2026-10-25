@@ -162,7 +162,7 @@ export async function hashtagsLike(prefix: string, limit: number): Promise<strin
 	const clean = prefix.replace(/^#/, "").replace(/[^\p{L}\p{N}_]/gu, "");
 	if (!clean) return [];
 	const rows = await sql`select tag, count(*) as n from (
-			select lower((regexp_matches(p.text, ${HASHTAG_RE}, 'g'))[1]) as tag from posts p where p.text ilike ${like(`#${clean}`)} and not p.hidden and p.user_id not in ${outOfView("0")} and p.user_id not in (select id from users where protected)
+			select lower((regexp_matches(p.text, ${HASHTAG_RE}, 'g'))[1]) as tag from posts p where p.text ilike ${like(`#${clean}`)} and not p.hidden and p.circle_owner_id is null and p.user_id not in ${outOfView("0")} and p.user_id not in (select id from users where protected)
 			order by p.id desc limit 2000) t
 		where tag like ${`${clean.toLowerCase()}%`} group by tag order by n desc, tag limit ${limit}`;
 	return rows.map((r: any) => `#${r.tag}`);
@@ -208,7 +208,7 @@ async function queryTrends(days: number, country: string | null): Promise<TagPeo
 			select p.id, p.user_id, lower((regexp_matches(p.text, ${HASHTAG_RE}, 'g'))[1]) as tag,
 				coalesce((select e.ip from login_events e where e.user_id = p.user_id and e.ip is not null order by e.created_at desc limit 1), p.user_id::text) as who
 			from posts p join users u on u.id = p.user_id
-			where p.created_at > now() - make_interval(days => ${days}) and not p.hidden and p.user_id not in ${outOfView("0")}
+			where p.created_at > now() - make_interval(days => ${days}) and not p.hidden and p.circle_owner_id is null and p.user_id not in ${outOfView("0")}
 				and u.status = 'active' and not u.protected and u.created_at <= now() - make_interval(days => ${settings().operations.trend_min_account_days})
 				${country ? sql`and u.country = ${country}` : sql``}
 		), people as (

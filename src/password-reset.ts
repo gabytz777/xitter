@@ -103,6 +103,8 @@ export async function resetRoute(req: Request, url: URL): Promise<Response> {
 		await tx`update password_resets set used = true where user_id = ${row.user_id}::bigint and not used`;
 		await tx`delete from sessions where user_id = ${row.user_id}::bigint`;
 		await tx`delete from api_tokens where user_id = ${row.user_id}::bigint`;
+		// an app approved just before would otherwise trade its code for a new token
+		await tx`delete from oauth_codes where user_id = ${row.user_id}::bigint`;
 		await tx`delete from login_challenges where user_id = ${row.user_id}::bigint`;
 		await tx`delete from passkeys where user_id = ${row.user_id}::bigint`;
 		await tx`delete from passkey_challenges where user_id = ${row.user_id}::bigint`;

@@ -8,6 +8,9 @@ import { recordError } from "./errors";
 import { settings } from "./settings";
 
 export const BACKUP_DIR = process.env.BACKUP_DIR ?? "data/backups";
+// how often the schedule may run, in hours
+export const BACKUP_INTERVALS = [1, 2, 4, 6, 12, 24];
+export const MAX_BACKUPS_KEPT = 500;
 const PG_DUMP = process.env.PG_DUMP ?? "pg_dump";
 const NAME = /^xitter-\d{8}-\d{6}\.dump$/;
 
@@ -58,21 +61,24 @@ function prune(keep: number) {
 	for (const b of listBackups().slice(keep)) deleteBackup(b.name);
 }
 
-// daily: a dump when the newest is a day old, then the oldest beyond `keep` go
+// on a schedule: a dump when the newest is `every_hours` old, then the oldest
+// beyond `keep` go. The check runs every few minutes, so a dump that took a
+// while doesn't push the next one back by a whole check.
 export function startBackups() {
 	const tick = async () => {
-		const { daily, keep } = settings().backups;
+		const { daily, keep, every_hours } = settings().backups;
 		if (!daily) return;
+		const hours = BACKUP_INTERVALS.includes(every_hours) ? every_hours : 24;
 		const newest = listBackups()[0];
-		if (newest && Date.now() - Date.parse(newest.created_at) < 24 * 3600e3) return;
+		if (newest && Date.now() - Date.parse(newest.created_at) < hours * 3600e3 - 5 * 60_000) return;
 		try {
 			await createBackup();
 			prune(keep);
 		} catch (e) {
 			console.error("backup:", e);
-			await recordError("job", e, { path: "daily backup" });
+			await recordError("job", e, { path: "scheduled backup" });
 		}
 	};
-	setInterval(() => void tick(), 15 * 60_000).unref();
+	setInterval(() => void tick(), 5 * 60_000).unref();
 	void tick();
 }

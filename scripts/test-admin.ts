@@ -68,8 +68,13 @@ else console.log(`skip the last admin can't step down (${admins} admins)`);
 
 // standing
 const post = (await t.gql("CreateTweet", { tweet_text: "admin test: before" })).data.create_tweet.tweet_results.result.rest_id;
-await a.admin("setStatus", { id: target.id, status: "restricted", reason: "test" });
+await a.admin("setStatus", { id: target.id, status: "restricted", reason: "Repeated rule violations." });
 check("restricted: can't post", !!(await t.gql("CreateTweet", { tweet_text: "admin test: restricted" })).errors);
+const restrictedLike = await t.gql("FavoriteTweet", { tweet_id: post });
+check("restricted: can't like", restrictedLike.status === 403 && restrictedLike.data.errors?.[0]?.code === 326);
+const accountAccess = await t.page("/account/access");
+check("restricted: account access alias returns forbidden", accountAccess.status === 403);
+check("restricted: account access alias explains the reason", (await accountAccess.text()).includes("Repeated rule violations."));
 await a.admin("setStatus", { id: target.id, status: "limited" });
 const orgHome = postIds((await o.get("HomeTimeline", { count: 50 })).data.home.home_timeline_urt);
 check("limited: gone from a non-follower's home feed", !orgHome.includes(post));

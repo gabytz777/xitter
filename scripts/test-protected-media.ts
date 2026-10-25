@@ -50,6 +50,31 @@ try {
 	await sql`delete from posts where id = ${openPost}::bigint`;
 	check("a deleted post's media is immediately gone for others", (await get(`pf${stamp}`, open)).status === 404);
 	check("but its owner still gets it", (await get(`ps${stamp}`, open)).status === 200);
+	// an upload nothing points at yet (a draft's, a scheduled post's)
+	const loose = newId();
+	media.push(loose);
+	writeFileSync(join(dir, loose), Buffer.from("GIF89a"));
+	await sql`insert into media (id, user_id, kind, mime, size, width, height) values (${loose}::bigint, ${owner}::bigint, 'photo', 'image/gif', 6, 1, 1)`;
+	check("an unposted upload is its owner's", (await get(`pm${stamp}`, loose)).status === 200);
+	check("and nobody else's, follower or not", (await get(`pf${stamp}`, loose)).status === 404 && (await get(`ps${stamp}`, loose)).status === 404);
+
+	// and once something shows it, it is as open as that is
+	const banner = newId();
+	media.push(banner);
+	writeFileSync(join(dir, banner), Buffer.from("GIF89a"));
+	await sql`insert into media (id, user_id, kind, mime, size, width, height) values (${banner}::bigint, ${follower}::bigint, 'photo', 'image/gif', 6, 1, 1)`;
+	const list = newId();
+	await sql`insert into lists (id, owner_id, name, is_private, banner_media_id) values (${list}::bigint, ${follower}::bigint, 'banner', false, ${banner}::bigint)`;
+	check("a public list's banner shows to others", (await get(`ps${stamp}`, banner)).status === 200);
+	await sql`update lists set is_private = true where id = ${list}::bigint`;
+	check("a private list's doesn't", (await get(`ps${stamp}`, banner)).status === 404);
+	await sql`update lists set banner_media_id = null where id = ${list}::bigint`;
+	const community = newId();
+	await sql`insert into communities (id, creator_id, name, banner_url) values (${community}::bigint, ${follower}::bigint, 'banner', ${`/media/${banner}`})`;
+	check("a community's banner shows to others", (await get(`ps${stamp}`, banner)).status === 200);
+	await sql`delete from communities where id = ${community}::bigint`;
+	await sql`insert into delegation_members (id, owner_id, member_id, role, status) values (${newId()}::bigint, ${follower}::bigint, ${stranger}::bigint, 'Contributor', 'Accepted')`;
+	check("and the owner's delegates see its uploads", (await get(`ps${stamp}`, banner)).status === 200);
 } finally {
 	for (const id of media) rmSync(join(dir, id), { force: true });
 	await sql`delete from users where id = any(${sql.array(ids, "INT8")})`;

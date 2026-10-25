@@ -151,8 +151,10 @@ async function membershipRow(id: unknown): Promise<Row | undefined> {
 
 async function invite(v: Viewer, ownerId: string, memberId: string, role: Role) {
 	if (!ROLES.has(role)) throw new PostError("Pick Admin or Contributor.", 214);
-	mayManage(v, ownerId, [role]);
 	if (!/^\d{1,19}$/.test(memberId) || memberId === ownerId) throw new PostError("You can't add this account.", 214);
+	// inviting someone already there changes their role, so their current one counts too
+	const [existing] = await sql`select role from delegation_members where owner_id = ${ownerId}::bigint and member_id = ${memberId}::bigint`;
+	mayManage(v, ownerId, existing ? [role, existing.role] : [role]);
 	const [m] = await sql`select status, delegation_invites, automated_by,
 		exists (select 1 from follows f where f.follower_id = u.id and f.followee_id = ${ownerId}::bigint) as follows_owner
 		from users u where id = ${memberId}::bigint`;

@@ -5,7 +5,7 @@
 
 import { login } from "./auth";
 import { sql } from "./db";
-import { hit, used } from "./ratelimit";
+import { passwordTry } from "./ratelimit";
 import { startChallenge } from "./two-factor";
 
 type Session = { token: string; csrf: string; userId: string };
@@ -25,13 +25,15 @@ export async function passwordStep(typed: string, password: string): Promise<{ s
 	// guessing one account's password from many addresses still runs out;
 	// only wrong passwords count, so signing in on several devices doesn't
 	const account = username.toLowerCase();
-	if (username && used("password", account)) return { error: "Too many tries for this account. Wait 15 minutes." };
+	const refund = username ? passwordTry(account) : () => {};
+	if (!refund) return { error: "Too many tries for this account. Wait 15 minutes." };
 	const challenge = username && password ? await startChallenge(username, password) : undefined;
-	if (challenge) return { challenge };
-	const session = username && password ? await login(username, password) : undefined;
-	if (!session) {
-		if (username) hit("password", account);
-		return { error: "Wrong username or password." };
+	if (challenge) {
+		refund();
+		return { challenge };
 	}
+	const session = username && password ? await login(username, password) : undefined;
+	if (!session) return { error: "Wrong username or password." };
+	refund();
 	return { session };
 }

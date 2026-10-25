@@ -1,6 +1,8 @@
 import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { isPeer } from "./federation";
+import { isIP } from "node:net";
+import { reservedAddress } from "./public-net";
 
 const PROXY = (process.env.EMBED_PROXY ?? "https://cors.estrogen.delivery/").replace(/\/?$/, "/");
 export const proxied = (url: string) => `${PROXY}?url=${encodeURIComponent(url)}`;
@@ -83,7 +85,8 @@ const PRIVATE_HOST = /^(localhost|.*\.local|.*\.internal|.*\.localhost|0\.0\.0\.
 export function previewable(url: string): boolean {
 	try {
 		const u = new URL(url);
-		return /^https?:$/.test(u.protocol) && !PRIVATE_HOST.test(u.hostname) && u.host !== OWN_HOST && !u.username && !u.password;
+		// (the URL parser has already written 2130706433 or 0x7f.1 as 127.0.0.1)
+		return /^https?:$/.test(u.protocol) && !PRIVATE_HOST.test(u.hostname) && !(isIP(u.hostname) && reservedAddress(u.hostname)) && u.host !== OWN_HOST && !u.username && !u.password;
 	} catch {
 		return false;
 	}

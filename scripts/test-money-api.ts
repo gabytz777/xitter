@@ -33,6 +33,17 @@ try {
 	await setSetting("features", { ...features, money: true });
 	const start = settings().money.starting_cents;
 
+	// a connected app's token reaches the money as far as its scope goes (the
+	// consent page lists Equicoins): a read-only one sees it but can't send
+	const app = newId();
+	await sql`insert into oauth_clients (id, owner_id, name, redirect_uri) values (${app}::bigint, ${people.c}::bigint, 'Some app', 'https://app.example/cb')`;
+	const appToken = `xit_${Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString("hex")}`;
+	await sql`insert into api_tokens (id, user_id, name, token_hash, scope, client_id, expires_at)
+		values (${newId()}::bigint, ${people.a}::bigint, 'Some app', ${new Bun.CryptoHasher("sha256").update(appToken).digest("hex")}, 'read', ${app}::bigint, now() + interval '1 day')`;
+	assert.equal((await call(appToken, "GET", "/me")).status, 200, "the app's token works elsewhere");
+	assert.equal((await call(appToken, "GET", "/money")).status, 200, "a read-only app sees the money");
+	assert.equal((await call(appToken, "POST", "/money/send", { to: handle("b"), amount_cents: 100, idempotency_key: `app-${tag}` })).status, 403, "but can't send it");
+
 	// the disclaimer comes first
 	const w = await call(tok.a, "GET", "/money");
 	assert.deepEqual([w.status, w.data.balance_cents, w.data.disclaimer_accepted], [200, start, false]);

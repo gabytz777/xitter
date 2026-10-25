@@ -1,5 +1,5 @@
-import { type Viewer, getViewer, parseCookies, csrfCookie } from "./auth";
-import { getClientFile, getClientFilePath } from "./client-cache";
+import { type Viewer, expireSessions, getViewer, parseCookies, csrfCookie } from "./auth";
+import { clientPathAllowed, getClientFile, getClientFilePath, hasClientFile } from "./client-cache";
 import { PORT, PUBLIC_ORIGIN } from "./config";
 import { migrate, sql } from "./db";
 import { knownOperation, runOperation } from "./graphql";
@@ -14,11 +14,13 @@ import { cachedPatch, patchFile, patchText } from "./patch";
 import { clientError, recordError } from "./errors";
 import { asRequest, markStaff, setRequestLanguage, staffGate } from "./staff-access";
 import { backupPath, startBackups } from "./backups";
+import { startUpdateChecks } from "./update-check";
 import { memberInvitesRoute } from "./member-invites";
 import { orgRoute } from "./org-manage";
 import { menuLinks } from "./tidy";
 import { isPlayerPage, playerPage } from "./player-card";
 import { chatMediaRoute, chatSocket, juiceboxProxy, socketUser } from "./chat";
+import { sweepChatUploads } from "./chat-media";
 import { loadBuild } from "./build";
 import { MEDIA_DIR, mediaUpload, serveMedia } from "./media";
 import { resumeVideos } from "./video";
@@ -39,10 +41,13 @@ import { startScheduler } from "./scheduled";
 import { federationRoute, startFederation } from "./federation-routes";
 import { acceptTicket, superadminHomeRoute } from "./superadmin";
 import { gifProxy } from "./gifs";
+import { accountIndexRoute } from "./account-page";
 import { gifSettingsRoute } from "./gif-settings";
+import { classicDetailRoute, postCounts } from "./classic-detail";
+import { circleRoute } from "./circles";
 import { cardImage } from "./explore-cards";
 import { rememberIp, requestIp } from "./login-history";
-import { bucketsFor, hit, isMutation, limitApi, limitedResponse } from "./ratelimit";
+import { hit, isMutation, limitApi, limitedResponse } from "./ratelimit";
 import { actingViewer, delegateMay } from "./delegation";
 import { automationRoute } from "./automation";
 import { instancesRoute } from "./federation-settings";
@@ -75,6 +80,7 @@ import { forgetRanking } from "./ranking";
 import { cardsApi, payMeApi, recentApi } from "./money";
 import { merchantRoute, moneyRoute } from "./money-page";
 import { expireShopCheckmarks } from "./money-shop";
+import { restrictedPage, restrictedRefuses } from "./restricted-page";
 
 const MIME: Record<string, string> = {
 	js: "text/javascript; charset=utf-8",
@@ -93,7 +99,7 @@ const MIME: Record<string, string> = {
 // The client also calls outside services on its own (grok.com checkout, ads
 // measurement). Requests from the page may only reach this instance.
 const SETTINGS_PAGES = new Set(
-	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant", "gifs"].map((s) => `/account/${s}`),
+	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant", "gifs", "post-details"].map((s) => `/account/${s}`),
 );
 
 const PAGE_CSP = "connect-src 'self' blob: data:; font-src 'self'";
@@ -110,10 +116,13 @@ async function servePublic(p: string): Promise<Response> {
 	if (hashflag) return hashflagAsset(hashflag[1], hashflag[2]);
 	const card = /^card-(\d{1,19})\.img$/.exec(name);
 	if (card) return cardImage(card[1]);
-	const flag = /^flag-([a-z]+)\.svg$/.exec(name);
+	const flag = /^flag-([a-z]+(?:-[a-z]{2})?)\.svg$/.exec(name);
 	if (flag) {
-		const svg = flagSvg(flag[1]);
-		return svg ? new Response(svg, { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" } }) : new Response("not found", { status: 404 });
+		const svg = await flagSvg(flag[1]);
+		// a country's image is Twemoji's file: opened on its own, it may not run anything here
+		return svg
+			? new Response(svg, { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'", "x-content-type-options": "nosniff" } })
+			: new Response("not found", { status: 404 });
 	}
 	if (!/^[\w.-]+\.(png|svg|ico|webp)$/.test(name)) return new Response("not found", { status: 404 });
 	// a logo uploaded in the admin panel replaces the shipped one
@@ -154,6 +163,13 @@ function staffBlockedPage(reason: string) {
 
 async function serveClient(req: Request, pathname: string): Promise<Response> {
 	const cdnPath = pathname.slice("/abs".length);
+	// a file not in the archive yet is fetched from the CDN and kept: only from
+	// where the client's files live, and not faster than one address loads pages
+	if (!hasClientFile(cdnPath)) {
+		if (!clientPathAllowed(cdnPath)) return new Response("not found", { status: 404 });
+		const h = hit("endpoint", `${requestIp(req) ?? "unknown"}:abs-fetch`);
+		if (!h.ok) return limitedResponse(h);
+	}
 	const ext = cdnPath.split(".").pop() ?? "";
 	const type = MIME[ext] ?? "application/octet-stream";
 	if (ext !== "js" && ext !== "css") {
@@ -233,6 +249,8 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 		if (!delegateMay(acting.actor!.role, req.method, path, operation)) return apiError(403, 200, "Delegates can't do this for the account.");
 		viewer = acting;
 	}
+	if (viewer.status === "restricted" && restrictedRefuses(req.method, path, operation, url))
+		return apiError(403, 326, "Your account can't interact right now.");
 	// a follow, block, mute or like changes what "For you" would rank
 	if (req.method !== "GET") forgetRanking(viewer.id);
 	const limited = limitApi(viewer, req.method, path, operation, url);
@@ -241,6 +259,7 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	if (path === "/xitter/badges") return extraBadges(viewer.id, url);
 	if (path === "/xitter/decorations") return decorationsFor(url);
 	if (path === "/xitter/pronouns") return pronounsFor(url);
+	if (path === "/xitter/post-counts") return postCounts(viewer.id, url);
 	if (path === "/xitter/instance") return instanceCard(viewer.id, url);
 	if (path === "/xitter/decor") return decorFor(url);
 	if (path === "/xitter/decor/shop") return decorShop(url);
@@ -254,14 +273,13 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	if (path === "/xitter/money/recent") return recentApi(viewer);
 	if (path === "/xitter/money/payme" && req.method === "POST") return payMeApi(viewer);
 	if (path === "/xitter/client_error" && req.method === "POST") return clientError(req, viewer);
-	if (viewer.status === "restricted" && bucketsFor(req.method, path, operation, url).some((b) => b === "post" || b === "dm"))
-		return apiError(403, 326, "Your account can't post or send messages right now.");
 	if (req.method !== "GET" && !/^\/(i|1\.1)\/media\/upload2?\.json$/.test(path) && Number(req.headers.get("content-length") ?? 0) > MAX_API_BODY)
 		return apiError(413, 324, "That request is too large.");
 	if (process.env.LOG_REQUESTS) console.log(`api ${req.method} ${gql >= 0 ? `graphql:${parts[parts.length - 1]}` : path}`);
 	// the client reports its own render errors through telemetry
 	// (not uploads: a binary body isn't URI-encoded text)
-	if (process.env.LOG_REQUESTS === "errors" && req.method === "POST" && !path.includes("/media/upload")) {
+	// (nor the password calls: the log would hold them)
+	if (process.env.LOG_REQUESTS === "errors" && req.method === "POST" && !path.includes("/media/upload") && !/password/.test(path)) {
 		const raw = await req.clone().text();
 		let body = raw;
 		try {
@@ -313,6 +331,24 @@ setInterval(
 			recordError("job", e, { path: "shop checkmark expiry" });
 		}),
 	10 * 60_000,
+).unref();
+// abandoned and expired chat attachments give their disk back
+setInterval(
+	() =>
+		sweepChatUploads().catch((e) => {
+			console.error("chat upload sweep failed", e.message);
+			recordError("job", e, { path: "chat upload sweep" });
+		}),
+	60 * 60_000,
+).unref();
+// sessions nobody used in months end, whatever their cookie says
+setInterval(
+	() =>
+		expireSessions().catch((e) => {
+			console.error("session expiry failed", e.message);
+			recordError("job", e, { path: "session expiry" });
+		}),
+	6 * 3600_000,
 ).unref();
 await loadSettings();
 await resumeVideos(MEDIA_DIR);
@@ -391,7 +427,15 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (!account) return new Response("suspended", { status: 403 });
 		return server.upgrade(req, { data: { userId } }) ? undefined : new Response("expected a websocket", { status: 400 });
 	}
-	if (p.startsWith("/juicebox/")) return juiceboxProxy(req, p.slice("/juicebox/".length));
+	// the chat app's way to the key backup realm: signed-in accounts only, and
+	// not faster than their messages
+	if (p.startsWith("/juicebox/")) {
+		const viewer = await getViewer(req);
+		if (!viewer) return new Response("sign in first", { status: 401 });
+		const h = hit("dm", viewer.id);
+		if (!h.ok) return limitedResponse(h);
+		return juiceboxProxy(req, p.slice("/juicebox/".length));
+	}
 	// Chat's manifest: the pinned chat build's own, its addresses ours
 	if (p === "/xchat/embed-v1.json") {
 		const base = loadBuild()?.build.meta.xchatEmbedBuild as string | undefined;
@@ -464,7 +508,8 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (discordEnabled() && (p === "/oauth/discord" || p === "/oauth/discord/callback"))
 		return p === "/oauth/discord" ? discordStart(req, url) : discordCallback(req, url, viewer);
 	// a suspended account can't sign in, so it appeals here with its password
-	if (p === "/appeal") return appealRoute(req, server.requestIP(req)?.address ?? "");
+	if (p === "/appeal") return appealRoute(req, requestIp(req) ?? "");
+	if (p === "/account/access" && viewer?.status === "restricted") return restrictedPage(req, viewer);
 	// maintenance: staff carry on, everyone else waits. Signed-out visitors see
 	// it too, so an instance that is down for maintenance doesn't look alive.
 	// Guests get upstream's "Staff sign in" link (login.ts), and its /?staff=1
@@ -483,7 +528,12 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && (p === "/account/money" || p.startsWith("/account/money/"))) return Response.redirect(`/i/xmoney${p.slice("/account/money".length)}${url.search}`, 302);
 	if (p === "/oauth/authorize") return oauthAuthorize(req, url, viewer);
 	if (p === "/account/apps" && viewer) return connectedAppsRoute(req, viewer);
+	// opened on its own, the index comes up as Settings > Xitter settings, like the pages it lists
+	if ((p === "/account" || p === "/account/") && viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document") return Response.redirect("/settings/xitter", 302);
+	if ((p === "/account" || p === "/account/") && viewer) return accountIndexRoute(req, viewer);
 	if (p === "/account/gifs" && viewer) return gifSettingsRoute(req, viewer);
+	if (p === "/account/post-details" && viewer) return classicDetailRoute(req, viewer);
+	if (p === "/account/circle" && viewer) return circleRoute(req, viewer);
 	if (p === "/account/apps/developer" && viewer) return developerAppsRoute(req, viewer);
 	if (p === "/federation/superadmin" || p.startsWith("/federation/superadmin/")) return superadminHomeRoute(req, url, viewer);
 	if (p === "/account/reset") return resetRoute(req, url);
@@ -600,6 +650,7 @@ startScheduler();
 await startFederation();
 startMailDigests();
 startBackups();
+startUpdateChecks();
 startPush();
 startGrok();
 console.log(`xitter listening on ${PUBLIC_ORIGIN}`);

@@ -5,6 +5,7 @@ import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
 import { vapidPublicKey } from "./push";
 import { settings } from "./settings";
 import { patchCountryAudience } from "./reply-control-client";
+import { patchCircleComposer } from "./circles";
 
 // X's VAPID public key, which the client subscribes to push with; pushes can
 // only be signed with the private half, so the instance's own goes in its place
@@ -21,7 +22,13 @@ const inRegex = (url: string) => url.replace(/[/.]/g, (c) => "\\" + c);
 const RULES: [RegExp, string][] = [
 	// The Settings search index is built from X's route list: add our custom GIF
 	// provider page so searching "gif" can open it from the results.
-	[/\blet (\w+)=\(0,[\w$]+\.[\w$]+\)\(\),(\w+)=\[\];(?=for\(let \w+ of \1\)for\(let \w+ of\(\2\.push\()/g, '$&$1.find(group=>group.path==="/settings/account")?.items.push({id:"xitterGifProvider",path:"/settings/xitter/gifs",title:"GIF provider",synonyms:["gif","provider","klipy","tenor","giphy"],isSearchable:true,items:[]});'],
+	[/\blet (\w+)=\(0,[\w$]+\.[\w$]+\)\(\),(\w+)=\[\];(?=for\(let \w+ of \1\)for\(let \w+ of\(\2\.push\()/g, '$&$1.find(group=>group.path==="/settings/account")?.items.push({id:"xitterGifProvider",path:"/settings/xitter/gifs",title:"GIF provider",synonyms:["gif","provider","klipy","tenor","giphy"],isSearchable:true,items:[]});$1.find(group=>group.path==="/settings/account")?.items.push({id:"xitterPostDetails",path:"/settings/xitter/post-details",title:"Post details",synonyms:["post","details","classic","counts","likes","reposts","quotes","twitter"],isSearchable:true,items:[]},{id:"xitterEquicoins",path:"/settings/xitter/merchant",title:"Equicoins",synonyms:["equicoins","money","merchant","payments","purchases"],isSearchable:true,items:[]});'],
+	// Settings > Xitter settings: an entry of the client's own in the Settings
+	// list, above Additional resources. Its pane is our index (tidy.ts frames
+	// /settings/xitter), and it stays lit on our pages under /settings/xitter/.
+	[/(\(0,([\w$]+)\.jsx\)\(([\w$]+)\.A,\{label:[\w$]+,link:"\/settings\/about",testID:[\w$]+\}\))/g, '(0,$2.jsx)($3.A,{label:"Xitter settings",link:"/settings/xitter",xitterMatch:"/settings/xitter/:page*",testID:"xitterSettingsLink"}),$1'],
+	// the list's entries light up on an exact match of their link only
+	[/(\(0,[\w$]+\.jsx\)\([\w$]+\.A,\{exact:!0,path:)([\w$]+)\.link,children:/g, '$1$2.xitterMatch||$2.link,children:'],
 	[/(Co:\{id:"co",Icon:([\w$]+)\.default,IconSelected:([\w$]+)\.default,label:[^,]+,description:[^,]+,source:"remote",type:"navigate",order:60\})(?!,Country:\{)/g, '$1,Country:{id:"country",Icon:$2.default,IconSelected:$3.default,label:"Country",description:"Only accounts from selected countries can reply",source:"remote",type:"navigate",order:70}'],
 	[/"co"===([\w$]+)\.conversation_control\?\{mode:"CountryOfOrigin",allowed_country_codes:\1\.conversation_control_region_codes\?\?\[\]\}/g, '"country"===$1.conversation_control?{mode:"Country",allowed_country_codes:$1.conversation_control_region_codes??[]}:"co"===$1.conversation_control?{mode:"CountryOfOrigin",allowed_country_codes:$1.conversation_control_region_codes??[]}'],
 	[/"co"===([\w$]+)&&\(([\w$]+)="CountryOfOrigin"\)/g, '("country"===$1?$2="Country":"co"===$1&&($2="CountryOfOrigin"))'],
@@ -34,6 +41,13 @@ const RULES: [RegExp, string][] = [
 	[/(\w+)=(\w+)\.status\|\|"",(\w+)="Failed"===/g, '$1=$2.status||($2.xitter_conversation_card&&window.__XITTER_CONVERSATION_DRAFT_LABEL__?.($2.xitter_conversation_card))||"",$3="Failed"==='],
 	[/(_handleClick=(\w+)=>\(\)=>\{)(let \w+=\2\.scheduling_info&&\2\.scheduling_info\.execute_at;if\(!this\.isDraftsTab)/g, '$1document.dispatchEvent(new CustomEvent("xitter:restore-conversation-cards",{detail:$2.tweet_create_request}));$3'],
 	[/(_areComposersEmptyOrUnchanged=\(\)=>\{)/g, '$1if(!this.props.isInline&&window.__XITTER_CONVERSATION_HAS_DRAFT__?.())return!1;'],
+	// Settings > Post details, classic (classic-detail.ts): a post's engagements
+	// screen shows its Likes tab, and who liked it, to everyone and not only to
+	// the post's author. isOwnPost itself stays, for what only the author gets.
+	[/([\w$]+)&&([\w$]+)\.push\(([\w$]+)\("likes"\)\)/g, '($1||window.__XITTER__?.classicDetail)&&$2.push($3("likes"))'],
+	[/"likes"!==([\w$]+)\|\|([\w$]+)\?"quotes"===/g, '"likes"!==$1||$2||window.__XITTER__?.classicDetail?"quotes"==='],
+	// the pinned build's shape of the same check: its Likes tab sends anyone but the author back to the post
+	[/if\("likes"===([\w$]+)&&!([\w$]+)\)return/g, 'if("likes"===$1&&!$2&&!window.__XITTER__?.classicDetail)return'],
 	// Chat is a separate app (module federation): its manifest comes from
 	// chat.x.com, its files from abs.twimg.com, and both are checked by pattern
 	[/https:\/\/chat\.x\.com\/embed-v1\.json/g, `${PUBLIC_ORIGIN}/xchat/embed-v1.json`],
@@ -153,8 +167,10 @@ export function patchText(text: string, chat = false): string {
 	let re: RegExp, to: string;
 	for ([re, to] of chat ? [...CHAT_RULES, ...RULES] : RULES) out = out.replace(re, to);
 	out = patchCountryAudience(out);
+	out = patchCircleComposer(out);
 	if (!out.includes("ConversationControlsQuery")) return out;
-	return out.replace(/function [\w$]+\(\{onApply:[\w$]+,onBack:[\w$]+,options:([\w$]+),value:[\w$]+\}\)\{let\[[\w$]+,[\w$]+\]=([\w$]+)\.useState\([\s\S]{0,16000}?(?=let [\w$]+=[\w$]+\.A\.create)/g, (picker, options, react) => {
+	// newer clients pass more props between options and value (requiresSelection:n=!1)
+	return out.replace(/function [\w$]+\(\{onApply:[\w$]+,onBack:[\w$]+,options:([\w$]+),(?:[\w$]+:[\w$]+(?:=[\w$!.]{1,20})?,){0,4}value:[\w$]+\}\)\{let\[[\w$]+,[\w$]+\]=([\w$]+)\.useState\([\s\S]{0,16000}?(?=let [\w$]+=[\w$]+\.A\.create)/g, (picker, options, react) => {
 		const jsx = /\(0,([\w$]+)\.jsxs\)/.exec(picker)?.[1];
 		if (!jsx) return picker;
 		return picker.replace(/\{let\[/, `{let[xitterCountrySearch,xitterSetCountrySearch]=${react}.useState(""),[`).replace('children:[', `children:[(0,${jsx}.jsx)("input",{type:"search","aria-label":"Search countries or regions",placeholder:"Search countries or regions",value:xitterCountrySearch,onChange:e=>xitterSetCountrySearch(e.target.value),style:{boxSizing:"border-box",width:"100%",padding:12,marginBottom:12,border:"1px solid currentColor",borderRadius:8,background:"transparent",color:"inherit",font:"inherit"}}),`).replace(`children:${options}.map`, `children:${options}.filter(e=>e.label.toLocaleLowerCase().includes(xitterCountrySearch.toLocaleLowerCase())||e.value.toLocaleLowerCase().includes(xitterCountrySearch.toLocaleLowerCase())).map`);

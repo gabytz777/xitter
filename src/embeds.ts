@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { remoteMediaFile } from "./federation-sync";
-import { MEDIA_DIR } from "./media";
+import { MEDIA_CSP, MEDIA_DIR, servedType } from "./media";
 import { isId } from "./ids";
 import { feature, settings } from "./settings";
 import { posterFile } from "./video";
@@ -31,7 +31,7 @@ type Post = { id: string; text: string; created_at: Date; author: Author; image?
 
 async function publicPost(id: string): Promise<Post | undefined> {
 	if (!isId(id)) return undefined;
-	const [p] = await sql`select p.id::text, p.user_id::text, p.text, p.created_at, p.sensitive and not u.never_sensitive as sensitive, u.never_sensitive from posts p join users u on u.id = p.user_id where p.id = ${id}::bigint and not p.hidden`;
+	const [p] = await sql`select p.id::text, p.user_id::text, p.text, p.created_at, p.sensitive and not u.never_sensitive as sensitive, u.never_sensitive from posts p join users u on u.id = p.user_id where p.id = ${id}::bigint and not p.hidden and p.circle_owner_id is null`;
 	if (!p) return undefined;
 	const author = await publicAuthor(sql`id = ${p.user_id}::bigint`);
 	if (!author) return undefined;
@@ -134,7 +134,7 @@ export async function linkPreview(pathname: string): Promise<Response | undefine
 
 async function fileResponse(body: Blob | undefined, type: string): Promise<Response> {
 	if (!body) return new Response("not found", { status: 404, headers: { "cache-control": "no-store" } });
-	return new Response(body, { headers: { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+	return new Response(body, { headers: { "content-type": servedType(type), "cache-control": "no-store", "x-content-type-options": "nosniff", "content-security-policy": MEDIA_CSP } });
 }
 
 // the pictures the preview pages name: a public post's first photo or video

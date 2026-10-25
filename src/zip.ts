@@ -15,6 +15,8 @@ const u64 = (b: Buffer, at: number) => Number(b.readBigUInt64LE(at));
 
 export class ZipError extends Error {}
 
+const MAX_DIRECTORY = 64 * 1024 * 1024;
+
 export class Zip {
 	private constructor(
 		private readonly path: string,
@@ -49,6 +51,8 @@ export class Zip {
 			dirOffset = u64(z64, 48);
 		}
 		if (dirOffset + dirSize > length || count > 2_000_000) throw new ZipError("The zip file is damaged.");
+		// the directory is read into memory whole; a real archive's is a few MB
+		if (dirSize > MAX_DIRECTORY) throw new ZipError("The zip file's table of contents is larger than this server reads.");
 		const dir = await read(dirOffset, dirOffset + dirSize);
 		const entries: ZipEntry[] = [];
 		for (let at = 0, n = 0; n < count && at + 46 <= dir.length; n++) {

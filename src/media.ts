@@ -14,7 +14,8 @@ import type { Viewer } from "./auth";
 import { remoteMediaFile } from "./federation-sync";
 import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
 import { blockedFor, protectedFor, suspendedFor } from "./blocks";
-import { staffViewer } from "./staff-access";
+import { isStaffRequest, staffViewer } from "./staff-access";
+import { circleSeen } from "./circles";
 import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { settings } from "./settings";
@@ -69,6 +70,13 @@ export type MediaRow = {
 };
 
 export type Image = { mime: string; width: number; height: number };
+
+// The only types media goes out as. A file stored under any other (a peer
+// claiming image/svg+xml for a script) is sent as bytes, and none of it may run
+// anything when opened on its own.
+const SERVED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "video/mp4"]);
+export const servedType = (mime: string) => (SERVED_TYPES.has(mime) ? mime : "application/octet-stream");
+export const MEDIA_CSP = "default-src 'none'; sandbox";
 
 // type and dimensions from the file header; nothing else is trusted
 export function sniffImage(b: Buffer): Image | undefined {
@@ -639,15 +647,33 @@ async function cacheFor(viewer: Viewer, served: Served): Promise<string | undefi
 	// only for unbound uploads so ordinary post images keep their indexed path.
 	const pollIds: string[] = served.post ? [] : (await sql`select id::text from polls where choice_media @> ${sql.array([served.id], "INT8")}`).map((p: any) => p.id);
 	if (!served.post && !pollIds.length) {
-		// Avatars, banners and other non-post references retain their access
-		// policy. Their URL may later be attached to private content.
-		const [profile] = await sql`select 1 from users where id = ${served.owner}::bigint
-			and (avatar_url = ${`/media/${served.id}`} or banner_url = ${`/media/banner/${served.id}`})`;
-		return profile ? REVALIDATE : PRIVATE;
+		// What a profile, list, community or article shows is as open as that
+		// is (its URL may later be attached to private content, so it is
+		// revalidated): a private list's banner only to its owner, an article's
+		// pictures once it is published in a post the viewer may see. An upload
+		// nothing shows yet, a draft's or a scheduled post's, is its owner's
+		// alone: ids are snowflakes, not secrets.
+		const path = `/media/${served.id}`;
+		const [shown] = await sql`select 1 where
+			exists (select 1 from users where id = ${served.owner}::bigint and (avatar_url = ${path} or banner_url = ${`/media/banner/${served.id}`}))
+			or exists (select 1 from lists l where l.banner_media_id = ${served.id}::bigint
+				and (l.owner_id = ${viewer.id}::bigint or (not l.is_private and l.owner_id not in ${blockedFor(viewer.id)})))
+			or exists (select 1 from communities where banner_url = ${path})
+			or exists (select 1 from articles a join posts post on post.article_id = a.id
+				where a.user_id = ${served.owner}::bigint and a.state = 'Published' and not a.hidden and not post.hidden
+					and (a.cover_media_id = ${served.id}::bigint or a.content_state::text like ${`%${served.id}%`})
+					and ${circleSeen(viewer.id, sql`post`)} and post.user_id not in ${protectedFor(viewer.id)}
+					and post.user_id not in ${suspendedFor(viewer.id)} and post.user_id not in ${blockedFor(viewer.id)})`;
+		if (shown) return REVALIDATE;
+		// besides its owner: the owner's delegates, who upload as the account,
+		// and staff past the admin panel's gate
+		if (served.owner === viewer.id || isStaffRequest()) return PRIVATE;
+		const [delegate] = await sql`select 1 from delegation_members where owner_id = ${served.owner}::bigint and member_id = ${viewer.id}::bigint and status = 'Accepted'`;
+		return delegate ? PRIVATE : undefined;
 	}
-	const [access] = await sql`select not post.hidden and not author.protected as open from posts post join users author on author.id = post.user_id where
+	const [access] = await sql`select not post.hidden and not author.protected and post.circle_owner_id is null as open from posts post join users author on author.id = post.user_id where
 		${served.post ? sql`post.id = ${served.post}::bigint` : sql`post.poll_id = any(${sql.array(pollIds, "INT8")})`}
-		and (not post.hidden or ${staffViewer(viewer.id)})
+		and (not post.hidden or ${staffViewer(viewer.id)}) and ${circleSeen(viewer.id, sql`post`)}
 		and post.user_id not in ${protectedFor(viewer.id)}
 		and post.user_id not in ${suspendedFor(viewer.id)}
 		and post.user_id not in ${blockedFor(viewer.id)} limit 1`;
@@ -686,7 +712,7 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 		const served = body && (await servedOf(poster[1]));
 		const cache = served && (await cacheFor(viewer, served));
 		if (!body || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-		const headers: Record<string, string> = { "content-type": "image/jpeg", "cache-control": cache, "x-content-type-options": "nosniff", ...tagOf(served, body, cache) };
+		const headers: Record<string, string> = { "content-type": "image/jpeg", "cache-control": cache, "x-content-type-options": "nosniff", "content-security-policy": MEDIA_CSP, ...tagOf(served, body, cache) };
 		if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
 		return new Response(body, { headers });
 	}
@@ -696,7 +722,7 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 	const served = await servedOf(m[1]);
 	const cache = served && (await cacheFor(viewer, served));
 	if (!served || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
-	const headers: Record<string, string> = { "content-type": served.mime, "cache-control": cache, "x-content-type-options": "nosniff", "accept-ranges": "bytes", ...tagOf(served, body, cache) };
+	const headers: Record<string, string> = { "content-type": servedType(served.mime), "cache-control": cache, "x-content-type-options": "nosniff", "content-security-policy": MEDIA_CSP, "accept-ranges": "bytes", ...tagOf(served, body, cache) };
 	if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
 	const size = body.size;
 	const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get("range") ?? "");

@@ -28,6 +28,8 @@ export const FEATURES = {
 	link_previews: "Previews of public posts and profiles when their links are shared in other apps",
 	archive_import: "Import from X: accounts upload their X archive and its posts come over (Settings > Your account)",
 	money: "Equicoins: accounts send each other money from the side bar (the instance's own play money, not real currency)",
+	circles: "Circles: posts only the people an account picks can see (Circle instead of Everyone in the composer)",
+	affiliate_checkmarks: "Checkmarks for affiliates of an organisation (off: they keep the organisation's badge, and only a checkmark of their own shows)",
 } as const;
 export type Feature = keyof typeof FEATURES;
 
@@ -53,6 +55,8 @@ const DEFAULTS = {
 		link_previews: true,
 		archive_import: false,
 		money: false,
+		circles: true,
+		affiliate_checkmarks: true,
 	} as Record<Feature, boolean>,
 	limits: { image_mb: 5, video_mb: Number(process.env.MAX_VIDEO_MB ?? 200), video_seconds: Number(process.env.MAX_VIDEO_SECONDS ?? 600) },
 	// media-compress.ts and video.ts: uploads made smaller as they're stored, for
@@ -97,8 +101,15 @@ const DEFAULTS = {
 	// the admin panel itself (admin.ts staffGate): staff must have two-factor on;
 	// only these addresses (IPs or CIDR ranges) reach it, none meaning any
 	security: { staff_2fa: false, admin_ips: [] as string[] },
-	// backups.ts: a database dump every day, the newest `keep` kept
-	backups: { daily: false, keep: 7 },
+	// Admin > Federation: show the checkmarks other instances gave their accounts
+	// (model.ts shownVerifiedType); off, they look unverified here
+	remote_checkmarks: true,
+	// backups.ts: while `daily` is on, a database dump every `every_hours` (one
+	// of BACKUP_INTERVALS), the newest `keep` kept
+	backups: { daily: false, keep: 7, every_hours: 24 },
+	// self-update.ts: the repository and branch an admin last updated from, which
+	// the update check (update-check.ts) then follows; blank for its defaults
+	update_source: { repo: "", branch: "" },
 	// member-invites.ts: invites members make themselves, while sign-up is by invite
 	invite_quota: { enabled: false, per_month: 3, uses: 1, min_age_days: 7 },
 	// archive-import.ts: who may import from X, while the feature is on; staff skip both

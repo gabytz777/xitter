@@ -80,6 +80,8 @@ alter table users add column if not exists totp_enabled boolean not null default
 alter table users add column if not exists totp_secret text;
 alter table users add column if not exists totp_pending text;
 alter table users add column if not exists totp_backup jsonb not null default '[]';
+-- the step of the last code accepted, so a code can't be used twice
+alter table users add column if not exists totp_last_step bigint;
 create table if not exists login_challenges (
 	token uuid primary key,
 	user_id bigint not null references users (id) on delete cascade,
@@ -419,6 +421,7 @@ create table if not exists audit_log (
 	created_at timestamptz not null default now()
 );
 create index if not exists audit_log_created_idx on audit_log (created_at desc);
+create index if not exists audit_log_action_idx on audit_log (action);
 -- organisations are business accounts; affiliates show the org's badge
 create table if not exists affiliations (
 	org_id bigint not null references users (id) on delete cascade,
@@ -1837,3 +1840,15 @@ end $$;
 drop trigger if exists users_reply_country_catalog on users;
 create trigger users_reply_country_catalog after insert or delete or update of country, based_in_override on users
 	for each row execute function update_reply_country_catalog();
+
+-- Circles (circles.ts): the people who see an account's Circle posts, and on
+-- each post in a Circle (replies too), whose Circle it is
+create table if not exists circle_members (
+	owner_id bigint not null references users (id) on delete cascade,
+	member_id bigint not null references users (id) on delete cascade,
+	created_at timestamptz not null default now(),
+	primary key (owner_id, member_id)
+);
+create index if not exists circle_members_member_idx on circle_members (member_id);
+alter table posts add column if not exists circle_owner_id bigint references users (id) on delete cascade;
+create index if not exists posts_circle_owner_idx on posts (circle_owner_id) where circle_owner_id is not null;

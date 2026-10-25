@@ -64,6 +64,18 @@ export async function clientError(req: Request, viewer: Viewer): Promise<Respons
 // nothing about the server, so they're dropped as the client's own reporter does.
 export const ERROR_SCRIPT = `(function(){
 	var left=10,seen={},offline=/HTTP-0 codes:\\[1004\\]|Failed to fetch|Load failed|NetworkError when attempting to fetch|TypeError: network error/i,resizeLoop=/^ResizeObserver loop completed with undelivered notifications\\.?$/;
+	// a restricted account's refused action opens the page saying why; only
+	// right after a click or key, so a call the client makes on its own can't
+	// keep sending the account away from what it reads
+	var acted=0;
+	["pointerdown","keydown"].forEach(function(t){window.addEventListener(t,function(){acted=Date.now()},true)});
+	function refused(status,b){
+		if(status!==403||Date.now()-acted>5000||location.pathname==="/account/access")return;
+		if(b&&b.errors&&b.errors.some(function(e){return e&&e.code===326}))location.assign("/account/access");
+	}
+	function restricted(r){
+		if(r.status===403)r.clone().json().then(function(b){refused(r.status,b)}).catch(function(){});
+	}
 	function send(message,stack){
 		// Chromium reports this when it defers observer work to the next frame;
 		// it is a browser warning, not an uncaught application exception.
@@ -75,4 +87,10 @@ export const ERROR_SCRIPT = `(function(){
 	}
 	window.addEventListener("error",function(e){if(e.error||e.message)send(e.message,e.error&&e.error.stack)});
 	window.addEventListener("unhandledrejection",function(e){var r=e.reason;send(r&&r.message||String(r),r&&r.stack)});
+	var fetch0=window.fetch;
+	window.fetch=function(){var p=fetch0.apply(this,arguments);p.then(restricted,function(){});return p};
+	var open0=XMLHttpRequest.prototype.open;
+	XMLHttpRequest.prototype.open=function(){this.addEventListener("load",function(){
+		if(this.status===403)try{refused(this.status,JSON.parse(this.responseText))}catch(e){}
+	});return open0.apply(this,arguments)};
 })();`;

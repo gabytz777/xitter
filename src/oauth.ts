@@ -13,7 +13,7 @@ import { requestIp } from "./login-history";
 import { clientMetadata, metadataClientId } from "./oauth-metadata";
 import { passwordStep } from "./password-sign-in";
 import { hit, limitedResponse } from "./ratelimit";
-import { settings } from "./settings";
+import { feature, settings } from "./settings";
 import { loadLook, nightModeCookies } from "./themes/api";
 import { answerChallenge } from "./two-factor";
 
@@ -224,9 +224,10 @@ export async function oauthAuthorize(req: Request, url: URL, viewer: Viewer | un
 	}
 	const hidden = hiddenFields({ ...requestParams(request), csrf: viewer.csrf });
 	// what public-api.ts lets a token of this scope do; keep the two in step
-	const reads = ["Read posts, profiles, and timelines your account can see", "See who you follow and who follows you", "Search posts and people"];
+	const money = feature("money");
+	const reads = ["Read posts, profiles, and timelines your account can see", "See who you follow and who follows you", "Search posts and people", ...(money ? ["See your Equicoins balance and payments"] : [])];
 	const can = request.scope === "write"
-		? [...reads, "Post and delete posts as you", "Like, repost, bookmark, and follow as you", "Upload photos and videos"]
+		? [...reads, "Post and delete posts as you", "Like, repost, bookmark, and follow as you", "Upload photos and videos", ...(money ? ["Send and request Equicoins as you"] : [])]
 		: reads;
 	const cannot = ["See your password or email address", "Read your Direct Messages", "Change your account settings"];
 	const list = (items: string[], icon: string, cls: string) => `<ul class="perms ${cls}">${items.map((t) => `<li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${icon}"/></svg>${esc(t)}</li>`).join("")}</ul>`;

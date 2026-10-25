@@ -13,7 +13,7 @@ import { sql } from "./db";
 import { callOperation } from "./graphql";
 import { isId, newId } from "./ids";
 import { absolute, mediaUpload, mediaUrl, posterUrl } from "./media";
-import { type PostRow, badgeList, isOrganization, isVerified, verifiedSince } from "./model";
+import { type PostRow, badgeList, isOrganization, isVerified, shownVerifiedType, verifiedSince } from "./model";
 import { PostError, feed, getPost, likerIds, postsByIds, replies, type FeedItem } from "./posts";
 import { setProfileImage, updateProfileText } from "./rest";
 import { ReplyControlError } from "./reply-controls";
@@ -103,7 +103,7 @@ function userJson(u: User) {
 		website: u.website || null,
 		avatar_url: absolute(u.avatar_url),
 		banner_url: absolute(u.banner_url),
-		verified_type: u.verified_type,
+		verified_type: shownVerifiedType(u),
 		// what the web client shows, from the same rules (model.ts): a checkmark
 		// also for an organisation's affiliates, and its "Verified since" date
 		verified: isVerified(u),

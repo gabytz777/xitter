@@ -135,6 +135,17 @@ export function used(bucket: Bucket, who: string): boolean {
 	return !!w && w.reset > Date.now() && w.count >= limitOf(bucket);
 }
 
+// A password check takes a moment, so its try counts before it runs: checked
+// with `used` and counted only once found wrong, tries sent all at once got
+// past the limit together. A right password gives its try back.
+export function passwordTry(who: string): (() => void) | undefined {
+	if (!hit("password", who).ok) return undefined;
+	return () => {
+		const w = windows.get(`password:${who}`);
+		if (w && w.count > 0) w.count--;
+	};
+}
+
 export const limitHeaders = (h: Hit) => ({
 	"x-rate-limit-limit": String(h.limit),
 	"x-rate-limit-remaining": String(h.remaining),

@@ -191,5 +191,5 @@ export async function gifProxy(url: URL): Promise<Response> {
 	} finally {
 		await reader.cancel().catch(() => { });
 	}
-	return new Response(new Blob(chunks), { headers: { "content-type": type, "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff" } });
+	return new Response(new Uint8Array(Buffer.concat(chunks)), { headers: { "content-type": type, "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff" } });
 }

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Viewer } from "./auth";
 import { PUBLIC_ORIGIN } from "./config";
@@ -8,6 +8,9 @@ import { newId } from "./ids";
 
 const directory = join(process.env.MEDIA_DIR ?? "media", "chat");
 const maxBytes = Number(process.env.MAX_CHAT_MEDIA_MB ?? 200) * 1024 * 1024;
+const MAX_OPEN = 20;
+const MAX_OPEN_BYTES = 1024 ** 3;
+const DAY = 24 * 60 * 60_000;
 type Authorize = (viewerId: string, conversationId: string) => Promise<string[]>;
 
 export function chatMedia(authorize: Authorize, create: Authorize = authorize) {
@@ -17,6 +20,12 @@ export function chatMedia(authorize: Authorize, create: Authorize = authorize) {
 			if (!Number.isSafeInteger(size) || size <= 0 || size > maxBytes || vars.is_public)
 				return { data: { xchat_initialize_media_upload: { __typename: "InitializeMediaUploadError", upload_error: "InvalidRequest" } } };
 			await create(v.id, String(vars.conversation_id));
+			// what one account may hold unfinished: each upload reserves its disk
+			// until it is sealed or swept (sweepChatUploads)
+			const [open] = await sql`select count(*)::int as n, coalesce(sum(total_bytes), 0)::bigint as bytes from chat_uploads
+				where uploader_id = ${v.id}::bigint and not ready`;
+			if (open.n >= MAX_OPEN || Number(open.bytes) + size > Math.max(MAX_OPEN_BYTES, maxBytes))
+				return { data: { xchat_initialize_media_upload: { __typename: "InitializeMediaUploadError", upload_error: "InvalidRequest" } } };
 			const hash = randomBytes(24).toString("hex");
 			const resume = newId();
 			await mkdir(join(directory, hash), { recursive: true });
@@ -29,7 +38,10 @@ export function chatMedia(authorize: Authorize, create: Authorize = authorize) {
 		},
 		FinalizeXChatMediaUploadMutation: async (v: Viewer, vars: Record<string, any>) => {
 			await authorize(v.id, String(vars.conversation_id));
-			return sql.begin(async (tx) => {
+			// the parts go once the sealed file is committed (until then they are
+			// what a retried finalize reads)
+			const sealedParts: string[] = [];
+			const answer = await sql.begin(async (tx) => {
 				const [upload] = await tx`select * from chat_uploads where hash = ${String(vars.media_hash_key)} and uploader_id = ${v.id}::bigint
 					and conversation_id = ${String(vars.conversation_id)} and message_id = ${String(vars.message_id)} and resume_id::text = ${String(vars.resume_id)} for update`;
 				const count = Number(vars.num_parts);
@@ -55,11 +67,14 @@ export function chatMedia(authorize: Authorize, create: Authorize = authorize) {
 								}
 							} finally { await sink.end(); }
 							await tx`update chat_uploads set ready = true, expires_at = ${ttl === null ? null : new Date(Date.now() + ttl)} where hash = ${upload.hash}`;
+							for (let i = 0; i < count; i++) sealedParts.push(join(directory, upload.hash, `${i}.part`));
 						}
 					}
 				}
 				return { data: { xchat_finalize_media_upload: { __typename: "FinalizeMediaUploadResponse", upload_error: error } } };
 			});
+			await Promise.all(sealedParts.map((file) => rm(file, { force: true })));
+			return answer;
 		},
 	};
 	async function route(req: Request, viewer: Viewer | null, url: URL): Promise<Response> {
@@ -109,4 +124,20 @@ export function chatMedia(authorize: Authorize, create: Authorize = authorize) {
 		});
 	}
 	return { handlers, route };
+}
+
+// Uploads never finished within a day, ones past their message's time to live,
+// and folders whose row went with its account (chat_uploads cascades on users).
+// A folder is made just before its row, so only day-old strays are taken.
+export async function sweepChatUploads() {
+	const gone = await sql`delete from chat_uploads where (not ready and created_at < now() - interval '1 day') or expires_at < now() returning hash`;
+	for (const { hash } of gone) await rm(join(directory, hash), { recursive: true, force: true });
+	const folders = (await readdir(directory).catch(() => [] as string[])).filter((name) => /^[a-f0-9]{48}$/.test(name));
+	if (!folders.length) return;
+	const known = new Set((await sql`select hash from chat_uploads where hash = any(${sql.array(folders, "TEXT")})`).map((r: any) => r.hash as string));
+	for (const name of folders) {
+		if (known.has(name)) continue;
+		const made = await stat(join(directory, name)).then((s) => s.mtimeMs, () => Date.now());
+		if (made < Date.now() - DAY) await rm(join(directory, name), { recursive: true, force: true });
+	}
 }

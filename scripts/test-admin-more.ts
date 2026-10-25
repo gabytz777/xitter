@@ -104,6 +104,11 @@ try {
 	check(!(await (await fetch(`${origin}/admin/backups/${backup}`, { headers: { cookie: support.headers.cookie } })).text()).startsWith("PGDMP"), "support can't download");
 	check((await fetch(`${origin}/admin/backups/..%2F..%2F.env`, { headers: { cookie: admin.headers.cookie } })).status === 404, "only backup names");
 	check((await admin.admin("saveBackupSchedule", { daily: true, keep: 0 })).status === 400, "keep at least one");
+	check((await admin.admin("saveBackupSchedule", { daily: false, keep: 7, every_hours: 3 })).status === 400, "only the listed intervals");
+	check((await admin.admin("saveBackupSchedule", { daily: false, keep: 36, every_hours: 2 })).status === 200, "every two hours saves");
+	const schedule = (await admin.admin("backups")).data.schedule;
+	check(schedule.every_hours === 2 && schedule.keep === 36, "schedule kept");
+	await admin.admin("saveBackupSchedule", { daily: false, keep: 7, every_hours: 24 });
 	check((await admin.admin("deleteBackup", { name: backup })).status === 200, "backup deleted");
 	backup = undefined;
 

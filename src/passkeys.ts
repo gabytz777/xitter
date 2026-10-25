@@ -15,7 +15,7 @@ import { startSession, type Viewer } from "./auth";
 import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { requestIp } from "./login-history";
-import { hit, used } from "./ratelimit";
+import { hit, passwordTry } from "./ratelimit";
 import { settings } from "./settings";
 import { ALGORITHMS, b64url, challengeOf, unb64url, verifyAssertion, verifyRegistration } from "./webauthn";
 import { passwordOrStepUp, stepUpActive } from "./step-up";
@@ -253,12 +253,12 @@ export async function passkeysRoute(req: Request, url: URL, viewer: Viewer): Pro
 		const b = await body(req);
 		const password = typeof b.password === "string" ? b.password : "";
 		const account = viewer.screen_name.toLowerCase();
-		if (used("password", account)) return fail("Too many tries for this account. Wait 15 minutes.", 429);
+		const refund = passwordTry(account);
+		if (!refund) return fail("Too many tries for this account. Wait 15 minutes.", 429);
 		const [u] = await sql`select password_hash from users where id = ${viewer.id}::bigint`;
-		if (!(await passwordOrStepUp(viewer.id, password, u?.password_hash ?? null))) {
-			hit("password", account);
+		if (!(await passwordOrStepUp(viewer.id, password, u?.password_hash ?? null)))
 			return fail("That password isn't right, or the Discord confirmation ran out. Confirm again, or type the password.");
-		}
+		refund();
 		const keys = await sql`select id, transports from passkeys where user_id = ${viewer.id}::bigint`;
 		if (keys.length >= MAX_PASSKEYS) return fail(`You can have up to ${MAX_PASSKEYS} passkeys. Remove one first.`);
 		return Response.json(

@@ -3,12 +3,20 @@
 import { createHash, randomInt } from "node:crypto";
 import { accountPage, esc } from "./account-page";
 import { sql } from "./db";
-import { hit } from "./ratelimit";
+import { hit, passwordTry } from "./ratelimit";
 import { settings } from "./settings";
-import { newSecret, otpauthUrl, verifyCode } from "./totp";
+import { matchingStep, newSecret, otpauthUrl } from "./totp";
 import { startSession, type Session, type Viewer } from "./auth";
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+// ten from 31 letters and digits that can't be mistaken for each other (about
+// 49 bits; six digits were 20), shown as two groups of five
+const BACKUP_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+const backupCode = () => {
+	const s = Array.from({ length: 10 }, () => BACKUP_ALPHABET[randomInt(0, BACKUP_ALPHABET.length)]).join("");
+	return `${s.slice(0, 5)}-${s.slice(5)}`;
+};
 
 async function state(userId: string) {
 	const [u] = await sql`select totp_enabled, totp_pending, password_hash from users where id = ${userId}::bigint`;
@@ -19,9 +27,17 @@ async function state(userId: string) {
 export async function codeAccepted(userId: string, input: string): Promise<boolean> {
 	const [u] = await sql`select totp_secret from users where id = ${userId}::bigint and totp_enabled`;
 	if (!u?.totp_secret) return false;
-	if (verifyCode(u.totp_secret, input)) return true;
+	const step = matchingStep(u.totp_secret, input);
+	if (step !== undefined) {
+		// A code is good once: the step it came from is kept, and nothing from
+		// that step or before passes again, however long the drift window.
+		const spent = await sql`update users set totp_last_step = ${step} where id = ${userId}::bigint and totp_enabled
+			and (totp_last_step is null or totp_last_step < ${step}) returning id`;
+		return spent.length > 0;
+	}
+	// backup codes: ten letters and digits, or six digits for ones made before
 	const clean = input.replace(/[\s-]/g, "").toLowerCase();
-	if (!/^\d{6}$/.test(clean)) return false;
+	if (!/^(\d{6}|[a-z0-9]{10})$/.test(clean)) return false;
 	const hash = sha(clean);
 	// Remove only this code, and only if it is still present. Replacing a
 	// previously read array lets parallel requests reuse a code or restore one.
@@ -107,7 +123,8 @@ const setup = (req: Request, secret: string, viewer: Viewer, error = "") =>
 <div class="box code">${secret.replace(/(.{4})/g, "$1 ").trim()}</div>
 <p><a href="${esc(otpauthUrl(secret, viewer.screen_name, settings().instance_name))}">Open in my authenticator app</a></p>
 ${error ? `<p class="error">${esc(error)}</p>` : ""}
-<form method="post" action="/account/2fa/confirm"><input name="code" placeholder="6-digit code from the app" inputmode="numeric" autocomplete="one-time-code" required><button type="submit">Turn on</button></form>`,
+<form method="post" action="/account/2fa/confirm"><input type="password" name="password" placeholder="Your password" autocomplete="current-password" required>
+<input name="code" placeholder="6-digit code from the app" inputmode="numeric" autocomplete="one-time-code" required><button type="submit">Turn on</button></form>`,
 	);
 
 export async function twoFactorRoute(req: Request, url: URL, viewer: Viewer): Promise<Response> {
@@ -122,10 +139,18 @@ export async function twoFactorRoute(req: Request, url: URL, viewer: Viewer): Pr
 		return setup(req, secret, viewer);
 	}
 	if (req.method === "POST" && sub === "/confirm" && !u.totp_enabled && u.totp_pending) {
-		if (!verifyCode(u.totp_pending, field("code"))) return setup(req, u.totp_pending, viewer, "That code isn't right. Try the next one your app shows.");
-		const backups = Array.from({ length: 8 }, () => String(randomInt(0, 1_000_000)).padStart(6, "0"));
-		await sql`update users set totp_enabled = true, totp_secret = totp_pending, totp_pending = null,
-			totp_backup = ${JSON.stringify(backups.map(sha))}::text::jsonb where id = ${viewer.id}::bigint`;
+		// the password too: a session someone took mustn't lock the owner out
+		// behind an authenticator only the taker has
+		const refund = passwordTry(viewer.screen_name.toLowerCase());
+		if (!refund) return setup(req, u.totp_pending, viewer, "Too many tries for this account. Wait 15 minutes.");
+		if (!(await Bun.password.verify(field("password"), u.password_hash).catch(() => false))) return setup(req, u.totp_pending, viewer, "That password isn't right.");
+		refund();
+		const step = matchingStep(u.totp_pending, field("code"));
+		if (step === undefined) return setup(req, u.totp_pending, viewer, "That code isn't right. Try the next one your app shows.");
+		const backups = Array.from({ length: 8 }, backupCode);
+		// the code that turned it on is spent too
+		await sql`update users set totp_enabled = true, totp_secret = totp_pending, totp_pending = null, totp_last_step = ${step},
+			totp_backup = ${JSON.stringify(backups.map((b) => sha(b.replace("-", ""))))}::text::jsonb where id = ${viewer.id}::bigint`;
 		return page(
 			req,
 			viewer,
@@ -134,9 +159,12 @@ export async function twoFactorRoute(req: Request, url: URL, viewer: Viewer): Pr
 		);
 	}
 	if (req.method === "POST" && sub === "/disable" && u.totp_enabled) {
+		const refund = passwordTry(viewer.screen_name.toLowerCase());
+		if (!refund) return status(req, viewer, true, "Too many tries for this account. Wait 15 minutes.");
 		const ok = await Bun.password.verify(field("password"), u.password_hash).catch(() => false);
+		if (ok) refund();
 		if (!ok || !(await codeAccepted(viewer.id, field("code")))) return status(req, viewer, true, "The password or the code isn't right.");
-		await sql`update users set totp_enabled = false, totp_secret = null, totp_pending = null, totp_backup = '[]'::jsonb where id = ${viewer.id}::bigint`;
+		await sql`update users set totp_enabled = false, totp_secret = null, totp_pending = null, totp_last_step = null, totp_backup = '[]'::jsonb where id = ${viewer.id}::bigint`;
 		return status(req, viewer, false);
 	}
 	return status(req, viewer, u.totp_enabled);

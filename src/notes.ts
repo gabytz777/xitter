@@ -3,7 +3,7 @@ import { shownSource } from "./platforms";
 import { sql } from "./db";
 import { isId, newId } from "./ids";
 import { blockedFor, isBlockedEitherWay, outOfView, protectedFor } from "./blocks";
-import { staffViewer } from "./staff-access";
+import { isStaffRequest, staffViewer } from "./staff-access";
 import { getPost, postsByIds, PostError, refuseHate } from "./posts";
 import { noteText, tweetEntry, tweetResult } from "./model";
 import { feature } from "./settings";
@@ -153,7 +153,15 @@ export const noteHandlers = {
 	},
 	BirdwatchDeleteNote: async (v: Viewer, vars: any) => {
 		const note = await target(v, vars.note_id, true);
-		if (note.author_id !== v.id && !["admin", "moderator"].includes(v.role ?? "")) throw new PostError("You can't delete this note.", 144);
+		if (note.author_id !== v.id) {
+			// staff delete others' notes under the admin panel's rules: its gate, and
+			// not the notes of staff ranked at or above them
+			if (!["admin", "moderator"].includes(v.role ?? "") || !isStaffRequest()) throw new PostError("You can't delete this note.", 144);
+			const { guard } = await import("./admin");
+			await guard(v, note.author_id).catch(() => {
+				throw new PostError("You can't delete this note.", 144);
+			});
+		}
 		if (note.author_id !== v.id) await sql`insert into audit_log(id, actor_id, action, target, detail) values(${newId()}::bigint, ${v.id}::bigint, 'delete_community_note', ${note.id}, ${JSON.stringify({ post_id: note.post_id })}::text::jsonb)`;
 		await sql`delete from community_notes where id = ${note.id}::bigint`;
 		return { data: { birdwatchnote_delete: true } };

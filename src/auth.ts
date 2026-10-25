@@ -26,6 +26,8 @@ export type User = {
 	// the organisation this account is an affiliate of
 	// Settings > Discoverability: people with this email in their contacts may find the account
 	discoverable_by_email?: boolean;
+	// Settings > Post details (classic-detail.ts)
+	classic_post_details?: boolean;
 	// the translator globe: blue, gold (moderator) or yellow (approver)
 	translator?: "translator" | "moderator" | "approver" | null;
 	// when the badge was given ("Verified since")
@@ -85,6 +87,8 @@ export type Viewer = User & {
 
 export const SECURE = PUBLIC_ORIGIN.startsWith("https:") ? "; Secure" : "";
 const YEAR = 60 * 60 * 24 * 365;
+// a session unused this long is over, whatever its cookie's Max-Age says
+export const SESSION_IDLE_DAYS = 90;
 const randomHex = (bytes: number) => Buffer.from(crypto.getRandomValues(new Uint8Array(bytes))).toString("hex");
 
 export async function createUser(screenName: string, name: string, password: string): Promise<string> {
@@ -148,6 +152,10 @@ export async function logout(token: string) {
 			and not exists (select 1 from sessions x where x.user_id = users.id and x.superadmin and x.expires_at > now())`;
 }
 
+export async function expireSessions() {
+	await sql`delete from sessions where last_seen_at < now() - make_interval(days => ${SESSION_IDLE_DAYS})`;
+}
+
 export function parseCookies(req: Request): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const part of (req.headers.get("cookie") ?? "").split(/;\s*/)) {
@@ -161,6 +169,7 @@ import { requestCountry } from "./login-history";
 
 const viewerCols = () => sql`u.id, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.pronouns, u.status, u.role, u.protected, u.language, u.country, u.created_at, u.instance,
 	u.preferences->>'discoverable_by_email' = 'true' as discoverable_by_email,
+	u.preferences->>'classic_post_details' = 'true' as classic_post_details,
 	(select coalesce(json_agg(json_build_object('id', b.id::text, 'name', b.name) order by ub.position, b.name), '[]')
 		from user_badges ub join custom_badges b on b.id = ub.badge_id where ub.user_id = u.id) as badges`;
 
@@ -180,6 +189,7 @@ async function loadViewer(req: Request): Promise<Viewer | undefined> {
 	const [row] = await sql`select ${viewerCols()}, s.csrf, s.token, s.superadmin
 		from sessions s join users u on u.id = s.user_id
 		where s.token = ${token} and u.status <> 'suspended' and (s.expires_at is null or s.expires_at > now())
+			and s.last_seen_at > now() - make_interval(days => ${SESSION_IDLE_DAYS})
 			and (u.instance is null or (s.superadmin and s.expires_at is not null))`;
 	// for the admin panel's session list; written at most once a minute, and a
 	// session this server touched within the minute isn't asked again

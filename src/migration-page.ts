@@ -9,7 +9,7 @@ import { sql } from "./db";
 import { INSTANCE_ID } from "./federation";
 import { type Check, type Finding, MigrationError, check, jobs, start } from "./migration-import";
 import { codeState, createCode, revokeCodes, versionInfo } from "./migration";
-import { hit, used } from "./ratelimit";
+import { hit, passwordTry } from "./ratelimit";
 import { passwordOrStepUp, stepUpActive } from "./step-up";
 
 const CSS = `
@@ -181,12 +181,12 @@ export async function migrateRoute(req: Request, viewer: Viewer): Promise<Respon
 	const action = field("action");
 	if (action === "code") {
 		const account = viewer.screen_name.toLowerCase();
-		if (used("password", account)) return home(req, viewer, { error: "Too many tries. Wait 15 minutes.", status: 429 });
+		const refund = passwordTry(account);
+		if (!refund) return home(req, viewer, { error: "Too many tries. Wait 15 minutes.", status: 429 });
 		const [u] = await sql`select password_hash from users where id = ${viewer.id}::bigint`;
-		if (!u || !(await passwordOrStepUp(viewer.id, field("password"), u.password_hash))) {
-			hit("password", account);
+		if (!u || !(await passwordOrStepUp(viewer.id, field("password"), u.password_hash)))
 			return home(req, viewer, { error: "That password isn't right, or the Discord confirmation ran out. Confirm again, or type the password.", status: 400 });
-		}
+		refund();
 		return home(req, viewer, { code: await createCode(viewer.id) });
 	}
 	if (action === "revoke") {

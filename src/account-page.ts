@@ -91,12 +91,6 @@ body{margin:0;background:var(--bg);color:var(--text);font:15px/20px var(--font, 
 .heading{min-width:0}
 .title{font-size:20px;line-height:24px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sub{color:var(--muted);font-size:13px;line-height:16px}
-/* the tabs wrap onto more rows rather than hide past the edge */
-.tabs{display:flex;flex-wrap:wrap;border-bottom:1px solid var(--border)}
-.tabs a{flex:1 0 auto;display:flex;justify-content:center;padding:0 16px;color:var(--muted);font-weight:500;text-decoration:none}
-.tabs span{position:relative;display:block;padding:16px 0;white-space:nowrap}
-.tabs a[aria-current]{color:var(--text);font-weight:700}
-.tabs a[aria-current] span::after{content:"";position:absolute;left:0;right:0;bottom:0;height:4px;border-radius:9999px;background:var(--accent-fill,var(--accent))}
 main{flex:1;padding:16px;display:flex;flex-direction:column;gap:12px}
 h1,h2,p,pre{margin:0}
 h1{font-size:23px;line-height:28px;font-weight:800;text-wrap:balance}
@@ -124,12 +118,12 @@ button.danger{background:var(--danger);color:#fff}
 button.small{min-height:32px;padding:0 14px;font-size:14px}
 button:disabled{opacity:.5;cursor:default}
 @media (hover:hover){
-.back:hover,.tabs a:hover{background:var(--hover)}
+.back:hover{background:var(--hover)}
 button:hover:not(:disabled){background:var(--accent-hover)}
 button.secondary:hover:not(:disabled){background:var(--hover)}
 button.danger:hover:not(:disabled){background:rgb(220 30 41)}
 a:hover{text-decoration:underline}
-.back:hover,.tabs a:hover{text-decoration:none}
+.back:hover{text-decoration:none}
 }
 .card{border:1px solid var(--border);border-radius:16px;padding:12px 16px;display:grid;gap:4px}
 .card p{white-space:pre-wrap}
@@ -148,12 +142,12 @@ pre{background:var(--surface);border-radius:12px;padding:12px 16px;overflow-x:au
 [hidden]{display:none!important}
 .source{padding:16px;border-top:1px solid var(--border);color:var(--muted);font-size:13px}
 @media (max-width:600px){.col{border-inline:0}}
-/* inside the client's Settings (tidy.ts): its own list replaces the tabs, and
-   the frame grows with the page, so nothing may size itself to the frame */
+/* inside the client's Settings (tidy.ts): the frame grows with the page,
+   so nothing may size itself to the frame */
 html[data-in-settings],html[data-in-settings] body{overflow:hidden}
 html[data-in-settings] .col{min-height:0;width:100%;border-inline:0}
 html[data-in-settings] .bar{position:static}
-html[data-in-settings] .tabs,html[data-in-settings] .source{display:none}
+html[data-in-settings] .source{display:none}
 `;
 
 // Runs in the frame: our own pages stay in it, the client's pages open in the
@@ -169,7 +163,12 @@ const FRAMED = `(function(){
 		if(u.origin!==location.origin){e.preventDefault();window.open(u.href,"_blank","noopener");return}
 		if(u.pathname.indexOf("/account/")===0&&!a.hasAttribute("data-home"))return;
 		e.preventDefault();
-		var to=a.hasAttribute("data-home")?"/settings/account":u.pathname+u.search+u.hash;
+		var index=location.pathname==="/account/"||location.pathname==="/account";
+		// back from one of our pages opens the Xitter settings list in this frame:
+		// moving the client to /settings/xitter alone leaves it on the same
+		// not-found screen, which doesn't redraw, so the frame would stay put
+		if(a.hasAttribute("data-home")&&!index){location.assign("/account/");return}
+		var to=a.hasAttribute("data-home")?"/settings":u.pathname+u.search+u.hash;
 		try{parent.__xitterGo(to)}catch(err){top.location.assign(to)}
 	});
 })();`;
@@ -204,15 +203,7 @@ export async function accountPage({ req, title, body, viewer, status = 200, back
 		extra = look?.kind === "painted" ? `:root[data-theme]{${accountVars(look.theme)}}` : `:root{${accentVars(prefs.accent)}}`;
 	}
 	const theme = paletteOf(look, night);
-	const path = new URL(req.url).pathname;
-	// the admin panel is in the menu, but isn't one of these pages
-	const links = viewer ? (await menuLinks(viewer.id)).filter((l) => l.href.startsWith("/account/")) : [];
-	const tabs = links.length
-		? `<nav class="tabs" aria-label="Account pages">${links
-				.map((l) => `<a href="${l.href}"${path === l.href || path.startsWith(`${l.href}/`) ? ' aria-current="page"' : ""}><span>${esc(l.text)}</span></a>`)
-				.join("")}</nav>`
-		: "";
-	const to = back ?? { href: viewer ? "/home" : "/", label: `Back to ${name}` };
+	const to = back ?? (viewer ? { href: "/settings/xitter", label: "Back to Xitter settings" } : { href: "/", label: `Back to ${name}` });
 	const html = `<!doctype html>
 <html lang="en"${theme ? ` data-theme="${theme}"` : ""}>
 <head>
@@ -228,7 +219,6 @@ ${head}
 <body>
 <div class="col">
 <header class="bar"><a class="back" href="${esc(to.href)}"${back ? "" : " data-home"} aria-label="${esc(to.label)}" title="${esc(to.label)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ARROW}"/></svg></a><div class="heading"><div class="title">${esc(title)}</div><div class="sub">${esc(name)}</div></div></header>
-${tabs}
 <main>
 ${body}
 </main>
@@ -243,4 +233,24 @@ ${body}
 	if (referrer) headers.set("referrer-policy", referrer);
 	if (viewer) for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
 	return new Response(html, { status, headers });
+}
+
+// /account/ (Settings > Xitter settings): every page of ours in one list
+export async function accountIndexRoute(req: Request, viewer: Viewer): Promise<Response> {
+	const name = settings().instance_name;
+	const links = (await menuLinks(viewer.id)).filter((l) => l.href.startsWith("/account/") && l.where !== "tabs" && l.where !== "nav");
+	const CHEVRON = "M14.586 12L7.543 4.96l1.414-1.42L17.414 12l-8.457 8.46-1.414-1.42 7.043-7.04z";
+	const rows = links
+		.map(
+			(l) =>
+				`<li><a href="${esc(l.href)}"><svg class="ico" viewBox="${l.viewBox ?? "0 0 24 24"}" aria-hidden="true"><path d="${l.icon}"/></svg><span class="txt"><span class="t">${esc(l.text)}</span><span class="d">${esc(l.description)}</span></span><svg class="go" viewBox="0 0 24 24" aria-hidden="true"><path d="${CHEVRON}"/></svg></a></li>`,
+		)
+		.join("");
+	return accountPage({
+		req,
+		viewer,
+		title: "Xitter settings",
+		css: `html[data-in-settings] .back{display:none}.index{list-style:none;margin:-16px;padding:0}.index a{display:flex;align-items:center;gap:12px;padding:12px 16px;color:var(--text);text-decoration:none}.index .ico{width:24px;height:24px;flex:none;fill:var(--muted)}.index .txt{flex:1;min-width:0;display:flex;flex-direction:column}.index .t{font-size:15px;line-height:20px}.index .d{font-size:13px;line-height:16px;color:var(--muted)}.index .go{width:20px;height:20px;flex:none;fill:var(--muted)}@media (hover:hover){.index a:hover{background:var(--hover)}}`,
+		body: `<ul class="index">${rows}</ul>`,
+	});
 }

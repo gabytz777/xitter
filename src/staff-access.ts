@@ -8,6 +8,7 @@ import type { Viewer } from "./auth";
 import { sql } from "./db";
 import { requestIp } from "./login-history";
 import { settings } from "./settings";
+import { allows } from "./staff-permissions";
 
 // "::ffff:10.0.0.1" is how an IPv4 client shows on a dual-stack socket
 export const clientIp = (req: Request) => requestIp(req)?.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, "") ?? null;
@@ -44,7 +45,7 @@ export async function staffGate(req: Request, viewer: Viewer): Promise<string | 
 	return null;
 }
 
-const staffRequest = new AsyncLocalStorage<{ staff: boolean; language?: string }>();
+const staffRequest = new AsyncLocalStorage<{ staff: boolean; language?: string; suspended?: string }>();
 
 export const asRequest = <T>(run: () => T) => staffRequest.run({ staff: false }, run);
 
@@ -59,6 +60,19 @@ export const markStaff = () => {
 	const request = staffRequest.getStore();
 	if (request) request.staff = true;
 };
+
+// whether this request passed staffGate (the admin panel's address and 2FA rules)
+export const isStaffRequest = () => !!staffRequest.getStore()?.staff;
+
+// Staff with the suspended_profiles permission open a suspended account's
+// profile in the app. For the rest of that request, that one account's posts
+// aren't left out (blocks.ts); everywhere else it stays gone.
+export const seesSuspended = (viewer: { role?: string | null }) => !!staffRequest.getStore()?.staff && allows(viewer.role, "suspended_profiles");
+export const revealSuspended = (viewer: { role?: string | null }, userId: string) => {
+	const request = staffRequest.getStore();
+	if (request && seesSuspended(viewer)) request.suspended = userId;
+};
+export const revealedSuspended = () => staffRequest.getStore()?.suspended;
 
 export const staffViewer = (viewerId: string) =>
 	staffRequest.getStore()?.staff ? sql`exists (select 1 from users staff where staff.id = ${viewerId}::bigint and staff.role is not null)` : sql`false`;

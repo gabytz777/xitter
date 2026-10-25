@@ -44,10 +44,14 @@ try {
 	const start = await (await post("/start")).text();
 	const secret = /<div class="box code">([A-Z2-7 ]+)<\/div>/.exec(start)?.[1].replace(/ /g, "");
 	check("set-up shows a key", !!secret && secret.length === 32, secret);
-	const step0 = Math.floor(Date.now() / 30000);
-	check("a wrong code doesn't turn it on", (await (await post("/confirm", { code: "000000" })).text()).includes("isn't right"));
-	const confirmed = await (await post("/confirm", { code: codeAt(secret!, step0) })).text();
-	const backups = [...confirmed.matchAll(/(\d{6})<br>|(\d{6})<\/div>/g)].map((m) => m[1] ?? m[2]);
+	// a code is spent once used and nothing from its step or before passes
+	// again, so the test walks the drift window: the step before now turns it
+	// on, now signs in, the step after turns it off
+	const now = () => Math.floor(Date.now() / 30000);
+	check("a wrong code doesn't turn it on", (await (await post("/confirm", { password: "testpass123", code: "000000" })).text()).includes("isn't right"));
+	check("nor does the right code without the password", !(await (await post("/confirm", { password: "wrong", code: codeAt(secret!, now() - 1) })).text()).includes("Two-factor is on"));
+	const confirmed = await (await post("/confirm", { password: "testpass123", code: codeAt(secret!, now() - 1) })).text();
+	const backups = [...confirmed.matchAll(/([a-z2-9]{5}-[a-z2-9]{5})(?:<br>|<\/div>)/g)].map((m) => m[1]);
 	check("the right code turns it on and shows 8 backup codes", confirmed.includes("Two-factor is on") && backups.length === 8, backups.length);
 
 	check("the old /login no longer works for it", !(await fetch(`${origin}/login`, { method: "POST", body: new URLSearchParams({ username: name, password: "testpass123" }), redirect: "manual" })).headers.getSetCookie().some((c) => c.startsWith("ct0=")));
@@ -57,8 +61,12 @@ try {
 	const token = s.fields.session_token;
 	s = await step("finish_verification", { session_token: token, code: "123456" });
 	check("a wrong code is refused under its field", /isn't right/.test(s.errors.code ?? ""), s.errors);
-	s = await step("finish_verification", { session_token: token, code: codeAt(secret!, Math.floor(Date.now() / 30000)) });
+	const used = codeAt(secret!, now());
+	s = await step("finish_verification", { session_token: token, code: used });
 	check("the right code signs in", s.cookies.some((c) => c.startsWith("auth_token=")));
+	s = await step("login_enter_password", { username: name, password: "testpass123" });
+	s = await step("finish_verification", { session_token: s.fields.session_token, code: used });
+	check("and not a second time", !s.cookies.some((c) => c.startsWith("auth_token=")));
 
 	s = await step("login_enter_password", { username: name, password: "testpass123" });
 	s = await step("finish_verification", { session_token: s.fields.session_token, code: backups[0] });
@@ -70,7 +78,7 @@ try {
 	s = await step("login_enter_password", { username: name, password: "wrong" });
 	check("a wrong password never gets to the code", /Wrong/.test(s.errors.password ?? ""));
 
-	const off = await (await post("/disable", { password: "testpass123", code: codeAt(secret!, Math.floor(Date.now() / 30000)) })).text();
+	const off = await (await post("/disable", { password: "testpass123", code: codeAt(secret!, now() + 1) })).text();
 	check("turning it off needs the password and a code", off.includes("Set up an authenticator app"));
 	s = await step("login_enter_password", { username: name, password: "testpass123" });
 	check("then the password is enough again", s.cookies.some((c) => c.startsWith("auth_token=")));

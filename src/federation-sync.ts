@@ -112,7 +112,7 @@ async function renderMedia(id: string | undefined) {
 const publicPost = (id: string) =>
 	sql`select p.id::text, p.user_id::text, p.text, p.source, p.created_at, p.reply_to_id::text, p.quote_id::text, p.sensitive and not u.never_sensitive as sensitive, p.edited_at from posts p join users u on u.id = p.user_id
 		where p.id = ${id}::bigint and u.instance is null and not u.protected and u.status not in ('suspended', 'limited') and u.deactivated_at is null
-			and not p.hidden and p.community_id is null and p.article_id is null
+			and not p.hidden and p.community_id is null and p.article_id is null and p.circle_owner_id is null
 			and not exists (select 1 from posts pp join users pu on pu.id = pp.user_id where pp.id = p.reply_to_id and pu.instance is null
 				and (pu.protected or pu.status in ('suspended', 'limited') or pu.deactivated_at is not null or pp.hidden or pp.community_id is not null or pp.article_id is not null))`;
 
@@ -275,7 +275,8 @@ async function resolvePost(value: unknown, depth = 0): Promise<string | undefine
 async function remoteMedia(instance: string, owner: string, m: any, post: string | null, position: number | null): Promise<string | undefined> {
 	if (!m || typeof m.id !== "string" || !/^\d{1,19}$/.test(m.id)) return undefined;
 	const kind = ["photo", "video", "animated_gif"].includes(m.kind) ? m.kind : "photo";
-	const mime = typeof m.mime === "string" && /^(image|video)\/[\w.+-]{1,40}$/.test(m.mime) ? m.mime : "application/octet-stream";
+	// what an upload here can be; a peer's image/svg+xml would run script on this origin
+	const mime = typeof m.mime === "string" && /^(image\/(png|jpeg|gif|webp)|video\/mp4)$/.test(m.mime) ? m.mime : "application/octet-stream";
 	const width = Number.isInteger(m.width) ? Math.min(Math.max(m.width, 1), 20_000) : 1;
 	const height = Number.isInteger(m.height) ? Math.min(Math.max(m.height, 1), 20_000) : 1;
 	const alt = typeof m.alt_text === "string" ? m.alt_text.slice(0, 1000) : null;
@@ -378,7 +379,8 @@ async function applyPost(instance: string, p: any, depth = 0): Promise<string | 
 		if (old && (!old.reply_to_id || orphaned) && p.reply_to) {
 			const replyTo = await resolvePost(p.reply_to, depth);
 			const [parent] = replyTo ? await sql`select conversation_id::text, user_id::text from posts where id = ${replyTo}::bigint` : [];
-			if (parent && !(await blockedBetween(author, parent.user_id)))
+			// the same checks as a new reply: an orphan sent first mustn't get past who may reply
+			if (parent && !(await blockedBetween(author, parent.user_id)) && !(await replyLimited(parent.conversation_id, author)))
 				await sql`update posts set reply_to_id = ${replyTo}::bigint, reply_to_user_id = ${parent.user_id}::bigint, conversation_id = ${parent.conversation_id}::bigint where id = ${local}::bigint`;
 		}
 		await saveMentions(local, text, instance, lookupRemoteUser);

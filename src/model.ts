@@ -16,7 +16,7 @@ import { type MediaRow, absolute, mediaEntity, mediaUrl, posterUrl } from "./med
 import { placeById } from "./places";
 import { shownSource } from "./platforms";
 import { requestLanguage } from "./staff-access";
-import { settings } from "./settings";
+import { feature, settings } from "./settings";
 import { SHORT_POST, previewOf, weightedLength } from "./textlen";
 import { badgeUrl } from "./users";
 
@@ -24,7 +24,9 @@ import { badgeUrl } from "./users";
 export function noteText(text: string) {
 	const entities = [...text.matchAll(/https?:\/\/[^\s<>"']+/g)].map((m) => {
 		const url = m[0].replace(/[.,;!?]+$/, "");
-		return { fromIndex: m.index!, toIndex: m.index! + url.length, ref: { type: "TimelineUrl", url, expandedUrl: url, urlType: "ExternalUrl" } };
+		// indices count code points, as in notification messages
+		const at = [...text.slice(0, m.index)].length;
+		return { fromIndex: at, toIndex: at + [...url].length, ref: { type: "TimelineUrl", url, expandedUrl: url, urlType: "ExternalUrl" } };
 	});
 	return { text, entities };
 }
@@ -43,9 +45,16 @@ export function apiDate(d: Date): string {
 
 const globalId = (kind: string, id: string) => Buffer.from(`${kind}:${id}`).toString("base64");
 
+// An account from another instance wears the badge that instance gave it,
+// unless this instance stopped showing those (Admin > Federation).
+export const remoteCheckHidden = (u: { instance?: string | null }) => !!u.instance && !settings().remote_checkmarks;
+export const shownVerifiedType = (u: User) => (remoteCheckHidden(u) ? null : u.verified_type);
+
 // Affiliates of an organisation wear X's checkmark next to the organisation's
-// badge, as on X, even without a badge of their own.
-export const isVerified = (u: User) => u.verified_type !== null || !!u.org;
+// badge, as on X, even without a badge of their own, unless the instance
+// switched that off (Settings: affiliate_checkmarks).
+export const affiliateChecked = (u: User) => !!u.org && feature("affiliate_checkmarks");
+export const isVerified = (u: User) => !remoteCheckHidden(u) && (u.verified_type !== null || affiliateChecked(u));
 // a business or government badge: what makes an account an organisation on
 // its own, and gives it a square picture
 export const hasOrgBadge = (u: User) => u.verified_type === "business" || u.verified_type === "government";
@@ -53,7 +62,7 @@ export const hasOrgBadge = (u: User) => u.verified_type === "business" || u.veri
 // (isOrganizationSql in users.ts is the same rule in SQL)
 export const isOrganization = (u: User) => hasOrgBadge(u) || !!u.affiliates;
 // "Verified since": an affiliate's date of joining its organisation, else when the badge was given
-export const verifiedSince = (u: User): Date | null => (u.org?.since ? new Date(u.org.since) : u.verified_at ? new Date(u.verified_at) : null);
+export const verifiedSince = (u: User): Date | null => (affiliateChecked(u) && u.org?.since ? new Date(u.org.since) : u.verified_at ? new Date(u.verified_at) : null);
 
 // X has two globes: "badged" (blue) and "moderator" (yellow). Approvers get the
 // yellow one; translator moderators the same, which badges.ts colours gold.
@@ -68,13 +77,14 @@ export const pictureShape = (u: User) => (hasOrgBadge(u) ? "Square" : "Circle");
 function verificationInfo(u: User) {
 	if (!isVerified(u)) return { is_identity_verified: false };
 	const instance = settings().instance_name;
-	const parts: (string | { text: string; url: string })[] = u.org
+	const type = shownVerifiedType(u);
+	const parts: (string | { text: string; url: string })[] = u.org && affiliateChecked(u)
 		? ["This account is Premium because it’s an affiliate of ", { text: `@${u.org.screen_name}`, url: `${PUBLIC_ORIGIN}/${u.org.screen_name}` }, ` on ${instance}. `]
-		: u.verified_type === "business"
+		: type === "business"
 			? [`This account is verified because it’s an organisation on ${instance}. `]
-			: u.verified_type === "government"
+			: type === "government"
 				? [`This account is verified because it is a government or multilateral organization account on ${instance}. `]
-				: u.verified_type === "government_individual"
+				: type === "government_individual"
 					? [`This account is verified because it belongs to a government or multilateral organization official on ${instance}. `]
 				: [`This account is Premium because the ${instance} team verified it. `];
 	parts.push({ text: "Learn more", url: `${PUBLIC_ORIGIN}/rules` });
@@ -97,8 +107,9 @@ function verificationInfo(u: User) {
 }
 
 function verification(u: User) {
-	if (u.verified_type === "business") return { verified: false, verified_type: "Business" };
-	if (u.verified_type === "government" || u.verified_type === "government_individual") return { verified: false, verified_type: "Government" };
+	const type = shownVerifiedType(u);
+	if (type === "business") return { verified: false, verified_type: "Business" };
+	if (type === "government" || type === "government_individual") return { verified: false, verified_type: "Government" };
 	return { verified: false };
 }
 
@@ -318,8 +329,8 @@ export function legacyUser(u: User) {
 		url: u.website ?? "",
 		pinned_tweet_ids_str: u.pinned_post_id ? [u.pinned_post_id] : [],
 		is_blue_verified: isVerified(u),
-		...(u.verified_type === "business" ? { verified_type: "Business" } : {}),
-		...(u.verified_type === "government" || u.verified_type === "government_individual" ? { verified_type: "Government" } : {}),
+		...(shownVerifiedType(u) === "business" ? { verified_type: "Business" } : {}),
+		...(shownVerifiedType(u) === "government" || shownVerifiedType(u) === "government_individual" ? { verified_type: "Government" } : {}),
 		super_follow_eligible: false,
 		super_followed_by: false,
 		super_following: false,
@@ -376,6 +387,8 @@ export type PostRow = {
 	media?: MediaRow[];
 	article_id?: string | null;
 	community_id?: string | null;
+	// the Circle a post is in (circles.ts)
+	circle_owner?: { id: string; screen_name: string } | null;
 	poll_id?: string | null;
 	place_id?: string | null;
 	edit_count?: number;
@@ -599,6 +612,20 @@ function plainTweet(p: PostRow, withTypename: boolean): Record<string, unknown> 
 			user_id_str: p.author.id,
 		},
 		rest_id: p.id,
+		// "Only people in @owner's Circle can see this post"; the client reads the owner's handle
+		...(p.circle_owner
+			? {
+					trusted_friends_info_result: {
+						__typename: "ApiTrustedFriendsInfo",
+						owner_results: {
+							result:
+								p.circle_owner.id === p.author.id
+									? userResult(p.author)
+									: { __typename: "User", id: globalId("User", p.circle_owner.id), rest_id: p.circle_owner.id, core: { screen_name: p.circle_owner.screen_name, name: p.circle_owner.screen_name }, legacy: { screen_name: p.circle_owner.screen_name, name: p.circle_owner.screen_name } },
+						},
+					},
+				}
+			: {}),
 		unmention_data: {},
 		unmention_info: {},
 		views: p.view_count ? { count: String(p.view_count), state: "EnabledWithCount" } : { state: "Enabled" },

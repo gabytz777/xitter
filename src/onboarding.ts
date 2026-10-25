@@ -333,7 +333,8 @@ export async function onboarding(req: Request, path: string): Promise<Response |
 				return respond(fieldError(fieldOf(e), e.message));
 			}
 			const held = { ...checked, ip: given.ip, passwordHash: await Bun.password.hash(given.password), source: await platformSource(req), country: requestCountry(req) ?? null };
-			await sql`update signup_sessions set pending = ${JSON.stringify(held)}::text::jsonb where token = ${token}::uuid`;
+			// a code sent for an earlier address mustn't confirm this one
+			await sql`update signup_sessions set pending = ${JSON.stringify(held)}::text::jsonb, email_code_hash = null where token = ${token}::uuid`;
 			if (!hit("mail", requestIp(req) ?? "unknown").ok) return respond(fieldError("email", "Too many codes sent from here. Wait an hour."));
 			try {
 				await sendSignupCode(token, checked.email);

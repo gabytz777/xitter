@@ -4,7 +4,7 @@
 import { recordSignIn } from "./login-history";
 import { login, sessionCookies } from "./auth";
 import { loadLook, nightModeCookies } from "./themes/api";
-import { hit, used } from "./ratelimit";
+import { passwordTry } from "./ratelimit";
 import { settings } from "./settings";
 
 export const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -70,12 +70,11 @@ export async function handleLogin(req: Request): Promise<Response> {
 	const username = (f.username ?? "").replace(/^@/, "").trim();
 	const password = f.password ?? "";
 	const account = username.toLowerCase();
-	if (username && used("password", account)) return new Response("Too many tries for this account. Wait 15 minutes.", { status: 429 });
+	const refund = username ? passwordTry(account) : () => {};
+	if (!refund) return new Response("Too many tries for this account. Wait 15 minutes.", { status: 429 });
 	const session = username && password ? await login(username, password) : undefined;
-	if (!session) {
-		if (username) hit("password", account);
-		return new Response("Wrong username or password.", { status: 401 });
-	}
+	if (!session) return new Response("Wrong username or password.", { status: 401 });
+	refund();
 	await recordSignIn(req, session);
 	return signedIn(session);
 }

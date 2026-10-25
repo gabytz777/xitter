@@ -28,7 +28,8 @@ import { isBlockedEitherWay, blockedIds, blockedFor, outOfView, protectedFor } f
 import { feature, settings } from "./settings";
 import { freshAsOf, rankedFeed } from "./ranking";
 import * as articles from "./articles";
-import type { Viewer } from "./auth";
+import type { User, Viewer } from "./auth";
+import { revealSuspended, seesSuspended } from "./staff-access";
 import { notificationsTimeline, unreadCount } from "./notifications";
 import { cachedTrends, searchPosts, searchUsers } from "./search";
 import { isId, newId } from "./ids";
@@ -83,6 +84,11 @@ const SUSPENDED_USER = {
 	unavailable_header: richText("Account suspended"),
 	unavailable_message: richText("This account broke the rules of this instance and was suspended."),
 };
+// what a suspended account's profile shows: to staff allowed to open it
+// (staff-permissions.ts suspended_profiles), the profile with a Suspended label
+// in the slot by the name; to everyone else, the suspended screen
+const suspendedUser = (viewer: Viewer, user: User) =>
+	seesSuspended(viewer) ? userResult({ ...user, automated_by: null, parody_label: "None", label: { text: "Suspended", badge_id: null, url: null } }) : SUSPENDED_USER;
 
 const PARODY_LABELS = new Set(["None", "Parody", "Commentary", "Fan"]);
 // the client's confirm dialog says a change locks the label for 48 hours
@@ -174,13 +180,15 @@ const forYou: Handler = async (viewer, vars) => {
 	// sort indexes run down from asOf in ranked order, below anything newer,
 	// two apart so a boosted post fits between two of them
 	const base = BigInt(asOf);
-	const topics = await topicsForPosts(viewer.id, page.items.filter((i) => !i.repost).map((i) => ({ id: i.post.id, authorId: i.post.author.id })));
+	const [topics, boosted] = await Promise.all([
+		topicsForPosts(viewer.id, page.items.filter((i) => !i.repost).map((i) => ({ id: i.post.id, authorId: i.post.author.id }))),
+		page.items.length > 2 ? boostedPost(viewer, page.items.map((i) => i.post.id)) : undefined,
+	]);
 	const feedbackActions = [...new Map([...topics.values()].map((t) => [t.id, t])).values()].flatMap(topicFeedbackActions);
 	const entries: unknown[] = page.items.map((item, i) => {
 		const topic = item.repost ? undefined : topics.get(item.post.id);
 		return feedEntry(item, (base - 2n * BigInt(offset + i) - 2n).toString(), topic && { context: topicContext(topic), feedbackKeys: topicFeedbackKeys(topic) });
 	});
-	const boosted = page.items.length > 2 ? await boostedPost(viewer, page.items.map((i) => i.post.id)) : undefined;
 	if (boosted) entries.splice(2, 0, promotedEntry(boosted, (base - 2n * BigInt(offset + 2) - 1n).toString()));
 	if (!ranked) entries.unshift(cursorEntry("Top", `t${asOf}`, inc(asOf)));
 	if (page.next !== undefined) entries.push(cursorEntry("Bottom", `r${page.next}.${asOf}`, (base - 2n * BigInt(page.next) - 1n).toString()));
@@ -226,11 +234,11 @@ const tweetDetail: Handler = async (viewer, vars) => {
 	const cursor = typeof vars.cursor === "string" ? vars.cursor : "";
 	const entries: unknown[] = [];
 	const feedbackActions: unknown[] = [];
-	const focal = await getPost(viewer.id, id);
+	const [focal, below] = await Promise.all([getPost(viewer.id, id), repliesBelow(viewer.id, id)]);
 	if (!focal) throw new PostError("No status found with that ID.", 144);
 	const pinned = focal.reply_to_id ? null : await pinnedReplyOf(id);
 	const canPin = !focal.reply_to_id && focal.author.id === viewer.id;
-	const { roots, thread } = conversationThreads(focal, await repliesBelow(viewer.id, id), pinned);
+	const { roots, thread } = conversationThreads(focal, below, pinned);
 	const labelled = (it: Placed): ThreadItem =>
 		it.parent ? it : { ...it, pinned: it.post.id === pinned, ...(canPin ? { feedbackKey: it.post.id === pinned ? PIN_KEYS.Pinned : PIN_KEYS.Pinnable } : {}) };
 	const threadsPage = async (offset: number, start: bigint) => {
@@ -372,7 +380,7 @@ const createTweet: Handler = async (viewer, vars) => {
 		return { data: { create_tweet: { tweet_results: { result: tweetResult((await getPost(viewer.id, previous))!, false) } } } };
 	}
 	if (replyTo !== undefined && !isId(replyTo)) throw new PostError("Invalid post id.", 144);
-	id = await createPost(viewer.id, text, { replyToId: replyTo, quoteId, source: viewer.postSource, communityId, placeId: placeById(vars.geo?.place_id) ? vars.geo.place_id : undefined, replyPolicy: vars.conversation_control?.mode, replySelections: vars.conversation_control?.allowed_country_codes });
+	id = await createPost(viewer.id, text, { replyToId: replyTo, quoteId, source: viewer.postSource, communityId, placeId: placeById(vars.geo?.place_id) ? vars.geo.place_id : undefined, replyPolicy: vars.conversation_control?.mode, replySelections: vars.conversation_control?.allowed_country_codes, circle: !!vars.exclusive_tweet_control_options && typeof vars.exclusive_tweet_control_options === "object" });
 	if (sharedConversation) {
 		try {
 			await sql`update posts set conversation_card_post_id = ${sharedConversation.id}::bigint, sensitive = ${!!sharedConversation.sensitive} where id = ${id}::bigint`;
@@ -439,6 +447,7 @@ const profileFeed =
 		// profile tabs only page downwards
 		if (newer) return userTimeline([]);
 		const owner = userId(vars);
+		revealSuspended(viewer, owner);
 		const items = await feed({ viewerId: viewer.id, authors: { user: owner }, replies: withReplies, onlyReplies, articlesOnly, kinds, limit: count, before: at });
 		let pinned: Awaited<ReturnType<typeof getPost>>;
 		if (!at && !withReplies && kinds === "both" && !articlesOnly) {
@@ -462,6 +471,7 @@ const userMedia =
 	async (viewer, vars) => {
 		const { count, at, newer } = pageOf(vars);
 		if (newer) return userTimeline([]);
+		revealSuspended(viewer, userId(vars));
 		const items = await feed({ viewerId: viewer.id, authors: { user: userId(vars) }, replies: true, kinds: "posts", media, limit: count, before: at });
 		const posts = items.map((i) => i.post);
 		const cursors: unknown[] = [];
@@ -502,6 +512,7 @@ const reactors = (kind: "reposts" | "likes", key: string): Handler => async (vie
 };
 
 const likes: Handler = async (viewer, vars) => {
+	revealSuspended(viewer, userId(vars));
 	const posts = vars.cursor ? [] : await likedPosts(viewer.id, userId(vars));
 	const base = BigInt(newId());
 	return userTimeline(wholeList(posts.map((p, i) => tweetEntry(p, (base - BigInt(i) - 1n).toString())), base));
@@ -728,8 +739,7 @@ const handlers: Record<string, Handler> = {
 		const user = name ? ((await userByName(v.id, name)) ?? (name.includes("@") && (await lookupRemoteUser(name).catch(() => undefined)) ? await userByName(v.id, name) : undefined)) : undefined;
 		// an empty answer makes the client show "this account doesn't exist"
 		if (!user) return { data: {} };
-		// staff too: they look a suspended account up in the admin panel
-		if (user.status === "suspended") return { data: { user: { result: SUSPENDED_USER } } };
+		if (user.status === "suspended") return { data: { user: { result: suspendedUser(v, user) } } };
 		// a visit for the profile's analytics, once a day per visitor
 		if (user.id !== v.id) sql`insert into profile_visits (profile_id, visitor_id) values (${user.id}::bigint, ${v.id}::bigint) on conflict do nothing`.catch(() => {});
 		return { data: { user: { result: userResult(user) } } };
@@ -769,7 +779,7 @@ const handlers: Record<string, Handler> = {
 	},
 	UserByRestId: async (v, vars) => {
 		const user = await userById(v.id, userId(vars));
-		if (user?.status === "suspended") return { data: { user: { result: SUSPENDED_USER } } };
+		if (user?.status === "suspended") return { data: { user: { result: suspendedUser(v, user) } } };
 		return { data: user ? { user: { result: userResult(user) } } : {} };
 	},
 	UsersByRestIds: async (v, vars) => {
@@ -849,6 +859,7 @@ const handlers: Record<string, Handler> = {
 	UserVideoTimeline: userMedia("video"),
 	UserRepliesTimeline: profileFeed(true, "posts", true),
 	UserHighlightsTweets: async (v, vars) => {
+		revealSuspended(v, userId(vars));
 		const posts = vars.cursor ? [] : await highlightedPosts(v.id, userId(vars));
 		const base = BigInt(newId());
 		return userTimeline([...posts.map((p, i) => tweetEntry(p, (base - BigInt(i) - 1n).toString())), ...wholeList([], base).slice(0)]);

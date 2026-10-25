@@ -11,10 +11,8 @@
 // Followers can't be moved: they follow the old account until they follow the
 // new one. Encrypted chats stay too, since their keys never leave the browser.
 
-import { lookup } from "node:dns/promises";
 import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { isIP } from "node:net";
 import { join } from "node:path";
 import type { Viewer } from "./auth";
 import { isBlockedEitherWay, replyLimited } from "./blocks";
@@ -30,6 +28,7 @@ import { MEDIA_DIR, sniffImage } from "./media";
 import { FORMAT, FORMAT_VERSION, type VersionInfo, versionInfo } from "./migration";
 import { blockedNameIn, forbiddenText } from "./names";
 import { pronounsProblem } from "./pronouns";
+import { NotPublic, publicFetch, reservedAddress } from "./public-net";
 import { recordError } from "./errors";
 import { settings } from "./settings";
 import { maxVideoBytes, posterFile } from "./video";
@@ -38,7 +37,13 @@ const ALLOW_HTTP = !!(process.env.MIGRATION_ALLOW_HTTP || process.env.FEDERATION
 // for test instances on one machine; never on a public instance, since the
 // address is the person's to choose
 const ALLOW_PRIVATE = !!process.env.MIGRATION_ALLOW_PRIVATE;
-const MAX_ARCHIVE = 256 * 1024 * 1024;
+// The archive is read whole and parsed, and the source is whoever the person
+// names, so what one import may take is bounded: memory for the archive, and
+// disk for its files (each is also held to the instance's own size limits).
+const MAX_ARCHIVE = 128 * 1024 * 1024;
+const MAX_MEDIA_FILES = 10_000;
+const MAX_MEDIA_BYTES = 10 * 1024 ** 3;
+const MAX_STARTS_A_DAY = 5;
 const MAX_GIF = 15 * 1024 * 1024;
 const MAX_RUNNING = 2;
 
@@ -63,41 +68,25 @@ export function parseSource(input: string): Source {
 	return { origin: url.origin, host: url.host.toLowerCase() };
 }
 
-export function privateAddress(ip: string): boolean {
-	if (isIP(ip) === 4) {
-		const [a, b] = ip.split(".").map(Number);
-		return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b < 128) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168) || a >= 224;
-	}
-	const v6 = ip.toLowerCase();
-	const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v6);
-	if (mapped) return privateAddress(mapped[1]);
-	return v6 === "::" || v6 === "::1" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || /^ff/.test(v6);
-}
-
-// The address is the person's to choose, so it may only lead to the public
-// internet: not to this instance's database or anything else beside it.
-async function checkReachable(source: Source) {
-	if (ALLOW_PRIVATE) return;
-	const hostname = new URL(source.origin).hostname.replace(/^\[|\]$/g, "");
-	const addresses = isIP(hostname) ? [hostname] : (await lookup(hostname, { all: true }).catch(() => [])).map((a) => a.address);
-	if (!addresses.length) throw new MigrationError(`${source.host} couldn't be found.`);
-	if (addresses.some(privateAddress)) throw new MigrationError(`${source.host} is on a private network, which this instance doesn't reach.`);
-}
+export const privateAddress = reservedAddress;
 
 type Call = { method?: "GET" | "POST"; body?: unknown; max?: number; timeout?: number };
 
+// The address is the person's to choose, so it may only lead to the public
+// internet (public-net.ts): not to this instance's database or anything else beside it.
 async function call(source: Source, code: string, path: string, opts: Call = {}): Promise<Response> {
-	await checkReachable(source);
-	const r = await fetch(`${source.origin}/migration/v1/${path}`, {
+	const init: RequestInit = {
 		method: opts.method ?? "GET",
 		redirect: "manual",
 		signal: AbortSignal.timeout(opts.timeout ?? 30_000),
 		headers: { authorization: `Bearer ${code}`, "content-type": "application/json", "x-xitter-migration-to": INSTANCE_ID, "user-agent": `xitter-migration (+${PUBLIC_ORIGIN})` },
 		body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-	}).catch((e) => {
+	};
+	const url = `${source.origin}/migration/v1/${path}`;
+	return (ALLOW_PRIVATE ? fetch(url, init) : publicFetch(url, init)).catch((e) => {
+		if (e instanceof NotPublic) throw new MigrationError(`${source.host} ${/private/.test(e.message) ? "is on a private network, which this instance doesn't reach" : "couldn't be found"}.`);
 		throw new MigrationError(`${source.host} didn't answer (${e?.name === "TimeoutError" ? "it took too long" : "it couldn't be reached"}).`);
 	});
-	return r;
 }
 
 async function callJson(source: Source, code: string, path: string, opts: Call = {}): Promise<any> {
@@ -201,6 +190,8 @@ export async function start(viewer: Viewer, sourceInput: string, code: string, a
 	const checked = await check(viewer, sourceInput, code);
 	if (checked.blockers.length) throw new MigrationError(checked.blockers[0].text);
 	if (checked.warnings.length && ack !== checked.ack) throw new MigrationError("The checks changed since you looked at them. Review them again before you start.");
+	const [today] = await sql`select count(*)::int as n from account_migrations where user_id = ${viewer.id}::bigint and created_at > now() - interval '1 day'`;
+	if (today.n >= MAX_STARTS_A_DAY) throw new MigrationError(`An account can start ${MAX_STARTS_A_DAY} imports a day. Try again tomorrow; what was already brought over is kept.`);
 	const id = newId();
 	try {
 		await sql`insert into account_migrations (id, user_id, source, source_user_id, source_handle, state, progress)
@@ -247,7 +238,7 @@ async function run(jobId: string, viewer: Viewer, checked: Check, code: string, 
 		count(kind, false);
 		if (skipped.length < 200) skipped.push(why);
 	};
-	let capped = false;
+	let capped = false, filesCapped = false;
 	let lastSaved = 0;
 	const progress = async (step: string, done?: number, total?: number, force = false) => {
 		if (!force && Date.now() - lastSaved < 1000) return;
@@ -322,10 +313,18 @@ async function run(jobId: string, viewer: Viewer, checked: Check, code: string, 
 			// files first: posts, polls, articles and the profile point at them
 			const media = arr(archive.media).filter((m) => isId(m?.id));
 			mkdirSync(MEDIA_DIR, { recursive: true });
-			let n = 0;
+			let n = 0, copied = 0, copiedBytes = 0;
 			for (const m of media) {
 				await progress("Copying files", ++n, media.length);
 				if (mapped("media", m.id)) continue;
+				// like the daily allowance for posts: the rest waits for another run,
+				// so the old account isn't finished while files are still on it
+				if (copied >= MAX_MEDIA_FILES || copiedBytes >= MAX_MEDIA_BYTES) {
+					if (filesCapped) count("media", false);
+					else skip("media", `One import copies at most ${MAX_MEDIA_FILES.toLocaleString("en-US")} files or 10 GB; run it again to copy the rest.`);
+					filesCapped = true;
+					continue;
+				}
 				const kind = m.kind === "video" ? "video" : "photo";
 				const limit = fileLimit(kind, String(m.mime));
 				if (Number(m.size) > limit) {
@@ -338,6 +337,8 @@ async function run(jobId: string, viewer: Viewer, checked: Check, code: string, 
 					const res = await call(source, code, `media/${m.id}`, { timeout: 10 * 60_000 });
 					if (!res.ok) throw new MigrationError(`answered ${res.status}`);
 					const bytes = Buffer.from(await readLimited(res, limit));
+					copied++;
+					copiedBytes += bytes.length;
 					let mime = "video/mp4", width = Number(m.width) || 0, height = Number(m.height) || 0;
 					if (kind === "photo") {
 						const image = sniffImage(bytes);
@@ -688,7 +689,7 @@ async function run(jobId: string, viewer: Viewer, checked: Check, code: string, 
 		let finished: { ok: boolean; deactivated?: boolean; error?: string } | undefined;
 		// a move that hit the daily allowance isn't finished: the old instance
 		// keeps the account (and the code) until the rest has come over
-		if (options.finish && !capped) {
+		if (options.finish && !capped && !filesCapped) {
 			await progress("Finishing on the old instance", undefined, undefined, true);
 			const to = `${viewer.screen_name}@${INSTANCE_ID}`;
 			finished = await callJson(source, code, "complete", { method: "POST", body: { to, note: options.note, deactivate: options.deactivate } })

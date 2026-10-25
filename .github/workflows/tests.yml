@@ -80,6 +80,7 @@ jobs:
           bun scripts/test-api-token-security.ts
           bun scripts/test-oauth.ts
           bun scripts/test-money-api.ts
+          bun scripts/test-money-move.ts
           bun scripts/test-money-shop.ts
           bun scripts/test-api-badges.ts
           bun scripts/test-scheduled-threads.ts
@@ -135,6 +136,7 @@ jobs:
           bun scripts/test-theme-share-api.ts ci_api_a testpass123
           bun scripts/test-money.ts
           bun scripts/test-push.ts ci_api_a ci_api_b testpass123
+          bun scripts/test-circles.ts
       - name: Server log on failure
         if: failure()
         run: cat server.log 2>/dev/null || true

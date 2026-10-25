@@ -510,7 +510,7 @@ export async function merchantRoute(req: Request, viewer: Viewer): Promise<Respo
 		req,
 		viewer,
 		title: "Equicoins",
-		back: { href: "/settings/account", label: "Back to Settings" },
+		back: { href: "/account/", label: "Back to Xitter settings" },
 		css: CSS,
 		body: `<section class="settings">${tile}
 ${notice ? `<div class="notice" role="status" style="margin:0">${esc(notice)}</div>` : ""}${error ? `<div class="notice error" role="alert" style="margin:0">${esc(error)}</div>` : ""}

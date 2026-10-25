@@ -8,6 +8,7 @@ import { isReserved, usernameProblem } from "./invites";
 import { superadminNameHere } from "./superadmins";
 import { sql } from "./db";
 import type { Viewer } from "./auth";
+import { passwordTry } from "./ratelimit";
 import { stepUpActive } from "./step-up";
 
 const error = (code: number, message: string, status = 400) => Response.json({ errors: [{ code, message }] }, { status });
@@ -25,11 +26,18 @@ async function body(req: Request): Promise<Record<string, string>> {
 	return out;
 }
 
-async function passwordMatches(userId: string, password: string | undefined): Promise<boolean> {
-	if (!password) return false;
-	const [u] = await sql`select password_hash from users where id = ${userId}::bigint`;
-	return !!u && (await Bun.password.verify(password, u.password_hash).catch(() => false));
+// counted with signing in's tries for the account: from inside a session the
+// password could otherwise be guessed without end
+async function passwordCheck(viewer: Viewer, password: string | undefined): Promise<"ok" | "wrong" | "limited"> {
+	const refund = passwordTry(viewer.screen_name.toLowerCase());
+	if (!refund) return "limited";
+	if (!password) return "wrong";
+	const [u] = await sql`select password_hash from users where id = ${viewer.id}::bigint`;
+	if (!u || !(await Bun.password.verify(password, u.password_hash).catch(() => false))) return "wrong";
+	refund();
+	return "ok";
 }
+const tooMany = () => error(88, "Too many tries for this account. Wait 15 minutes.", 429);
 
 export async function changeUsername(viewer: Viewer, wanted: string): Promise<string | undefined> {
 	if (wanted === viewer.screen_name) return undefined;
@@ -78,9 +86,11 @@ export async function accountSettingsRoute(method: string, path: string, viewer:
 
 	if (/^\/(?:i|1\.1)\/account\/change_password(?:\.json)?$/.test(path)) {
 		const f = await body(req);
+		// the hash read here is the one the update below must still find
 		const [account] = await sql`select password_hash from users where id = ${viewer.id}::bigint`;
-		if (!account || !f.current_password || !(await Bun.password.verify(f.current_password, account.password_hash).catch(() => false)))
-			return error(231, "Your current password is incorrect.", 403);
+		const checked = await passwordCheck(viewer, f.current_password);
+		if (checked === "limited") return tooMany();
+		if (!account || checked !== "ok") return error(231, "Your current password is incorrect.", 403);
 		const next = f.new_password ?? f.password ?? "";
 		if (next.length < 8) return error(214, "Your password needs to be at least 8 characters.");
 		if (next.length > 256) return error(214, "Passwords are at most 256 characters.");
@@ -97,6 +107,7 @@ export async function accountSettingsRoute(method: string, path: string, viewer:
 			// Other devices have to sign in again with the new password.
 			await tx`delete from sessions where user_id = ${viewer.id}::bigint and token <> ${viewer.token}`;
 			await tx`delete from api_tokens where user_id = ${viewer.id}::bigint`;
+			await tx`delete from oauth_codes where user_id = ${viewer.id}::bigint`;
 			await tx`delete from login_challenges where user_id = ${viewer.id}::bigint`;
 			// a passkey someone else added mustn't outlast the new password
 			await tx`delete from passkeys where user_id = ${viewer.id}::bigint`;
@@ -109,15 +120,22 @@ export async function accountSettingsRoute(method: string, path: string, viewer:
 	}
 
 	if (path === "/1.1/account/verify_password.json") {
-		const f = await body(req);
-		const typed = String(f.password ?? "");
-		const ok = (await passwordMatches(viewer.id, typed)) || (await stepUpActive(viewer.id));
-		return ok ? Response.json({ status: "ok" }) : error(231, "Your password is incorrect.", 403);
+		const typed = (await body(req)).password;
+		// a Discord confirmation stands in for the password, so it is checked
+		// first: it must not spend one of the account's few password tries
+		if (!(await stepUpActive(viewer.id))) {
+			const checked = await passwordCheck(viewer, typed);
+			if (checked === "limited") return tooMany();
+			if (checked !== "ok") return error(231, "Your password is incorrect.", 403);
+		}
+		return Response.json({ status: "ok" });
 	}
 
 	if (path === "/1.1/account/deactivate.json") {
 		const f = await body(req);
-		if (!(await passwordMatches(viewer.id, f.current_password ?? f.password))) return error(231, "Your password is incorrect.", 403);
+		const checked = await passwordCheck(viewer, f.current_password ?? f.password);
+		if (checked === "limited") return tooMany();
+		if (checked !== "ok") return error(231, "Your password is incorrect.", 403);
 		if (viewer.role) return error(214, "Staff accounts can't be deactivated here.");
 		const [standing] = await sql`select status, status_until from users where id = ${viewer.id}::bigint`;
 		if (standing?.status !== "active" || standing.status_until) return error(214, "Your account can't be deactivated while a sanction is in effect.");

@@ -30,6 +30,15 @@
 	nav .end { margin-top: 12px; }
 	nav .who { margin-top: 24px; padding: 0 12px; color: var(--dim); font-size: 13px; }
 	main { padding: 20px 24px 64px; width: 100%; max-width: 1440px; min-width: 0; margin: 0 auto; }
+	.main-col { min-width: 0; }
+	/* like the app's announcement bar (tidy.ts), in the warning colour */
+	#update-bar { display: flex; gap: 12px; align-items: flex-start; padding: 12px 24px; background: var(--gold); color: #000; }
+	#update-bar[hidden] { display: none; }
+	#update-bar .ub-body { flex: 1; min-width: 0; display: grid; gap: 8px; }
+	#update-bar .ub-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+	#update-bar .ub-buttons a, #update-bar .ub-buttons button { display: inline-flex; align-items: center; min-height: 32px; padding: 0 14px; border: 0; border-radius: 8px; background: rgb(0 0 0 / .15); color: #000; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
+	#update-bar .ub-close { border: 0; background: none; color: #000; font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; }
+	#update-bar code { font-family: ui-monospace, monospace; font-size: 13px; background: rgb(0 0 0 / .12); padding: 1px 5px; border-radius: 4px; }
 	h1 { margin: 0 0 16px; font-size: 22px; }
 	h2 { margin: 24px 0 10px; font-size: 17px; }
 	.bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; align-items: center; }
@@ -265,7 +274,13 @@
 	label.row:has(> input[type="checkbox"]) { margin-block: 0 4px !important; }
 	.schedule-controls > label.row { align-items: center; }
 	.schedule-controls > label.row input { margin-top: 0; }
-	.flags { display: flex; flex-wrap: wrap; gap: 6px; }
+	.flags { display: flex; flex-wrap: wrap; gap: 6px; max-height: 210px; overflow-y: auto; padding: 8px 8px 0 0; }
+	.flags::-webkit-scrollbar { width: 6px; }
+	.flags::-webkit-scrollbar-track { background: transparent; }
+	.flags::-webkit-scrollbar-thumb { background: #536471; border-radius: 999px; }
+	.flags::-webkit-scrollbar-thumb:hover { background: var(--blue); }
+	/* Chrome drops the ::-webkit-scrollbar look once scrollbar-color is set */
+	@supports not selector(::-webkit-scrollbar) { .flags { scrollbar-width: thin; scrollbar-color: #536471 transparent; } }
 	.flags button { width: 34px; height: 34px; padding: 0; border: 2px solid var(--line); border-radius: 6px; background: none; color: var(--dim); font-size: 11px; cursor: pointer; display: grid; place-items: center; }
 	.flags button img { width: 20px; height: 20px; border-radius: 3px; }
 	.flags button.on { border-color: var(--blue); }
@@ -351,7 +366,7 @@
 	<nav id="nav">
 		<a href="/home" title="Back to {{instance}}"><img class="logo" src="/public/logo-dark.png" alt="{{instance}}"></a>
 	</nav>
-	<main id="main"></main>
+	<div class="main-col"><div id="update-bar" role="status" hidden></div><main id="main"></main></div>
 </div>
 <script>
 "use strict";
@@ -426,7 +441,7 @@ function browser(ua) {
 }
 const avatar = (u) => u.avatar_url ? (u.avatar_url.startsWith("/") ? u.avatar_url : u.avatar_url) : "/abs/sticky/default_profile_images/default_profile_normal.png";
 const badge = (u) => u.verified_type ? '<span class="badge ' + esc(u.verified_type) + '" title="' + esc(u.verified_type) + '"></span>' : "";
-const flagImg = (u) => u.flag ? u.flag.split(",").filter((f) => /^[a-z]+$/.test(f)).slice(0, 4).map((f) => '<img class="flag" alt="' + esc(f) + '" src="/public/flag-' + esc(f) + '.svg">').join(" ") : "";
+const flagImg = (u) => u.flag ? u.flag.split(",").filter((f) => /^[a-z]+(-[a-z]{2})?$/.test(f)).slice(0, 4).map((f) => '<img class="flag" alt="' + esc(f) + '" src="/public/flag-' + esc(f) + '.svg">').join(" ") : "";
 const standing = (u) => (u.status && u.status !== "active" ? ' <span class="pill ' + esc(u.status) + '">' + esc(u.status) + "</span>" : "") + (u.role ? ' <span class="pill staff">' + esc(u.role) + "</span>" : "");
 const person = (u) => '<div class="person"><img class="avatar" alt="" src="' + esc(avatar(u)) + '"><div class="names"><div><b>' + esc(u.name) + "</b> " + badge(u) + " " + flagImg(u) + '</div><div class="dim small">@' + esc(u.screen_name) + standing(u) + "</div></div></div>";
 
@@ -465,6 +480,7 @@ const PAGES = {
 	security: { icon: "shield_lock", title: "Security", needs: "admin" },
 	backups: { icon: "backup", title: "Backups", needs: "admin" },
 	client: { icon: "system_update", title: "Client", needs: "admin" },
+	update: { icon: "upgrade", title: "Server update", needs: "admin" },
 	audit: { icon: "history", title: "Audit log" },
 };
 
@@ -474,7 +490,7 @@ const GROUPS = [
 	["People", ["users", "orgs", "invites", "badges"]],
 	["Content", ["stickers", "hashflags", "topics", "cards"]],
 	["Instance", ["settings-account", "settings-limits", "settings-community", "settings-safety", "settings-discovery", "settings-branding", "switches", "money", "email", "apps", "oauth", "federation"]],
-	["Staff and system", ["permissions", "security", "audit", "errors", "backups", "client"]],
+	["Staff and system", ["permissions", "security", "audit", "errors", "backups", "client", "update"]],
 ];
 function openGroup(g, on) {
 	g.classList.toggle("open", on);
@@ -523,6 +539,34 @@ function tableSearch(main, inputId, rowSelector, countId, emptyId, label) {
 	update();
 }
 window.addEventListener("hashchange", route);
+
+// Admins: a bar atop every page when GitHub has a newer Xitter than this
+// instance runs (update-check.ts). Closing it hides it until the branch moves.
+async function showUpdate(fresh) {
+	const bar = $("#update-bar");
+	const { status: s, self_update } = await api(fresh ? "checkUpdate" : "updateStatus").catch(() => ({}));
+	bar.hidden = true;
+	if (!s?.outdated || !s.latest) {
+		if (fresh) notice(s?.error ? "Couldn't check: " + s.error : "This instance runs the latest Xitter");
+		return;
+	}
+	try { if (!fresh && localStorage.getItem("xitter-update-closed") === s.latest.sha) return; } catch {}
+	const where = esc(s.repo) + " (" + esc(s.branch) + ")";
+	const how = s.behind != null
+		? "It is " + s.behind + (s.behind === 1 ? " commit" : " commits") + " behind " + where + "."
+		: "Its code differs from " + where + " in " + s.changed_files + (s.changed_files === 1 ? " file" : " files") + ".";
+	bar.innerHTML = '<span class="icon">system_update</span><div class="ub-body"><div><b>This instance is out of date.</b> ' + how +
+		" Latest: " + esc(s.latest.message || s.latest.sha.slice(0, 12)) + (s.latest.date ? " (" + esc(when(s.latest.date)) + ")" : "") + ".</div>" +
+		(self_update ? "" : "<div>To update, on the server: <code>git pull</code>, then <code>docker compose up -d --build</code>.</div>") +
+		'<div class="ub-buttons">' + (self_update ? '<a href="#update">Update now</a>' : "") + '<a href="https://github.com/' + esc(s.repo) + "/commits/" + esc(s.branch) + '" target="_blank" rel="noopener">What changed</a><button type="button" id="ub-check">Check again</button></div></div>' +
+		'<button type="button" class="ub-close" aria-label="Close until the next update">×</button>';
+	bar.hidden = false;
+	$("#ub-check").onclick = () => showUpdate(true);
+	bar.querySelector(".ub-close").onclick = () => {
+		try { localStorage.setItem("xitter-update-closed", s.latest.sha); } catch {}
+		bar.hidden = true;
+	};
+}
 
 async function route() {
 	const routeHash = location.hash;
@@ -604,18 +648,73 @@ const RENDER = {
 		};
 	},
 
+	// self-update.ts: the same steps as updating by hand on the server, then a restart
+	async update(main) {
+		const u = await api("selfUpdate");
+		const short = (sha) => sha ? sha.slice(0, 12) : "none";
+		const last = u.last;
+		const firstRepo = u.allowed_repos === "*" ? "Xittered/xitter" : u.allowed_repos[0];
+		const proof = () => ({ password: $("#upass").value, code: $("#ucode").value });
+		const going = last && (last.state === "running" || last.state === "restarting");
+		const stateText = { running: "Running", restarting: "Restarting", done: "Done", failed: "Failed" };
+		const off = !u.enabled
+			? '<div class="box" style="margin-bottom:16px"><p>Updating from the panel is off. To turn it on, the owner sets <span class="code">SELF_UPDATE=on</span> in the server\'s environment and restarts it once.</p></div>'
+			: !u.checkout ? '<div class="box" style="margin-bottom:16px"><p>This instance isn\'t a git checkout (a Docker image, say), so it updates on the server: <span class="code">git pull</span>, then <span class="code">docker compose up -d --build</span>.</p></div>' : "";
+		main.innerHTML = "<h1>Server update</h1>" +
+			'<p class="dim">Updates this server\'s code from a GitHub repository: it backs up the database (see Backups), fetches the branch, checks it out, runs <span class="code">bun install</span>, makes sure the new code loads, and restarts. If the code doesn\'t load, the server stays on the commit it runs now. The new code runs as this server, with its database and keys, so update only from repositories you trust. Going back to the previous commit leaves the database as the update left it; the backup restores it.</p>' +
+			off +
+			'<div class="cards"><div class="card"><span>Running</span><b class="code">' + esc(short(u.commit)) + "</b></div>" +
+			'<div class="card"><span>Previous</span><b class="code">' + esc(short(u.previous?.sha)) + "</b>" + (u.previous ? '<span class="small dim">on ' + esc(u.previous.branch) + "</span>" : "") + "</div></div>" +
+			(u.enabled && u.checkout ? '<div class="box" style="margin:16px 0"><h2>Update from</h2><div class="row">' +
+				'<input id="urepo" placeholder="' + esc(firstRepo) + '" aria-label="GitHub repository" value="' + esc(last?.kind === "update" ? last.repo : firstRepo) + '" style="flex:2;min-width:220px">' +
+				'<input id="ubranch" placeholder="Default branch" aria-label="Branch" value="' + esc(last?.kind === "update" ? last.branch ?? "" : "") + '" style="flex:1;min-width:140px">' +
+				"</div>" +
+				'<p class="dim small">A repository like <span class="code">owner/name</span> or its github.com address. Leave the branch blank for the repository\'s default. ' +
+				(u.allowed_repos === "*" ? "Any GitHub repository is allowed here." : "This instance updates only from " + u.allowed_repos.map((r) => '<span class="code">' + esc(r) + "</span>").join(", ") + "; the owner names others with <span class=\"code\">SELF_UPDATE_REPOS</span>.") + "</p>" +
+				'<div class="row" style="margin-top:12px"><input id="upass" type="password" autocomplete="current-password" placeholder="Your password" aria-label="Your password" style="flex:1;min-width:160px">' +
+				'<input id="ucode" inputmode="numeric" autocomplete="one-time-code" placeholder="Two-factor code" aria-label="Two-factor code" style="flex:1;min-width:140px">' +
+				'<button class="btn primary" id="ugo"' + (going ? " disabled" : "") + ">Update</button>" +
+				(u.previous ? '<button class="btn" id="uback"' + (going ? " disabled" : "") + ">Go back to " + esc(short(u.previous.sha)) + "</button>" : "") + "</div>" +
+				'<p class="dim small">Updating and going back take your password and a two-factor code again.</p></div>' : "") +
+			(last ? '<div class="box"><h2>' + (last.kind === "rollback" ? "Last time going back" : "Last update") + ": " + esc(stateText[last.state] ?? last.state) + "</h2>" +
+				'<p class="dim small">' + (last.kind === "update" ? esc(last.repo) + (last.branch ? " (" + esc(last.branch) + ")" : "") + ", " : "") +
+				"by @" + esc(last.by) + ", " + esc(when(last.started_at)) + (last.from ? ", " + esc(short(last.from)) + " → " + esc(short(last.to)) : "") +
+				(last.backup ? ", backup " + esc(last.backup) : "") + "</p>" +
+				(last.error ? '<p style="color:var(--red)">' + esc(last.error) + "</p>" : "") +
+				'<pre class="code" style="max-height:420px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px">' + esc(last.log.join("\n")) + "</pre></div>" : "");
+		if ($("#ugo")) $("#ugo").onclick = async () => {
+			const repo = $("#urepo").value.trim() || firstRepo;
+			const branch = $("#ubranch").value.trim();
+			if (!(await ask("Update this server from " + repo + (branch ? " (" + branch + ")" : "") + " and restart it? Everyone is disconnected for a moment."))) return;
+			act(() => api("startSelfUpdate", { repo, branch, ...proof() }), "Updating…").then(route);
+		};
+		if ($("#uback")) $("#uback").onclick = async () => {
+			if (!(await ask("Go back to " + short(u.previous.sha) + " and restart? The database stays as it is."))) return;
+			act(() => api("rollbackSelfUpdate", proof()), "Going back…").then(route);
+		};
+		// follow a running update, and wait out the restart
+		if (going) setTimeout(function poll() {
+			if (location.hash !== "#update") return;
+			fetch("/admin/api/selfUpdate", { method: "POST", headers: { "content-type": "application/json", "x-csrf-token": csrf }, body: "{}" })
+				.then((r) => r.ok ? route() : Promise.reject())
+				.catch(() => setTimeout(poll, 2000));
+		}, 2000);
+	},
+
 	async backups(main) {
-		const { backups, schedule, dir } = await api("backups");
+		const { backups, schedule, intervals, max_keep, dir } = await api("backups");
+		const every = (h) => h === 1 ? "hour" : h === 24 ? "day" : h + " hours";
 		const size = (n) => n < 1048576 ? Math.ceil(n / 1024) + " KB" : (n / 1048576).toFixed(1) + " MB";
 		main.innerHTML = "<h1>Backups</h1>" +
 			'<p class="dim">Dumps of the database (pg_dump\'s custom format) in <span class="code">' + esc(dir) + '</span> on the server. Uploaded media and branding are files in media/ and data/: copy those directories too. To restore, stop the server and run <span class="code">pg_restore --clean --if-exists -d "$DATABASE_URL" &lt;file&gt;</span>.</p>' +
-			'<div class="box" style="margin-bottom:16px"><h2>Schedule</h2><div class="row schedule-controls"><label class="row"><input type="checkbox" id="bdaily"' + (schedule.daily ? " checked" : "") + '> Back up every day, keep the newest</label>' +
-			'<span class="number-stepper"><input id="bkeep" type="number" min="1" max="90" value="' + schedule.keep + '" aria-label="Number of backups to keep"><span class="step-buttons"><button type="button" id="bkeep-up" aria-label="Keep one more backup"><span class="arrow up"></span></button><button type="button" id="bkeep-down" aria-label="Keep one fewer backup"><span class="arrow down"></span></button></span></span><button class="btn" id="bsave">Save</button></div></div>' +
+			'<div class="box" style="margin-bottom:16px"><h2>Schedule</h2><div class="row schedule-controls"><label class="row"><input type="checkbox" id="bdaily"' + (schedule.daily ? " checked" : "") + '> Back up every</label>' +
+			'<select id="bevery" aria-label="How often to back up">' + intervals.map((h) => '<option value="' + h + '"' + (h === schedule.every_hours ? " selected" : "") + ">" + esc(every(h)) + "</option>").join("") + "</select>" +
+			'<span>, keep the newest</span><span class="number-stepper"><input id="bkeep" type="number" min="1" max="' + max_keep + '" value="' + schedule.keep + '" aria-label="Number of backups to keep"><span class="step-buttons"><button type="button" id="bkeep-up" aria-label="Keep one more backup"><span class="arrow up"></span></button><button type="button" id="bkeep-down" aria-label="Keep one fewer backup"><span class="arrow down"></span></button></span></span><button class="btn" id="bsave">Save</button></div></div>' +
 			'<div class="row" style="margin-bottom:16px"><button class="btn primary" id="bnow">Back up now</button></div>' +
 			'<div class="scroll">' + (backups.length ? '<table class="table"><tr><th>File</th><th>Size</th><th>Made</th><th></th></tr>' +
 				backups.map((b) => '<tr><td class="code">' + esc(b.name) + "</td><td>" + size(b.bytes) + '</td><td class="small dim">' + esc(when(b.created_at)) + '</td><td class="row"><a class="btn" href="/admin/backups/' + esc(b.name) + '" download>Download</a><button class="btn danger" data-del="' + esc(b.name) + '">Delete</button></td></tr>').join("") + "</table>"
 				: '<div class="empty">No backups yet.</div>') + "</div>";
-		$("#bsave").onclick = () => act(() => api("saveBackupSchedule", { daily: $("#bdaily").checked, keep: Number($("#bkeep").value) }), "Saved").then(route);
+		$("#bsave").onclick = () => act(() => api("saveBackupSchedule", { daily: $("#bdaily").checked, every_hours: Number($("#bevery").value), keep: Number($("#bkeep").value) }), "Saved").then(route);
 		const adjustKeep = (amount) => {
 			const input = $("#bkeep"), min = Number(input.min), max = Number(input.max);
 			input.value = String(Math.max(min, Math.min(max, (Number(input.value) || min) + amount)));
@@ -637,7 +736,7 @@ const RENDER = {
 		const defaultRole = (p) => p.default_role === "admin" ? "Admins only" : p.default_role === "moderator" ? "Moderators" : "Moderators and support";
 		const toggle = (role, p) => '<label class="permission-toggle"><input type="checkbox" data-role="' + role + '" data-perm="' + esc(p.key) + '" aria-label="Allow ' + role + " to " + esc(p.label.toLocaleLowerCase()) + '"' + (roles[role][p.key] ? " checked" : "") + "></label>";
 		main.innerHTML = "<h1>Staff permissions</h1>" +
-			'<p class="dim">What moderators and support can do in this panel. Admins can always do everything, and every staff role can look through accounts, posts, reports and the audit log; the Privacy permissions decide who also sees IP and email addresses. Roles, settings, security, backups and the client build stay with admins. Nobody acts on staff at or above their own role, whatever they are allowed. Changes apply to the next thing a staff member does; they see new buttons after reloading the panel.</p>' +
+			'<p class="dim">What moderators and support can do in this panel. Admins can always do everything, and every staff role can look through accounts, posts, reports and the audit log; the Privacy permissions decide who also sees IP and email addresses. Roles, settings, security, backups, the client build and server updates stay with admins. Nobody acts on staff at or above their own role, whatever they are allowed. Changes apply to the next thing a staff member does; they see new buttons after reloading the panel.</p>' +
 			groups.map((g) => '<section class="permission-group"><h2>' + esc(g) + '</h2><div class="permission-header"><span>Default access</span><span>Moderator</span><span>Support</span></div>' +
 				permissions.filter((p) => p.group === g).map((p) => '<div class="permission-row"><div class="permission-copy"><span>' + esc(p.label) + '</span><span class="permission-default">Default: ' + esc(defaultRole(p)) + '</span></div>' + ROLES.map((r) => toggle(r, p)).join("") + "</div>").join("") + "</section>").join("") +
 			'<div class="row" style="margin-top:16px"><button class="btn primary" id="psave">Save</button><button class="btn" id="preset">Back to the defaults</button></div>';
@@ -784,7 +883,8 @@ const RENDER = {
 		let offset = 0;
 		main.innerHTML = (user ? '<p><a href="#user/' + esc(user) + '">← Account</a> · <a href="#media">All media</a></p><h1>Media from <span id="mwho">this account</span></h1>' : "<h1>Media</h1>") +
 			'<p class="dim small">Newest first. Deleting removes the file from every post and profile that uses it.</p>' +
-			(can("deleteMedia") ? '<div class="bar" id="mbulk" hidden><span class="small" id="mpicked"></span><button class="btn danger" id="mdel">Delete selected</button></div>' : "") +
+			'<form class="bar" id="mfind"><input id="mname" type="search" placeholder="An account, like @name" style="min-width:260px" aria-label="Show the uploads of one account" autocomplete="off"><button class="btn" type="submit">Show their media</button></form>' +
+			(can("deleteMedia") ? '<div class="bar"><label class="row small"><input type="checkbox" id="mall"> Select all shown</label></div><div class="bar" id="mbulk" hidden><span class="small" id="mpicked"></span><button class="btn danger" id="mdel">Delete selected</button></div>' : "") +
 			'<p class="small" id="mresult" role="status"></p><div class="mediagrid" id="grid"></div><div class="row" style="margin-top:16px"><button class="btn" id="more">Show more</button></div>';
 		const mpicked = () => [...main.querySelectorAll("[data-mpick]:checked")].map((c) => c.dataset.mpick);
 		const updateMediaPick = () => {
@@ -794,6 +894,15 @@ const RENDER = {
 			$("#mpicked").textContent = n + " selected:";
 		};
 		main.addEventListener("change", (e) => { if (e.target.matches("[data-mpick]")) updateMediaPick(); });
+		$("#mfind").onsubmit = (e) => {
+			e.preventDefault();
+			const name = $("#mname").value.trim();
+			if (name) act(async () => { const u = await api("mediaAccount", { screen_name: name }); location.hash = "#media/" + u.id; });
+		};
+		if ($("#mall")) $("#mall").onchange = () => {
+			main.querySelectorAll("[data-mpick]").forEach((c) => { c.checked = $("#mall").checked; });
+			updateMediaPick();
+		};
 		if ($("#mdel")) $("#mdel").onclick = async () => {
 			const ids = mpicked();
 			if (!ids.length || !(await ask("Delete " + ids.length + " files for good?"))) return;
@@ -1358,6 +1467,9 @@ const RENDER = {
 							(i.key_change ? '<button class="btn" data-key="' + esc(i.id) + '">Accept the new key</button>' : "") + "</div>" : "") + "</article>").join("") + "</div>"
 				: '<div class="empty">No other instances yet.</div>') + "</div>" +
 			(f.instances.length ? '<div class="empty" id="instance-empty" hidden></div>' : "") +
+			'<div class="box" style="margin-top:16px"><h2>Checkmarks from other instances</h2><p class="dim small">' +
+				(f.remote_checkmarks ? "Accounts from other instances wear the checkmark their own instance gave them." : "Accounts from other instances show no checkmark here, whatever their own instance gave them.") + "</p>" +
+				(can("admin") ? '<button class="btn" id="remotechecks">' + (f.remote_checkmarks ? "Hide their checkmarks" : "Show their checkmarks") + "</button>" : "") + "</div>" +
 			'<div class="box" style="margin-top:16px"><h2>Media from other instances</h2><p class="dim small">' +
 				(f.media.stored ? "Saved on this server (FEDERATION_MEDIA=store)." : "Shown straight from their home instance and not saved here.") +
 				" Saved now: " + esc(String(f.media.files)) + " files, " + esc((f.media.bytes / 1048576).toFixed(1)) + " MB.</p>" +
@@ -1375,6 +1487,7 @@ const RENDER = {
 			if (!(await ask("Trust the new key of " + b.dataset.key + "? Only do this if its admins told you they changed it."))) return;
 			act(() => api("federationAcceptKey", { instance: b.dataset.key }), "Key accepted").then(route);
 		});
+		if ($("#remotechecks")) $("#remotechecks").onclick = () => act(() => api("setRemoteCheckmarks", { enabled: !f.remote_checkmarks }), f.remote_checkmarks ? "Their checkmarks are hidden" : "Their checkmarks show again").then(route);
 		if ($("#dropmedia")) $("#dropmedia").onclick = async () => {
 			if (!(await ask("Delete every picture and video saved from other instances? They are fetched from their home instance again when someone views them."))) return;
 			act(() => api("federationDropMedia"), "Deleted").then(route);
@@ -1584,6 +1697,7 @@ const RENDER = {
 			$("#list").innerHTML = posts.length
 				? '<table class="table"><tr>' + (pickable ? '<th style="width:32px"></th>' : "") + '<th>Post</th><th>Author</th><th>When</th><th></th></tr>' +
 					posts.map((p) => "<tr>" + (pickable ? '<td><input type="checkbox" data-ppick="' + esc(p.id) + '"></td>' : "") + "<td>" + (p.reply_to_id ? '<span class="dim small">reply · </span>' : "") + esc(p.text || "(no text)") + (p.media ? ' <span class="dim small">· ' + p.media + " media</span>" : "") +
+						(p.circle_owner ? ' <span class="pill" title="Only people in @' + esc(p.circle_owner) + '&#39;s Circle can see this post">Circle</span>' : "") +
 						(p.hidden ? ' <span class="pill suspended">hidden</span>' : "") + (p.sensitive ? ' <span class="pill restricted">sensitive</span>' : "") +
 						(p.notice ? ' <span class="pill restricted">' + esc(NOTICE_LABELS[p.notice.type] || p.notice.type) + "</span>" : "") + (p.count_overrides ? ' <span class="pill">counts set</span>' : "") +
 						'<div class="dim small">' + p.likes + ' likes · <a href="/' + esc(p.screen_name) + "/status/" + esc(p.id) + '" target="_blank">open</a></div></td><td><a href="#user/' + esc(p.user_id) + '">@' + esc(p.screen_name) + '</a></td><td class="small dim">' + esc(when(p.created_at)) + "</td><td>" +
@@ -1725,10 +1839,10 @@ const RENDER = {
 			'<div class="field"><label>Source code link (AGPL-3.0: shown on the sign-in pages)</label><input id="source" value="' + esc(s.source_url) + '"' + dis + "></div>" +
 			(admin ? '<button class="btn primary" id="saveName">Save</button>' : "") + "</div>" +
 			[
-				["Core social", ["communities", "lists"]],
+				["Core social", ["communities", "lists", "circles"]],
 				["Composer", ["gifs", "polls", "location", "scheduling"]],
 				["AI and tools", ["grok", "image_gen", "premium", "calls", "history", "creator_studio", "spaces"]],
-				["Accounts and integrations", ["business", "notes_everyone", "link_previews", "archive_import", "money"]],
+				["Accounts and integrations", ["business", "notes_everyone", "link_previews", "archive_import", "money", "affiliate_checkmarks"]],
 			].map(([group, keys], index) => '<div class="box"><h2>' + group + '</h2><div class="feature-grid">' +
 				keys.map((k) => '<label class="feature-option"><input type="checkbox" data-feature="' + k + '"' + (s.features[k] ? " checked" : "") + dis + "><span>" + esc(features[k]) + "</span></label>").join("") + "</div>" +
 				(index === 3 && admin ? '<button class="btn primary" id="saveFeatures" style="margin-top:8px">Save features</button>' : "") + "</div>").join("") + "</div></section>" +
@@ -1995,14 +2109,16 @@ const RENDER = {
 		}
 		if (offset === undefined) offset = Number(sessionStorage.getItem("auditOffset")) || 0;
 		const request = ++auditRequest;
-		const { entries, total } = await api("audit", { ...filter, offset });
+		const { entries, total, actions = [] } = await api("audit", { ...filter, offset });
+		// a saved filter stays selectable even once its action has left the log
+		const choices = filter.action && !actions.includes(filter.action) ? [filter.action, ...actions] : actions;
 		if (request !== auditRequest || location.hash.slice(1).split("/")[0] !== "audit") return;
 		const page = Math.floor(offset / 100) + 1, pages = Math.max(1, Math.ceil(total / 100));
 		const range = "Showing " + (offset + 1) + "–" + (offset + entries.length) + " of " + total + " entries";
 		const pager = total > 0 ? '<div class="audit-paging"><span class="dim small">' + range + '</span><div class="row"><button class="btn" data-audit-page="prev"' + (offset <= 0 ? " disabled" : "") + '>Previous</button><span class="dim small">Page ' + page + " of " + pages + '</span><button class="btn" data-audit-page="next"' + (offset + entries.length >= total ? " disabled" : "") + '>Next</button></div></div>' : "";
 		main.innerHTML = '<h1>Audit log</h1><div class="bar"><input id="auditWho" aria-label="Filter by target account" placeholder="Target @handle" value="' + esc(filter.target || "") + '">' +
-			'<select id="auditAction" aria-label="Filter by action"><option value="">Every action</option>' + ["automod_strike", "automod_second_chance", "escalate", "expire_sanction", "auto_suspend_name", "temporary_status", "set_status", "bulk_status", "send_staff_message", "revoke_strike", "bulk_strike", "resolve_appeal", "save_automod", "set_role", "set_staff_permissions"]
-				.map((a) => '<option value="' + a + '"' + (filter.action === a ? " selected" : "") + ">" + a.replace(/_/g, " ") + "</option>").join("") + "</select>" +
+			'<select id="auditAction" aria-label="Filter by action"><option value="">Every action</option>' + choices
+				.map((a) => '<option value="' + esc(a) + '"' + (filter.action === a ? " selected" : "") + ">" + esc(a.replace(/_/g, " ")) + "</option>").join("") + "</select>" +
 			'<label class="row"><input type="checkbox" id="auditAuto"' + (filter.automatic ? " checked" : "") + '> Automatic only</label><span class="dim small" id="auditLoading" hidden>Updating…</span></div>' + pager +
 			(entries.length ? '<div class="audit-list">' + entries.map((e) => {
 				const target = e.target_name ? '<a href="#user/' + esc(e.target) + '">@' + esc(e.target_name) + "</a>" : e.target ? esc(e.target) : "";
@@ -2121,9 +2237,9 @@ async function renderUser(main, id) {
 		[["", "none"], ["translator", "blue (translator)"], ["moderator", "gold (translator moderator)"], ["approver", "yellow (approver)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.translator ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
 		'</select></div><div class="field"><label>Profile label (under the name, where X shows "Parody account"; <a href="#badges">make one</a>)</label><select id="plabel"' + (can("setProfileLabel") ? "" : " disabled") + ">" +
 		[["None", "none"], ["Parody", "Parody account"], ["Commentary", "Commentary account"], ["Fan", "Fan account"]].concat(labels.map((l) => [l.id, l.text])).map(([v, l]) => '<option value="' + esc(v) + '"' + ((u.label_id || u.parody_label || "None") === v ? " selected" : "") + ">" + esc(l) + "</option>").join("") +
-		'</select></div><div class="field"><label>Pride flags, up to 4, in the order they show</label><div class="flags" id="flags">' +
+		'</select></div><div class="field"><label>Flags, up to 4, in the order they show</label><div class="flags" id="flags">' +
 		[{ id: "", name: "none" }].concat(flags).map((f) => '<button type="button" title="' + esc(f.name) + '" data-flag="' + esc(f.id) + '"' + (can("setFlag") ? "" : " disabled") + ">" +
-			(f.id ? '<img alt="" src="/public/flag-' + esc(f.id) + '.svg">' : "none") + "</button>").join("") + "</div>" +
+			(f.id ? '<img alt="" loading="lazy" src="/public/flag-' + esc(f.id) + '.svg">' : "none") + "</button>").join("") + "</div>" +
 		(can("setFlag") ? '<div class="row" style="margin-top:8px"><button class="btn primary" id="saveFlags" disabled>Save flags</button><span class="dim small" id="flagState"></span></div>' : '<p class="dim small">Requires permission to set flags.</p>') + "</div>" +
 		(u.decor ? '<div class="field"><label>Profile decor from Steam</label><div class="dim small">' +
 			esc([u.decor.profile && "game profile " + u.decor.profile.name, u.decor.theme && "theme " + u.decor.theme, u.decor.background && "background " + u.decor.background.name, u.decor.frame && "frame " + u.decor.frame.name].filter(Boolean).join(" · ")) +
@@ -2301,6 +2417,7 @@ async function renderUser(main, id) {
 	});
 	refreshCounts();
 	route();
+	if (can("admin")) showUpdate();
 })();
 </script>
 </body>

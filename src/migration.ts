@@ -147,7 +147,8 @@ async function archive(userId: string) {
 			p.edit_count, ${iso(sql`p.edited_at`)} as edited_at, p.pinned_reply_id::text as pinned_reply_id,
 			(select coalesce(jsonb_agg(jsonb_build_object('seq', v.seq, 'text', v.text, 'created_at', ${iso(sql`v.created_at`)}) order by v.seq), '[]'::jsonb)
 				from post_versions v where v.post_id = p.id) as versions
-			from posts p where p.user_id = ${id}::bigint order by p.id`)},
+			-- a Circle post would arrive public on the other instance (circles.ts)
+			from posts p where p.user_id = ${id}::bigint and p.circle_owner_id is null order by p.id`)},
 		'drafts', ${list(sql`select id::text as id, kind, request, ${iso(sql`execute_at`)} as execute_at, ${iso(sql`created_at`)} as created_at
 			from scheduled_posts where user_id = ${id}::bigint order by id`)},
 		'likes', ${list(sql`select ${postRef(sql`l.post_id`)} as post, ${iso(sql`l.created_at`)} as created_at from likes l where l.user_id = ${id}::bigint order by l.created_at`)},

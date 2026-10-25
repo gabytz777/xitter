@@ -9,6 +9,30 @@ test("private, loopback and link-local addresses are refused", () => {
 		expect(privateAddress(ip)).toBe(true);
 });
 
+test("IPv4 carried inside IPv6, and the benchmark range, are refused too", () => {
+	// new URL("https://[::ffff:127.0.0.1]").hostname is written in hex
+	expect(new URL("https://[::ffff:127.0.0.1]/").hostname).toBe("[::ffff:7f00:1]");
+	for (const ip of ["::ffff:7f00:1", "64:ff9b::7f00:1", "2002:7f00:1::", "2001::1", "198.18.0.1", "198.19.255.255", "not an address"]) expect(privateAddress(ip)).toBe(true);
+});
+
+test("publicFetch sends nothing to a name with any private address", async () => {
+	const { publicFetch, resolver, NotPublic } = await import("../src/public-net");
+	const real = resolver.lookup;
+	const seen: string[] = [];
+	const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (seen.push(req.headers.get("host") ?? ""), new Response("reached")) });
+	try {
+		// a name that resolves privately is refused before anything is sent
+		resolver.lookup = async () => [{ address: "127.0.0.1", family: 4 }];
+		await expect(publicFetch(`http://rebind.example:${server.port}/`)).rejects.toBeInstanceOf(NotPublic);
+		resolver.lookup = async () => [{ address: "8.8.8.8", family: 4 }, { address: "10.0.0.1", family: 4 }];
+		await expect(publicFetch(`http://mixed.example:${server.port}/`)).rejects.toBeInstanceOf(NotPublic);
+		expect(seen).toEqual([]);
+	} finally {
+		resolver.lookup = real;
+		server.stop(true);
+	}
+});
+
 test("public addresses are allowed", () => {
 	for (const ip of ["1.1.1.1", "8.8.8.8", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8"]) expect(privateAddress(ip)).toBe(false);
 });

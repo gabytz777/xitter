@@ -6,7 +6,7 @@
 import { sql } from "./db";
 import { replyDenied } from "./reply-controls";
 import { newId } from "./ids";
-import { staffViewer } from "./staff-access";
+import { revealedSuspended, staffViewer } from "./staff-access";
 import { isPinnedFollowee } from "./users";
 
 // accounts the viewer blocked or was blocked by
@@ -15,8 +15,13 @@ export const blockedFor = (viewerId: string) =>
 		union all select blocker_id from blocks where blocked_id = ${viewerId}::bigint)`;
 
 const gone = sql`(status = 'suspended' or deactivated_at is not null or instance_blocked)`;
+// gone, except a suspended account staff opened (staff-access.ts revealSuspended)
+const goneHere = () => {
+	const id = revealedSuspended();
+	return id ? sql`(${gone} and not (id = ${id}::bigint and status = 'suspended'))` : gone;
+};
 export const outOfView = (viewerId: string) =>
-	sql`(select id from users where ${gone} or (status = 'limited' and id <> ${viewerId}::bigint
+	sql`(select id from users where ${goneHere()} or (status = 'limited' and id <> ${viewerId}::bigint
 		and id not in (select followee_id from follows where follower_id = ${viewerId}::bigint)
 		and not ${staffViewer(viewerId)}))`;
 
@@ -27,7 +32,7 @@ export const protectedFor = (viewerId: string) =>
 		and id not in (select followee_id from follows where follower_id = ${viewerId}::bigint)
 		and not ${staffViewer(viewerId)})`;
 
-export const suspendedFor = (viewerId: string) => sql`(select id from users where ${gone} and id <> ${viewerId}::bigint)`;
+export const suspendedFor = (viewerId: string) => sql`(select id from users where ${goneHere()} and id <> ${viewerId}::bigint)`;
 
 // Accounts from other instances the viewer hid, all of them or some instances
 // (Settings > Other instances): they stay out of timelines, replies, search and

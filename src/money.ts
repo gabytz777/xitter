@@ -6,14 +6,14 @@
 import { audit } from "./admin";
 import { esc } from "./account-page";
 import type { Viewer } from "./auth";
-import { isBlockedEitherWay } from "./blocks";
+import { blockedFor, isBlockedEitherWay, protectedFor, suspendedFor } from "./blocks";
 import { PUBLIC_ORIGIN } from "./config";
 import { sql } from "./db";
 import { hateIn } from "./hate";
 import { newId } from "./ids";
 import { linksIn } from "./links";
 import { absolute } from "./media";
-import { avatarUrl } from "./model";
+import { avatarUrl, remoteCheckHidden } from "./model";
 import { feature, hasBlockedPhrase, settings } from "./settings";
 import { MONEY_ICON } from "./tidy";
 import { isPeer } from "./federation";
@@ -346,7 +346,7 @@ const plainUrl = (u: string | null) => (u && /^(https?:\/\/|\/)[^\s"'()\\<>]+$/.
 
 export async function parties(ids: string[]): Promise<Map<string, Party>> {
 	if (!ids.length) return new Map();
-	const rows = await sql`select u.id::text, u.screen_name, u.name, u.avatar_url, u.banner_url, u.verified_type,
+	const rows = await sql`select u.id::text, u.screen_name, u.name, u.avatar_url, u.banner_url, u.verified_type, u.instance,
 			(select json_build_object('name', o.name, 'screen_name', o.screen_name, 'avatar', o.avatar_url) from affiliations af join users o on o.id = af.org_id
 				where af.user_id = u.id order by af.created_at, af.org_id limit 1) as org,
 			m.user_id is not null and u.verified_type = 'business' as merchant, m.name as m_name, m.show_banner
@@ -359,7 +359,7 @@ export async function parties(ids: string[]): Promise<Map<string, Party>> {
 				screen_name: r.screen_name,
 				name: r.name || r.screen_name,
 				avatar: avatarUrl(r.avatar_url),
-				badge: r.verified_type ?? (r.org ? "blue" : null),
+				badge: remoteCheckHidden(r) ? null : (r.verified_type ?? (r.org && feature("affiliate_checkmarks") ? "blue" : null)),
 				org: r.org ? { name: r.org.name, screen_name: r.org.screen_name, avatar: avatarUrl(r.org.avatar) } : null,
 				square: r.verified_type === "business" || r.verified_type === "government",
 				merchant: r.merchant ? { name: r.m_name || r.name || r.screen_name, banner: r.show_banner && r.banner_url ? plainUrl(absolute(r.banner_url)) : null } : null,
@@ -384,6 +384,10 @@ export const MONEY_WORDMARK = `<span class="xm-mark"><svg viewBox="0 0 24 24" ar
 // reversed: staff sent the money back (Admin > Money)
 export type Payment = { id: string; amount: number; note: string; at: Date; sender: Party; recipient: Party; reversed?: boolean; status: string };
 
+// a post (p) that names a payment or request shows it only to those who can see that post
+const postSeenBy = (viewerId: string) =>
+	sql`not p.hidden and p.user_id not in ${protectedFor(viewerId)} and p.user_id not in ${suspendedFor(viewerId)} and p.user_id not in ${blockedFor(viewerId)}`;
+
 // payments by id, with both sides; `visibleTo` keeps the ones that account is
 // part of or that one side put in a post
 export async function payments(ids: string[], visibleTo?: string): Promise<Map<string, Payment>> {
@@ -394,7 +398,7 @@ export async function payments(ids: string[], visibleTo?: string): Promise<Map<s
 		${
 			visibleTo
 				? sql`and (${visibleTo}::bigint in (t.sender_id, t.recipient_id) or exists (select 1 from posts p
-				where p.user_id in (t.sender_id, t.recipient_id, ${feed}::bigint) and p.text ~ ('/i/xmoney/p/' || t.id::text || '([^0-9]|$)')))`
+				where p.user_id in (t.sender_id, t.recipient_id, ${feed}::bigint) and ${postSeenBy(visibleTo)} and p.text ~ ('/i/xmoney/p/' || t.id::text || '([^0-9]|$)')))`
 				: sql``
 		}`;
 	const who = await parties(rows.flatMap((r: any) => [r.sender_id, r.recipient_id]));
@@ -420,7 +424,7 @@ export async function requests(ids: string[], visibleTo?: string): Promise<Map<s
 		${
 			visibleTo
 				? sql`and (q.payer_id is null or ${visibleTo}::bigint in (q.requester_id, q.payer_id) or exists (select 1 from posts p
-				where p.user_id = q.requester_id and p.text ~ ('/i/xmoney/r/' || q.id::text || '([^0-9]|$)')))`
+				where p.user_id = q.requester_id and ${postSeenBy(visibleTo)} and p.text ~ ('/i/xmoney/r/' || q.id::text || '([^0-9]|$)')))`
 				: sql``
 		}`;
 	const who = await parties(rows.flatMap((r: any) => [r.requester_id, ...(r.payer_id ? [r.payer_id] : [])]));

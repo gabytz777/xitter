@@ -10,6 +10,8 @@ import { feature, hasBlockedPhrase, settings } from "./settings";
 let pumping = false;
 // a moved balance is taken up to this many times the largest payment
 const MOVE_CAP = 100;
+// and all of one peer's moves in a day, in full-size moves (most are far smaller)
+export const MOVES_A_DAY = 20;
 // a transfer the peer hasn't taken after this long fails and goes back to the sender
 const GIVE_UP_AFTER = "3 days";
 
@@ -79,9 +81,12 @@ export async function moneyFederationApi(incoming: Incoming, method: string, pat
 	// the old account may be deactivated by the move, so it isn't looked up for one
 	let senderId: string | undefined;
 	let migrationId: string | undefined;
+	const sources = [`https://${incoming.from}`, `http://${incoming.from}`];
 	if (move) {
+		// the peer answers the import's checks itself, so a failed import (or one
+		// it made fail on purpose) doesn't count as a move
 		const [moved] = await sql`select id::text from account_migrations where user_id = ${recipientId}::bigint and source_user_id = ${senderMatch[1]}::bigint
-			and source in (${`https://${incoming.from}`}, ${`http://${incoming.from}`}) order by created_at desc limit 1`;
+			and source = any(${sql.array(sources, "TEXT")}) and state <> 'failed' order by created_at desc limit 1`;
 		if (!moved) return signedAnswer(incoming, 403, { error: "That account didn't move here." });
 		migrationId = moved.id;
 		senderId = await import("./federation-sync").then(({ resolveUser }) => resolveUser(senderRef)).catch(() => undefined);
@@ -100,6 +105,16 @@ export async function moneyFederationApi(incoming: Incoming, method: string, pat
 			if (seen) return "duplicate";
 			if (!move && !(await peerHasRoom(tx, incoming.from, amount))) return "full";
 			if (move) {
+				// One move per old account ever, however many imports it was the source
+				// of; and a peer's moves together take at most MOVES_A_DAY moves' worth
+				// a day. Over that it is answered 429, which the peer retries for
+				// GIVE_UP_AFTER, so an instance closing down still gets its people over.
+				const [already] = await tx`select 1 from account_migrations where source = any(${sql.array(sources, "TEXT")})
+					and source_user_id = ${senderMatch[1]}::bigint and balance_moved_at is not null limit 1`;
+				if (already) return "moved";
+				const [day] = await tx`select coalesce(sum(amount_cents), 0)::bigint as n from money_federation_receipts
+					where origin = ${incoming.from} and move and created_at > now() - interval '1 day'`;
+				if (Number(day.n) + amount > MOVES_A_DAY * cap) return "busy";
 				const took = await tx`update account_migrations set balance_moved_at = now() where id = ${migrationId}::bigint and balance_moved_at is null returning 1`;
 				if (!took.length) return "moved";
 			}
@@ -112,6 +127,7 @@ export async function moneyFederationApi(incoming: Incoming, method: string, pat
 			return "taken";
 		});
 		if (result === "full") return signedAnswer(incoming, 422, { error: "This instance has taken all it accepts from yours today." });
+		if (result === "busy") return signedAnswer(incoming, 429, { error: "This instance has taken all the moved balances it accepts from yours today. Try again later." });
 		if (result === "moved") return signedAnswer(incoming, 403, { error: "That account's balance already moved here." });
 		return signedAnswer(incoming, 200, { accepted: true, duplicate: result === "duplicate" });
 	} catch (e) {

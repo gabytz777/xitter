@@ -2,10 +2,10 @@
 // an app can use the https URL of a JSON document it hosts as its client_id,
 // instead of registering a client on every instance. The document names the
 // app and lists its redirect URLs, so one app signs in on any Xitter in one tap.
-import { lookup } from "node:dns/promises";
 import { type RequestOptions, get } from "node:https";
-import { BlockList, type LookupFunction, isIP } from "node:net";
+import { type LookupFunction, isIP } from "node:net";
 import { PUBLIC_ORIGIN } from "./config";
+import { reservedAddress, resolver } from "./public-net";
 
 export type ClientMetadata = { url: string; name: string; redirects: string[]; logo: string | null };
 
@@ -27,25 +27,8 @@ export function metadataClientId(value: string): URL | undefined {
 	}
 }
 
-// loopback, private, link-local, carrier-grade NAT, documentation, benchmark,
-// multicast and reserved ranges: the server never fetches a client document
-// from these
-const RESERVED = new BlockList();
-for (const [address, prefix] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 3]] as const)
-	RESERVED.addSubnet(address, prefix, "ipv4");
-// (BlockList matches every IPv4 address against ::ffff:0:0/96, so mapped
-// addresses are unwrapped below rather than listed here)
-// Teredo (2001::/32) and 6to4 (2002::/16) can carry any IPv4 address inside
-for (const [address, prefix] of [["::", 127], ["64:ff9b::", 96], ["100::", 64], ["2001::", 32], ["2001:db8::", 32], ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8]] as const)
-	RESERVED.addSubnet(address, prefix, "ipv6");
-const reserved = (address: string) => {
-	const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1];
-	if (mapped) return RESERVED.check(mapped, "ipv4");
-	return /^::ffff:/i.test(address) || RESERVED.check(address, isIP(address) === 6 ? "ipv6" : "ipv4");
-};
-
-// tests swap the lookup out
-export const resolver = { lookup: (host: string) => lookup(host, { all: true, verbatim: true }) };
+// the server never fetches a client document from a reserved address (public-net.ts)
+export { resolver };
 
 // The connection's own DNS lookup: it refuses a name with any reserved
 // address and connects to an address it just checked, so a host can't pass
@@ -53,7 +36,7 @@ export const resolver = { lookup: (host: string) => lookup(host, { all: true, ve
 export const publicLookup: LookupFunction = (host, options, callback) => {
 	resolver.lookup(host).then(
 		(addresses) => {
-			if (!addresses.length || !addresses.every((a) => isIP(a.address) && !reserved(a.address)))
+			if (!addresses.length || !addresses.every((a) => !reservedAddress(a.address)))
 				return callback(Object.assign(new Error(`${host} isn't a public address`), { code: "ENOTFOUND" }), "", 0);
 			const usable = options.family ? addresses.filter((a) => a.family === options.family) : addresses;
 			if (!usable.length) return callback(Object.assign(new Error(`${host} has no usable address`), { code: "ENOTFOUND" }), "", 0);
