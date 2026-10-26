@@ -45,6 +45,7 @@ const BY_FEATURE: Record<Feature, string[]> = {
 const ALWAYS = [
 	...links("/jobs"),
 	...ids("contentDisclosureButton", "ProfessionalButton_Switch_To_Professional"),
+	'[data-testid="toolBar"] [data-testid="ScrollSnap-List"] > [role="presentation"]:has([data-testid="contentDisclosureButton"])',
 	'a[href^="https://ads.x.com"]',
 	'a[href^="https://help.x.com"]',
 	'[data-testid="sidebarColumn"] nav[aria-label="Footer"]',

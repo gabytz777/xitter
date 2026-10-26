@@ -1,9 +1,4 @@
 export const CONVERSATION_CARD_CSS = `
-@media(hover:hover){[data-xitter-conversation]:not(:disabled):not([aria-disabled="true"]):hover{background-color:color-mix(in srgb,currentColor 10%,transparent)!important}}
-[data-xitter-conversation]:focus-visible{background-color:color-mix(in srgb,currentColor 10%,transparent)!important;outline:2px solid currentColor;outline-offset:-2px}
-[data-xitter-conversation]:not(:disabled):not([aria-disabled="true"]):active{background-color:color-mix(in srgb,currentColor 20%,transparent)!important}
-@media(prefers-reduced-motion:reduce){[data-xitter-conversation]{transition:none!important}}
-
 .xitter-conversation{--xc-accent:rgb(29,155,240);--xc-border:rgb(207,217,222);--xc-muted:rgb(83,100,113);--xc-hover:rgba(15,20,25,.06);box-sizing:border-box;min-width:0;border:1px solid var(--xc-border);border-radius:16px;margin:12px 0;overflow:hidden;color:inherit;font:400 15px/20px TwitterChirp,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 .xitter-conversation *{box-sizing:border-box}
 .xitter-conversation [hidden]{display:none!important}
