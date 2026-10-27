@@ -28,10 +28,12 @@ export async function requestReset(usernameOrEmail: string): Promise<void> {
 		if (!account) return undefined;
 		const [recent] = await tx`select 1 from password_resets where user_id = ${account.id}::bigint and created_at > now() - interval '2 minutes'`;
 		if (recent) return undefined;
-		await tx`insert into password_resets (token_hash, user_id) values (${hash(token)}, ${account.id}::bigint)`;
 		// the DM recipient, under the same lock; a separate read keeps the lock
 		// query above exactly as upstream's issuance test waits for it
 		const [link] = await tx`select discord_id from discord_accounts where user_id = ${account.id}::bigint`;
+		// no channel to deliver through: don't mint a token that nobody can use
+		if (!account.email && !link?.discord_id) return undefined;
+		await tx`insert into password_resets (token_hash, user_id) values (${hash(token)}, ${account.id}::bigint)`;
 		return { ...account, discord_id: link?.discord_id as string | undefined };
 	});
 	if (!u) return;
