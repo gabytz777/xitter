@@ -123,8 +123,14 @@ const pinnedFollows = () =>
 export async function isPinnedFollowee(followeeId: string, actorId?: string): Promise<boolean> {
 	const wanted = pinnedFollows();
 	if (!wanted.length) return false;
-	const [row] = await sql`select lower(screen_name) as handle, role from users where id = ${followeeId}::bigint`;
+	const [row] = await sql`select lower(screen_name) as handle from users where id = ${followeeId}::bigint`;
 	if (!row || !wanted.includes(row.handle)) return false;
+	// Staff are exempt: PINNED_FOLLOWS is a rule for members, not for the
+	// people running the instance.
+	if (actorId) {
+		const [actor] = await sql`select role from users where id = ${actorId}::bigint`;
+		if (actor?.role === "admin" || actor?.role === "moderator") return false;
+	}
 	return true;
 }
 
@@ -132,7 +138,7 @@ export async function isPinnedFollowee(followeeId: string, actorId?: string): Pr
 export async function setFollow(followerId: string, followeeId: string, on: boolean) {
 	if (followerId === followeeId) return;
 	// a pinned follow can't be dropped, by unfollow or by going private
-	if (!on && (await isPinnedFollowee(followeeId))) return;
+	if (!on && (await isPinnedFollowee(followeeId, followerId))) return;
 	if (on && (await isBlockedEitherWay(followerId, followeeId))) return;
 	if (on) {
 		const [target] = await sql`select protected from users where id = ${followeeId}::bigint`;

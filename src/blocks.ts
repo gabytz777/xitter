@@ -66,7 +66,7 @@ export const hasMutedWord = (viewerId: string, surface: Surface, postId: ReturnT
 export async function setBlock(blockerId: string, blockedId: string, on: boolean): Promise<boolean> {
 	if (blockerId === blockedId) return false;
 	// blocking a pinned follow would quietly drop it, so it's refused too
-	if (on && (await isPinnedFollowee(blockedId))) return;
+	if (on && (await isPinnedFollowee(blockedId, blockerId))) return;
 	if (!on) {
 		await sql`delete from blocks where blocker_id = ${blockerId}::bigint and blocked_id = ${blockedId}::bigint`;
 		return true;

@@ -104,6 +104,8 @@ export async function accountSettingsRoute(method: string, path: string, viewer:
 				where id = ${viewer.id}::bigint and password_hash = ${account.password_hash} returning id`;
 			if (!rows.length) return false;
 			await tx`update password_resets set used = true where user_id = ${viewer.id}::bigint and not used`;
+			// a Discord confirmation made before the password changed must not survive it
+			await tx`delete from step_up_grants where user_id = ${viewer.id}::bigint`;
 			// Other devices have to sign in again with the new password.
 			await tx`delete from sessions where user_id = ${viewer.id}::bigint and token <> ${viewer.token}`;
 			await tx`delete from api_tokens where user_id = ${viewer.id}::bigint`;
