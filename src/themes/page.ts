@@ -33,6 +33,7 @@ form.editor{display:grid;gap:16px;width:100%;max-width:100%;min-width:0;justify-
 .grow-tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .tiny{min-height:28px;padding:0 10px;font-size:13px}
 .gstop{display:flex;flex-wrap:wrap;gap:6px;align-items:center;grid-column:1/-1}
+.tok .grow-tools{grid-column:1/-1}
 .gstop label{display:grid;gap:2px;margin:0;font-size:11px}
 .gstop input[type=color]{width:40px;height:28px;min-height:28px;padding:1px;border:1px solid var(--outline);border-radius:6px;background:none}
 .ang{display:flex;align-items:center;gap:8px;flex:1 1 160px;min-width:0;margin:0;font-size:13px;line-height:16px;color:var(--muted)}
@@ -250,7 +251,7 @@ const EDITOR_SCRIPT = "(function(){\n" + chromeVarsEs5 + String.raw`
 		if(!row||row.querySelectorAll("input[type=color]").length>=max)return;
 		var n=row.querySelectorAll("input[type=color]").length+1;
 		var inp=document.createElement("input");
-		inp.type="color";inp.name=name;inp.value="#1d9bf0";
+		inp.type="color";inp.name=name;inp.value=/_stop$/.test(name)&&f[name.slice(0,-5)]?f[name.slice(0,-5)].value:"#1d9bf0";
 		inp.setAttribute("aria-label","Stop "+n);
 		row.appendChild(inp);
 		draw();
@@ -270,32 +271,42 @@ const EDITOR_SCRIPT = "(function(){\n" + chromeVarsEs5 + String.raw`
 		draw();
 	});
 	f.addEventListener("change",draw);
-	f.querySelectorAll("[data-add]").forEach(function(b){b.addEventListener("click",function(){addStop(b.getAttribute("data-add"),5)})});
-	f.querySelectorAll("[data-drop]").forEach(function(b){b.addEventListener("click",function(){dropStop(b.getAttribute("data-drop"))})});
-	f.querySelectorAll("[data-gtoggle]").forEach(function(b){b.addEventListener("click",function(){
-		var n=b.getAttribute("data-gtoggle"),on=b.getAttribute("aria-pressed")!=="true";
-		b.setAttribute("aria-pressed",on?"true":"false");
+	f.querySelectorAll("[data-add]").forEach(function(b){b.addEventListener("click",function(){var n=b.getAttribute("data-add");addStop(n,5);if(/_stop$/.test(n)&&n!=="surface_stop")flag(n.slice(0,-5),true)})});
+	f.querySelectorAll("[data-drop]").forEach(function(b){b.addEventListener("click",function(){var n=b.getAttribute("data-drop");dropStop(n);if(/_stop$/.test(n)&&n!=="surface_stop")flag(n.slice(0,-5),true)})});
+	function showGrad(n,on){
 		setv(n+"_grad",on?"1":"");
-		if(n!=="surface")flag(n,true);
+		var tog=f.querySelector('[data-gtoggle="'+n+'"]');
+		if(tog)tog.setAttribute("aria-pressed",on?"true":"false");
 		var row=f.querySelector('[data-stops="'+n+'_stop"]');
-		var ang=f.querySelector('input[name="'+n+'_angle"]');
 		if(row)row.hidden=!on;
-		if(ang&&ang.parentElement&&ang.parentElement.classList.contains("ang"))ang.parentElement.hidden=!on;
+		var tools=f.querySelector('[data-gtools="'+n+'"]');
+		if(tools)tools.hidden=!on;
 		if(on&&row&&!row.querySelector("input")&&f[n]){
 			var inp=document.createElement("input");inp.type="color";inp.name=n+"_stop";inp.value=f[n].value;
 			inp.setAttribute("aria-label","Stop 1");
 			row.appendChild(inp);
 		}
+	}
+	f.querySelectorAll("[data-gtoggle]").forEach(function(b){b.addEventListener("click",function(){
+		var n=b.getAttribute("data-gtoggle"),on=b.getAttribute("aria-pressed")!=="true";
+		showGrad(n,on);
+		if(n!=="surface")flag(n,true);
 		draw();
 	})});
-	function hideGrad(n){
-		setv(n+"_grad","");
-		var tog=f.querySelector('[data-gtoggle="'+n+'"]');
-		if(tog)tog.setAttribute("aria-pressed","false");
-		var row=f.querySelector('[data-stops="'+n+'_stop"]');
-		if(row)row.hidden=true;
-		var ang=f.querySelector('input[name="'+n+'_angle"]');
-		if(ang&&ang.parentElement&&ang.parentElement.classList.contains("ang"))ang.parentElement.hidden=true;
+	function hideGrad(n){showGrad(n,false)}
+	// a gradient from a theme file: its stops into the row, angle and all
+	function putGrad(name,value){
+		setv(name,value.stops[0]);
+		var row=f.querySelector('[data-stops="'+name+'_stop"]');
+		if(row){row.replaceChildren();value.stops.forEach(function(hex,i){
+			if(!/^#[0-9a-f]{6}$/.test(hex))return;
+			var inp=document.createElement("input");
+			inp.type="color";inp.name=name+"_stop";inp.value=hex;
+			inp.setAttribute("aria-label","Stop "+(i+1));
+			row.appendChild(inp);
+		})}
+		setv(name+"_angle",String(value.angle||180));
+		showGrad(name,true);
 	}
 	f.querySelectorAll("[data-reset]").forEach(function(b){b.addEventListener("click",function(){
 		var n=b.getAttribute("data-reset");
@@ -447,32 +458,12 @@ const EDITOR_SCRIPT = "(function(){\n" + chromeVarsEs5 + String.raw`
 		["surface","text","accent","buttonText"].forEach(function(name){
 			var value=theme[name];
 			if(typeof value==="string"&&/^#[0-9a-f]{6}$/.test(value)){setv(name,value);hideGrad(name)}
-			else if(value&&value.stops){
-				setv(name,value.stops[0]);
-				setv(name+"_grad","1");
-				var tog=f.querySelector('[data-gtoggle="'+name+'"]');
-				if(tog)tog.setAttribute("aria-pressed","true");
-				var row=f.querySelector('[data-stops="'+name+'_stop"]');
-				if(row){row.hidden=false;row.replaceChildren();value.stops.forEach(function(hex,i){
-					if(!/^#[0-9a-f]{6}$/.test(hex))return;
-					var inp=document.createElement("input");
-					inp.type="color";inp.name=name+"_stop";inp.value=hex;
-					inp.setAttribute("aria-label","Stop "+(i+1));
-					row.appendChild(inp);
-				})}
-				setv(name+"_angle",String(value.angle||180));
-				var ang=f.querySelector('input[name="'+name+'_angle"]');
-				if(ang&&ang.parentElement)ang.parentElement.hidden=false;
-			}
+			else if(value&&value.stops)putGrad(name,value);
 		});
 		ADV.forEach(function(name){
 			var value=theme[name];
 			if(typeof value==="string"&&/^#[0-9a-f]{6}$/.test(value)){flag(name,true);setv(name,value);hideGrad(name)}
-			else if(value&&value.stops){
-				flag(name,true);
-				setv(name+"_grad","1");
-				setv(name,value.stops[0]);
-			}
+			else if(value&&value.stops){flag(name,true);putGrad(name,value)}
 		});
 		setv("font_ui",theme.font&&typeof theme.font.ui==="string"?theme.font.ui:"");
 		setv("font_display",theme.font&&typeof theme.font.display==="string"?theme.font.display:"");
@@ -609,9 +600,9 @@ function asGrad(v: Fill, fallback: string): Gradient {
 
 function fillRow(label: string, name: string, value: Fill, fallback: string, set: boolean, reset: boolean) {
 	const g = asGrad(value, fallback);
-	const on = typeof value === "object" && value.stops.length > 1;
+	const on = typeof value === "object";
 	const solid = solidOf(typeof value === "string" || typeof value === "object" ? value : fallback);
-	return `<div class="tok" data-fill="${name}"><span>${label}</span><input type="color" name="${name}" data-adv="${name}" value="${/^#/.test(solid) ? solid : fallback}"><button type="button" class="secondary g" data-gtoggle="${name}" aria-pressed="${on}" title="Gradient">G</button>${reset ? `<button type="button" class="secondary x" data-reset="${name}" title="Reset">×</button>` : `<span></span>`}<input type="hidden" name="${name}_set" value="${set ? "1" : ""}"><input type="hidden" name="${name}_grad" value="${on ? "1" : ""}"><div class="gstop" data-stops="${name}_stop"${on ? "" : " hidden"}>${stopInputs(`${name}_stop`, g)}</div><label class="ang"${on ? "" : " hidden"}>Angle<input type="range" name="${name}_angle" min="0" max="360" value="${g.angle}"><span class="deg" data-deg="${name}_angle">${g.angle}°</span></label></div>`;
+	return `<div class="tok" data-fill="${name}"><span>${label}</span><input type="color" name="${name}" data-adv="${name}" value="${/^#/.test(solid) ? solid : fallback}"><button type="button" class="secondary g" data-gtoggle="${name}" aria-pressed="${on}" title="Gradient">G</button>${reset ? `<button type="button" class="secondary x" data-reset="${name}" title="Reset">×</button>` : `<span></span>`}<input type="hidden" name="${name}_set" value="${set ? "1" : ""}"><input type="hidden" name="${name}_grad" value="${on ? "1" : ""}"><div class="gstop" data-stops="${name}_stop"${on ? "" : " hidden"}>${stopInputs(`${name}_stop`, g)}</div><div class="grow-tools" data-gtools="${name}"${on ? "" : " hidden"}><button type="button" class="secondary tiny" data-add="${name}_stop">+ stop</button><button type="button" class="secondary tiny" data-drop="${name}_stop">− stop</button><label class="ang">Angle<input type="range" name="${name}_angle" min="0" max="360" value="${g.angle}"><span class="deg" data-deg="${name}_angle">${g.angle}°</span></label></div></div>`;
 }
 
 function formFill(f: FormData, name: string): unknown {
@@ -694,7 +685,7 @@ async function themePage(req: Request, viewer: Viewer, current: Theme | null, no
 	const mp4Path = ownedBg?.mp4 && STEAM_VIDEO_PATH.test(ownedBg.mp4) ? ownedBg.mp4 : "";
 	const steamDef = bg && "steam" in bg && bg.steam ? String(bg.steam.defid) : "";
 	const body = `<h1>Theme</h1>
-	<p class="dim">X dropped Dim; this puts it back, and lets you pick a look of your own. Dark themes sit on Lights out, light ones on Default. A typeface rides with a theme — Default / Lights out is X's own and has no custom font. On an organisation's profile, its decor replaces your theme until you leave.</p>
+	<p class="dim">Dim, a preset, or your own colours. An organisation's profile shows its own decor while you're on it.</p>
 	${notices.error ? `<p class="error">${esc(notices.error)}</p>` : ""}
 	${(notices.warnings ?? []).map((w) => `<p class="dim">${esc(w)}</p>`).join("")}
 	<h2>Share</h2>

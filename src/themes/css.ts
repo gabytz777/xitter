@@ -76,6 +76,7 @@ export function xtVars(theme: Theme): Record<string, string> {
 	return {
 		"--xt-bg": d.bg,
 		"--xt-surface": d.surface,
+		"--xt-surface-solid": solidOf(theme.surface),
 		"--xt-text": d.text,
 		"--xt-secondary": d.secondary,
 		"--xt-muted": d.muted,
@@ -247,7 +248,7 @@ export function pageChromeRules(slots: ChromeSlots): string {
 		.filter((sel) => sel)
 		.map((sel) => glassSel(slots, sel))
 		.join(",");
-	const tint = "background:color-mix(in srgb,var(--xt-surface) var(--xt-bg-panel),transparent)!important;";
+	const tint = "background:color-mix(in srgb,var(--xt-surface-solid,var(--xt-surface)) var(--xt-bg-panel),transparent)!important;";
 	return (
 		`${img}{position:relative;z-index:0}` +
 		`${img}::before{content:"";position:${pos};inset:0;z-index:-1;background-image:var(--xt-bg-image);background-size:var(--xt-bg-size);background-position:var(--xt-bg-position);background-repeat:var(--xt-bg-repeat);filter:blur(var(--xt-bg-blur));pointer-events:none}` +
@@ -255,7 +256,7 @@ export function pageChromeRules(slots: ChromeSlots): string {
 		`@media (prefers-reduced-motion:reduce){${img}::before{animation:none;background-image:var(--xt-bg-still)}}` +
 		`${soft}{${tint}-webkit-backdrop-filter:blur(2px)!important;backdrop-filter:blur(2px)!important}` +
 		`${hard}{${tint}-webkit-backdrop-filter:blur(14px)!important;backdrop-filter:blur(14px)!important}` +
-		`@supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){${soft},${hard}{background:color-mix(in srgb,var(--xt-surface) 92%,transparent)!important}}`
+		`@supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){${soft},${hard}{background:color-mix(in srgb,var(--xt-surface-solid,var(--xt-surface)) 92%,transparent)!important}}`
 	);
 }
 

@@ -9,13 +9,14 @@ import { BodyTooLarge, boundedBody } from "./api-input";
 import { accountPage, esc } from "./account-page";
 import { type User, type Viewer } from "./auth";
 import { PUBLIC_ORIGIN } from "./config";
+import { pronounsValue } from "./pronouns";
 import { sql } from "./db";
 import { callOperation } from "./graphql";
 import { isId, newId } from "./ids";
 import { absolute, mediaUpload, mediaUrl, posterUrl } from "./media";
 import { type PostRow, badgeList, isOrganization, isVerified, shownVerifiedType, verifiedSince } from "./model";
 import { PostError, feed, getPost, likerIds, postsByIds, replies, type FeedItem } from "./posts";
-import { setProfileImage, updateProfileText } from "./rest";
+import { setProfileImage, updatePronouns, updateProfileText } from "./rest";
 import { ReplyControlError } from "./reply-controls";
 import { type Bucket, limitHeaders, limitedResponse, noteRefusal, take } from "./ratelimit";
 import { searchPosts, searchUsers } from "./search";
@@ -99,6 +100,7 @@ function userJson(u: User) {
 		screen_name: u.screen_name,
 		name: u.name,
 		bio: u.bio ?? "",
+		pronouns: pronounsValue(u.pronouns),
 		location: u.location ?? "",
 		website: u.website || null,
 		avatar_url: absolute(u.avatar_url),
@@ -454,8 +456,8 @@ const op = async (name: string, v: Viewer, vars: Record<string, unknown>) => {
 const ROUTES: Route[] = [
 	{ method: "GET", pattern: /^\/me$/, scope: "read", run: async (v) => ({ data: userJson((await userByName(v.id, v.screen_name))!) }) },
 	{
-		// edit the profile: name, bio, location, website (empty string clears),
-		// avatar_media_id / banner_media_id from POST /media, remove_banner: true
+		// edit the profile: name, bio, pronouns, location, website (empty string
+		// clears), avatar_media_id / banner_media_id from POST /media, remove_banner: true
 		method: "PATCH", pattern: /^\/me$/, scope: "write",
 		run: async (v, _m, req) => {
 			const b = await body(req);
@@ -465,10 +467,12 @@ const ROUTES: Route[] = [
 				if (typeof b[key] !== "string") throw new ApiError(400, `${key} is a string.`);
 				text[web] = b[key];
 			}
+			if (b.pronouns !== undefined && b.pronouns !== null && typeof b.pronouns !== "string") throw new ApiError(400, "pronouns is a string.");
 			if (b.avatar_media_id !== undefined && !isId(String(b.avatar_media_id))) throw new ApiError(400, "avatar_media_id is a media id.");
 			if (b.banner_media_id !== undefined && !isId(String(b.banner_media_id))) throw new ApiError(400, "banner_media_id is a media id.");
 			const problem =
 				(Object.keys(text).length ? await updateProfileText(v, text) : null) ??
+				(typeof b.pronouns === "string" ? await updatePronouns(v, b.pronouns) : null) ??
 				(b.avatar_media_id !== undefined ? await setProfileImage(v, "avatar", String(b.avatar_media_id)) : null) ??
 				(b.banner_media_id !== undefined ? await setProfileImage(v, "banner", String(b.banner_media_id)) : null);
 			if (problem) throw new ApiError(400, problem);

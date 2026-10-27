@@ -53,6 +53,26 @@ export class AdminError extends Error {
 type Body = Record<string, any>;
 export type Action = { role: Role; run: (actor: Viewer, b: Body, req?: Request) => Promise<unknown> };
 
+// Every action the code logs (grep audit( and audit_log inserts when adding one),
+// so the audit filter offers them all, logged yet or not.
+export const AUDIT_ACTIONS = [
+	"add_affiliate", "add_staff_note", "add_sticker", "archive_import", "article_visibility", "auto_suspend_name", "automod_second_chance",
+	"automod_strike", "backup_schedule", "block_oauth_app", "bulk_status", "bulk_strike", "compress_stored", "create_backup", "create_badge",
+	"create_hashflag", "create_invites", "create_label", "create_org", "create_platform", "create_sticker_pack", "delete_account", "delete_backup",
+	"delete_badge", "delete_community_note", "delete_explore_card", "delete_hashflag", "delete_label", "delete_media", "delete_post", "delete_sticker",
+	"delete_sticker_pack", "delete_topic", "download_backup", "edit_profile", "end_hashflag", "escalate", "evasion_signup_refused", "expire_sanction",
+	"federation_accept_key", "federation_block", "federation_drop_media", "federation_pull", "federation_purge", "federation_unblock", "hosting_adopt",
+	"hosting_approve", "hosting_reject", "hosting_revoke", "invite_quota", "money_adjust", "money_remote_shop_update", "money_reverse",
+	"money_settings", "money_shop_announcement_clear", "money_shop_item_create", "money_shop_item_update", "money_shop_settings", "org_badge",
+	"release_identity", "remove_affiliate", "rename_sticker_pack", "reset_branding", "reset_decor", "reset_password", "resolve_appeal",
+	"resolve_errors", "review_community_note_appeal", "revoke_api_tokens", "revoke_invite", "revoke_platform", "revoke_session", "revoke_strike",
+	"rollback_client", "save_automod", "save_operations", "save_security", "save_settings", "self_update", "self_update_rollback", "send_staff_message",
+	"send_test_mail", "set_badge", "set_badges", "set_feature_switch", "set_flag", "set_never_sensitive", "set_notes_access", "set_post_counts",
+	"set_post_notice", "set_post_visibility", "set_profile_label", "set_remote_checkmarks", "set_role", "set_signup_mode", "set_staff_permissions",
+	"set_status", "set_translator", "set_user_counts", "sign_out", "superadmin_emergency_block", "superadmin_emergency_lift", "suspend_blocked_names",
+	"temporary_status", "unblock_oauth_app", "update_client", "upload_branding",
+];
+
 export async function audit(actor: Viewer, action: string, target: string | null, detail: unknown = null) {
 	await sql`insert into audit_log (id, actor_id, action, target, detail)
 		values (${newId()}::bigint, ${actor.id}::bigint, ${action}, ${target}, ${detail === null ? null : JSON.stringify(detail)}::text::jsonb)`;
@@ -929,11 +949,11 @@ const ACTIONS: Record<string, Action> = {
 					left join users t on l.target ~ '^[0-9]+$' and t.id = l.target::bigint
 					where ${action ? sql`l.action = ${action}` : sql`true`} and ${b.automatic ? sql`l.actor_id is null` : sql`true`}
 						and ${who ? sql`lower(t.screen_name) = lower(${who})` : sql`true`}`;
-			// the filter offers what the log holds: actions are logged from all over, and a fixed list misses some
-			const actions = await sql`select distinct action from audit_log order by action`;
+			// the filter offers every action the code logs, and anything older the log still holds
+			const logged = await sql`select distinct action from audit_log order by action`;
 			return {
 				total: Number(total[0]?.total ?? 0),
-				actions: actions.map((r: { action: string }) => r.action),
+				actions: [...new Set([...AUDIT_ACTIONS, ...logged.map((r: { action: string }) => r.action)])].sort(),
 				entries: await sql`select l.id::text as id, l.action, l.target, l.detail, l.created_at, a.screen_name as actor, l.actor_id is null as automatic,
 					t.screen_name as target_name
 					from audit_log l left join users a on a.id = l.actor_id

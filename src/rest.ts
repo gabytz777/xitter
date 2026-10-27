@@ -61,6 +61,25 @@ async function relationship(viewer: Viewer, targetId: string) {
 
 const profileError = (message: string) => Response.json({ errors: [{ code: 120, message }] }, { status: 403 });
 
+// the problem with the new pronouns, or undefined once they are saved
+export async function updatePronouns(viewer: Viewer, raw: string): Promise<string | undefined> {
+	const value = oneLine(raw).trim();
+	const problem = pronounsProblem(value);
+	if (problem) return problem;
+	const hate = hateIn(value);
+	if (hate) {
+		await automodStrike(viewer.id, hate, "profile", value);
+		return "Your pronouns contain a slur or hate speech this instance doesn't allow.";
+	}
+	if (blockedWordIn(value)) {
+		if (!viewer.role) await suspendForName(viewer.id, value);
+		return "Your pronouns contain a word this instance doesn't allow.";
+	}
+	if (hasBlockedPhrase(value)) return "Your pronouns contain a phrase this instance doesn't allow.";
+	await sql`update users set pronouns = ${value || null} where id = ${viewer.id}::bigint`;
+	return undefined;
+}
+
 async function form(req: Request): Promise<Record<string, string>> {
 	const f = await req.formData().catch(() => undefined);
 	const out: Record<string, string> = {};
@@ -88,20 +107,8 @@ async function profileRoute(path: string, viewer: Viewer, req: Request): Promise
 		return changedUser(viewer);
 	}
 	if (m[1] === "update_pronouns") {
-		const value = oneLine(f.pronouns ?? "").trim();
-		const problem = pronounsProblem(value);
+		const problem = await updatePronouns(viewer, f.pronouns ?? "");
 		if (problem) return profileError(problem);
-		const hate = hateIn(value);
-		if (hate) {
-			await automodStrike(viewer.id, hate, "profile", value);
-			return profileError("Your pronouns contain a slur or hate speech this instance doesn't allow.");
-		}
-		if (blockedWordIn(value)) {
-			if (!viewer.role) await suspendForName(viewer.id, value);
-			return profileError("Your pronouns contain a word this instance doesn't allow.");
-		}
-		if (hasBlockedPhrase(value)) return profileError("Your pronouns contain a phrase this instance doesn't allow.");
-		await sql`update users set pronouns = ${value || null} where id = ${viewer.id}::bigint`;
 		return changedUser(viewer);
 	}
 	if (m[1] === "remove_profile_banner") {
