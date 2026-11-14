@@ -37,8 +37,9 @@ export async function requestReset(usernameOrEmail: string): Promise<void> {
 	if (!u) return;
 	const name = settings().instance_name;
 	const link = `${PUBLIC_ORIGIN}/account/reset?token=${token}`;
+	// not awaited: the answer must take as long whether or not there was an account to mail
 	if (mailEnabled() && u.email) {
-		await sendMail(
+		void sendMail(
 			u.email,
 			`Reset your ${name} password`,
 			`Hi @${u.screen_name},\n\nSomeone asked to reset the password of your ${name} account. Open this link within an hour to choose a new one:\n\n${link}\n\nIf this wasn't you, ignore this message: your password stays as it is.`,
@@ -49,11 +50,11 @@ export async function requestReset(usernameOrEmail: string): Promise<void> {
 	// no mail here: a linked Discord account gets the same link, and never the
 	// new password itself — a DM is kept forever and read on every device
 	if (u.discord_id && process.env.DISCORD_BOT_TOKEN) {
-		const sent = await dmUser(
+		const failed = () => console.error("password reset DM: could not message", u.discord_id);
+		void dmUser(
 			u.discord_id,
 			`Someone asked to reset the password of your @${u.screen_name} account on ${name}. Open this link within an hour to choose a new one:\n\n${link}\n\nIf this wasn't you, ignore this message: your password stays as it is.`,
-		).catch(() => false);
-		if (!sent) console.error("password reset DM: could not message", u.discord_id);
+		).then((sent) => sent || failed(), failed);
 	}
 }
 
