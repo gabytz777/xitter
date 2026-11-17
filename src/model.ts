@@ -19,6 +19,7 @@ import { requestLanguage } from "./staff-access";
 import { feature, settings } from "./settings";
 import { SHORT_POST, previewOf, weightedLength } from "./textlen";
 import { badgeUrl } from "./users";
+import { loadBuild } from "./build";
 
 // a note's text with its links marked, as the note box and the note page expect
 export function noteText(text: string) {
@@ -303,6 +304,22 @@ export function userResult(u: User) {
 	};
 }
 
+// The 2020 client (client/old) has one checkmark and no affiliate badge. Its
+// `verified` carries both: true, "business" or "government" paint the check
+// (patch.ts LEGACY_RULES), and with a badge label it is an object that also
+// names the badge to draw after the name.
+export function oldVerified(blue: boolean, type: string | undefined, label: any): unknown {
+	const check = !blue ? false : type === "Business" ? "business" : type === "Government" ? "government" : true;
+	const img = label?.badge?.url;
+	if (!img) return check;
+	const org = /screen_name=([^&]+)/.exec(label.url?.url ?? "")?.[1];
+	return { t: check, img, name: label.description ?? "", ...(org ? { org } : {}) };
+}
+const oldClient = () => !!loadBuild()?.build.stateBase;
+// a fragment, so the picture loads as ever; shell.ts squares what carries it
+export const SQUARE_MARK = "#square";
+export const oldAvatar = (url: string | undefined, shape: string | undefined) => (url && shape === "Square" ? url + SQUARE_MARK : url);
+
 // older REST-style user record, used inside the page's initial state
 export function legacyUser(u: User) {
 	return {
@@ -335,9 +352,9 @@ export function legacyUser(u: User) {
 		super_followed_by: false,
 		super_following: false,
 		verified_user_profiles: { super_follows_user_profile: { is_active: false } },
-		verified: false,
+		verified: oldClient() ? oldVerified(isVerified(u), verification(u).verified_type, (badgeLabel(u) as any).label) : false,
 		protected: !!u.protected,
-		profile_image_url_https: absolute(u.avatar_url) ?? DEFAULT_AVATAR,
+		profile_image_url_https: oldClient() ? oldAvatar(absolute(u.avatar_url) ?? DEFAULT_AVATAR, pictureShape(u)) : (absolute(u.avatar_url) ?? DEFAULT_AVATAR),
 		...(u.banner_url ? { profile_banner_url: absolute(u.banner_url) } : {}),
 		can_media_tag: true,
 		// with a default avatar and no bio or banner the client offers its "Set up

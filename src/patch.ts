@@ -94,7 +94,8 @@ const RULES: [RegExp, string][] = [
 	[/(\w+)=\w+\.isAnyPremiumSubscriber,(\(\(\{handleDownloadVideo:)/g, "$1=!0,$2"],
 	// the router's profile addresses: staff can give a handle any characters up
 	// to 50 (invites.ts STAFF_HANDLE), which the address carries percent-encoded
-	[/screenName:"\[a-zA-Z0-9_\]\{1,26\}"/g, 'screenName:"[^/]{1,200}"'],
+	// (the 2020 client's is {1,20}); remote accounts' user@host go through it too
+	[/screenName:"\[a-zA-Z0-9_\]\{1,2[06]\}"/g, 'screenName:"[^/]{1,200}"'],
 	[
 		/(descriptionTextParts:\((\w+),(\w+),(\w+)\)=>\{let \w+=)(\w+)\(\(0,(\w+\.A)\)\(\2\),(\w+\.A\.MENTION)\)([\s\S]{0,600}?;let \w+=\3&&\3\.description&&\3\.description\.urls;if\(\w+&&\w+\.length\)\{let \3=\5\(\w+\.map\(\3=>\(\{\.\.\.\3,indices:\4\?\.isUTF16EntityIndices\?\3\.indices:\(0,(\w+\.A)\)\(\2,)/g,
 		"$1(Array.isArray($3?.description?.user_mentions)?$5($3.description.user_mentions.map($3=>({...$3,screenName:$3.screen_name,indices:$4?.isUTF16EntityIndices?$3.indices:(0,$9)($2,$3.indices[0],$3.indices[1])})),$7):$5((0,$6)($2),$7))$8",
@@ -162,6 +163,47 @@ export function brandText(text: string, name: string, code = false): string {
 	return text.replace(STRING, (s) => (!code || (PROSE.test(s) && WORDS.test(s)) ? s.replace(BRAND, () => literal) : s));
 }
 
+// only the 2020 client's files (client-web-legacy)
+const LEGACY_RULES: [RegExp, string][] = [
+	// its only checkmark, painted from `verified` (model.ts oldVerified): gold
+	// for organisations, grey for governments, blue for the rest (the 2020
+	// client drew its one check white on a dark theme); then an affiliate badge
+	[
+		/(\w+)\.isVerified&&(\w+)\.push\((\w+)\.createElement\((\w+\.a),\{accessibilityLabel:(\w+),style:\[(\w+)\.marginLeft,\6\.defaultBadgeColor,(\w+)\]\}\)\)/g,
+		'(function(xv){var xt=xv&&typeof xv=="object"?xv.t:xv;xt&&$2.push($3.createElement($4,{key:"xc",accessibilityLabel:$5,style:[$6.marginLeft,$6.defaultBadgeColor,$7,xt==="business"?{color:"rgb(226,183,25)"}:xt==="government"?{color:"rgb(130,154,171)"}:{color:"rgb(29,155,240)"}]}));xv&&xv.img&&$2.push($3.createElement("img",{key:"xa",src:xv.img,alt:xv.name,title:xv.name,style:{width:"1.05em",height:"1.05em",borderRadius:3,marginLeft:4,verticalAlign:"-0.15em",objectFit:"cover",flexShrink:0}}))})($1.isVerified)',
+	],
+	// the profile header and user cells cast `verified` to a boolean first
+	[/isVerified:!!(\w+)\.verified(?![\w$])/g, "isVerified:$1.verified"],
+	// Settings: Xitter settings above Additional resources (shell.ts loads our
+	// pages whole when their links are clicked)
+	[/(([\w$]+)\.createElement\(([\w$]+),\{label:[\w$]+,link:"\/settings\/about")/g, '$2.createElement($3,{label:"Xitter settings",link:"/settings/xitter"}),$1'],
+	// Home's sparkle menu switches top and latest Tweets (For you and Following);
+	// All, every post here, is the built-in list (lists.ts)
+	[/(_getActionMenuItems",\(function\(\)\{var [\w$]+=[\w$]+\.props\.useLatest,[\w$]+=[^;]{1,20};return\[\{text:[^}]{1,80},Icon:([\w$]+\.a),subText:[\w$]+\},)/g, '$1{link:"/i/lists/1",text:"See all Tweets",subText:"Every Tweet on this instance, newest first.",Icon:$2},'],
+	// ...and Home gets For you / Following / All tabs (shell.ts OLD_TABS) atop its
+	// timeline, which take over from that button: its component now only says
+	// which timeline is on and how to switch
+	[/("_renderPrimaryContent",\(function\(\)\{var [\w$]+=[\w$]+\.props,([\w$]+)=[\w$]+\.history,[^;]{0,200};return ([\w$]+)\.createElement\(\3\.Fragment,null,)/g, "$1window.__xitterTabs?$3.createElement(window.__xitterTabs($3),{history:$2}):null,"],
+	[/(key:"render",value:function\(\)\{var ([\w$]+)=this\.props\.useLatest;)return [\w$]+\.createElement\([\w$]+,\{onContentPreferencesSelect:this\._handleContentPreferencesSelect,onPress:this\._handleSwitchPress,onToggle:this\._handleToggle,useLatest:\2\}\)/g, '$1var xs=this;window.__xitterHome={useLatest:$2,toggle:function(){xs._handleToggle()}};setTimeout(function(){window.dispatchEvent(new Event("xitter:home"))});return null'],
+	// the header says Home on every tab, not "Latest Tweets"
+	[/(=this\._latestTimelineSwitchEnabled&&[\w$]+\?)[\w$]+:([\w$]+)(?=[,;])/g, "$1$2:$2"],
+	// More menu entries for what Xitter doesn't run: Topics, and the sites
+	// Twitter had for ads, analytics and media (they lead to x.com)
+	[/(_render(?:Topics|TwitterAds|Analytics|MediaStudio)Item",\(function\([\w$]*\)\{)return /g, "$1return null;"],
+];
+
+// the More menu: after Settings and privacy, what shell.ts puts in __XITTER_MENU__
+function legacyMenu(text: string): string {
+	const names = /_renderSettingsItem",\(function\(\)\{return ([\w$]+)\.createElement\(([\w$]+),\{icon:/.exec(text);
+	if (!names) return text;
+	const [, react, item] = names;
+	// the icon takes the colour, size and spacing of the menu's own icons, which
+	// come from styles this module can't reach
+	const fit = `function(el){if(!el)return;var own=el.closest("[role=menu]");own=own&&own.querySelector("svg:not([data-xitter])");if(!own)return;var c=getComputedStyle(own);el.style.width=c.width;el.style.height=c.height;el.style.marginRight=c.marginRight;el.style.fill=c.color}`;
+	const entries = `(window.__XITTER_MENU__||[]).map(function(l){return ${react}.createElement(${item},{key:l.href,label:l.text,link:l.href,icon:function(){return ${react}.createElement("svg",{viewBox:l.viewBox,"aria-hidden":"true","data-xitter":"",ref:${fit},style:{width:"1.5em",height:"1.5em",marginRight:12,flexShrink:0}},${react}.createElement("path",{d:l.icon}))}})})`;
+	return text.replace(/this\._renderSettingsItem\(\),/g, `this._renderSettingsItem(),${entries},`);
+}
+
 export function patchText(text: string, chat = false): string {
 	let out = text;
 	let re: RegExp, to: string;
@@ -180,8 +222,9 @@ export function patchText(text: string, chat = false): string {
 const MAX_PATCH_CACHE_BYTES = 64 * 1024 * 1024;
 const cache = new Map<string, Buffer>();
 let cacheBytes = 0;
-export function cachedPatch(key: string): Buffer | undefined {
-	const slot = key.endsWith(".js") ? `${key}\0${settings().instance_name}` : key;
+// `build`: the client build's folder, as two builds can share a path (/emoji/...)
+export function cachedPatch(key: string, build = ""): Buffer | undefined {
+	const slot = `${build}\0${key.endsWith(".js") ? `${key}\0${settings().instance_name}` : key}`;
 	const hit = cache.get(slot);
 	if (hit) {
 		cache.delete(slot);
@@ -195,13 +238,17 @@ export const clearPatchCache = () => {
 };
 
 // the name can change while the server runs, so script files are cached per name
-export function patchFile(key: string, raw: Buffer): Buffer {
+export function patchFile(key: string, raw: Buffer, build = ""): Buffer {
 	const js = key.endsWith(".js");
 	const name = settings().instance_name;
-	const slot = js ? `${key}\0${name}` : key;
-	let hit = cachedPatch(key);
+	const slot = `${build}\0${js ? `${key}\0${name}` : key}`;
+	let hit = cachedPatch(key, build);
 	if (!hit) {
 		let text = patchText(raw.toString("utf8"), key.startsWith("/x-web/xchat/"));
+		if (key.includes("/client-web-legacy/")) {
+			for (const [re, to] of LEGACY_RULES) text = text.replace(re, to);
+			text = legacyMenu(text);
+		}
 		if (js) text = brandText(text, name, !I18N.test(key));
 		hit = Buffer.from(text);
 		if (hit.byteLength <= MAX_PATCH_CACHE_BYTES) {

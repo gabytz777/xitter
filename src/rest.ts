@@ -10,12 +10,13 @@ import type { Viewer } from "./auth";
 import { addKeyword, mutedKeywords, removeKeywords, setBlock, setMute, updateKeyword } from "./blocks";
 import { getPost } from "./posts";
 import { sql } from "./db";
+import { queueReview } from "./claude-mod";
 import { flagValue, unknownFlag } from "./flags";
 import { pronounsProblem } from "./pronouns";
 import { isId } from "./ids";
 import { isVerified, legacyUser, tweetResult } from "./model";
 import { markSeen } from "./notifications";
-import { PollError, createCard, vote } from "./polls";
+import { PollError, createCard, pollCardById, vote } from "./polls";
 import { placeById, searchPlaces } from "./places";
 import { reportFlow } from "./reports";
 import { settingsFor } from "./shell";
@@ -146,6 +147,7 @@ export async function updateProfileText(viewer: Viewer, f: Record<string, string
 		changes[column] = value;
 	}
 	if (Object.keys(changes).length) await sql`update users set ${sql(changes)} where id = ${viewer.id}::bigint`;
+	if ("name" in changes || "bio" in changes) queueReview("profile", viewer.id);
 	return null;
 }
 
@@ -172,6 +174,11 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 		const id = /^card:\/\/(\d{1,19})$/.exec(params["twitter:string:card_uri"] ?? params.status ?? "")?.[1];
 		const post = id && isId(id) ? await getPost(viewer.id, id) : undefined;
 		const card = post?.conversationCard ? (tweetResult(post, false).card as any)?.legacy : undefined;
+		if (!card && id && isId(id) && method === "GET") {
+			// a poll's own card id: the 2020 client refreshes poll results this way
+			const poll = await pollCardById(viewer.id, id);
+			if (poll) return Response.json(poll);
+		}
 		if (!card) return Response.json({ errors: [{ code: 144, message: "That conversation card is unavailable." }] }, { status: 404 });
 		return Response.json({ card: { ...card, binding_values: Object.fromEntries(card.binding_values.map((entry: any) => [entry.key, entry.value])) } });
 	}
@@ -245,7 +252,8 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 	const friendship = /^\/1\.1\/friendships\/(create|destroy)\.json$/.exec(path);
 	if (friendship && method === "POST") {
 		const form = await req.formData().catch(() => undefined);
-		const target = form?.get("user_id");
+		// the 2020 client (client/old/) sends `id` from Who to follow, user_id elsewhere
+		const target = form?.get("user_id") ?? form?.get("id") ?? new URL(req.url).searchParams.get("user_id");
 		if (!isId(target)) return Response.json({ errors: [{ code: 50, message: "User not found." }] }, { status: 404 });
 		await setFollow(viewer.id, target, friendship[1] === "create");
 		const user = await userById(viewer.id, target);

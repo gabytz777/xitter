@@ -1,10 +1,11 @@
 import { MULTI_COOKIE, type Viewer, expireSessions, getViewer, parseCookies, csrfCookie } from "./auth";
-import { clientPathAllowed, getClientFile, getClientFilePath, hasClientFile } from "./client-cache";
+import { CLIENT_DIR, clientDir, clientPathAllowed, getClientFile, getClientFilePath, hasClientFile, withClientDir } from "./client-cache";
+import { CLIENT_COOKIE, chosenClient, clientCookie, clientRoute, requestClient, switchByQuery } from "./client-choice";
 import { PORT, PUBLIC_ORIGIN } from "./config";
 import { migrate, sql } from "./db";
 import { knownOperation, runOperation } from "./graphql";
 import { brandingFile } from "./branding";
-import { handleLogin, maintenancePage, rulesPage } from "./login";
+import { handleLogin, handleOldSessions, maintenancePage, rulesPage } from "./login";
 import { adminApi, audit } from "./admin";
 import { loadSettings, settings } from "./settings";
 import { flagPickerData } from "./flag-picker";
@@ -21,10 +22,12 @@ import { menuLinks } from "./tidy";
 import { isPlayerPage, playerPage } from "./player-card";
 import { chatMediaRoute, chatSocket, juiceboxProxy, socketUser } from "./chat";
 import { sweepChatUploads } from "./chat-media";
-import { loadBuild } from "./build";
+import { clientBuilds, loadBuild } from "./build";
 import { MEDIA_DIR, mediaUpload, serveMedia } from "./media";
+import { serveScanCopy, startMediaScan } from "./media-scan";
 import { resumeVideos } from "./video";
 import { livePipeline, restRoute } from "./rest";
+import { adaptiveRoute, legacyOperation } from "./adaptive";
 import { bootScript, shell } from "./shell";
 import { platformSource } from "./platforms";
 import { badgeImage, expireSanctions } from "./moderation";
@@ -44,6 +47,7 @@ import { gifProxy } from "./gifs";
 import { accountIndexRoute } from "./account-page";
 import { gifSettingsRoute } from "./gif-settings";
 import { classicDetailRoute, postCounts } from "./classic-detail";
+import { legacyAnalyticsPage } from "./legacy-analytics";
 import { circleRoute } from "./circles";
 import { cardImage } from "./explore-cards";
 import { rememberIp, requestIp } from "./login-history";
@@ -99,7 +103,7 @@ const MIME: Record<string, string> = {
 // The client also calls outside services on its own (grok.com checkout, ads
 // measurement). Requests from the page may only reach this instance.
 const SETTINGS_PAGES = new Set(
-	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant", "gifs", "post-details"].map((s) => `/account/${s}`),
+	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant", "gifs", "post-details", "client"].map((s) => `/account/${s}`),
 );
 
 const PAGE_CSP = "connect-src 'self' blob: data:; font-src 'self'";
@@ -161,8 +165,13 @@ function staffBlockedPage(reason: string) {
 	);
 }
 
+// Files come from the request's build, else from another build that has them:
+// a page asks for its own build's files, but a cookie can change between the
+// page and its later chunks
 async function serveClient(req: Request, pathname: string): Promise<Response> {
 	const cdnPath = pathname.slice("/abs".length);
+	const holder = hasClientFile(cdnPath) ? undefined : clientBuilds().find((b) => b.dir !== clientDir() && withClientDir(b.dir, () => hasClientFile(cdnPath)));
+	if (holder) return withClientDir(holder.dir, () => serveClient(req, pathname));
 	// a file not in the archive yet is fetched from the CDN and kept: only from
 	// where the client's files live, and not faster than one address loads pages
 	if (!hasClientFile(cdnPath)) {
@@ -180,11 +189,11 @@ async function serveClient(req: Request, pathname: string): Promise<Response> {
 
 	// The file name stays the same when our patches change, so patched files are
 	// revalidated against a hash of what we actually serve.
-	let body = cachedPatch(cdnPath);
+	let body = cachedPatch(cdnPath, clientDir());
 	if (!body) {
 		const raw = await getClientFile(cdnPath);
 		if (!raw) return new Response("not found", { status: 404 });
-		body = patchFile(cdnPath, raw);
+		body = patchFile(cdnPath, raw, clientDir());
 	}
 	let hash = etags.get(body);
 	if (!hash) {
@@ -237,7 +246,10 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 	const gql = parts.indexOf("graphql");
 	const operation = gql >= 0 ? parts[parts.length - 1] : undefined;
 	if (req.method === "POST" && path === "/1.1/graphql/app_context.json") return new Response(null, { status: 204 });
-	if ((req.method !== "GET" || operation) && req.headers.get("x-csrf-token") !== viewer.csrf)
+	// The 2020 client's uploader (client/old/) sends cookies and no csrf header, as
+	// upload.twitter.com wanted; the browser's own same-origin mark stands in for it
+	const oldUpload = !!loadBuild()?.build.stateBase && /^\/(i|1\.1)\/media\/upload2?\.json$/.test(path) && req.headers.get("sec-fetch-site") === "same-origin";
+	if ((req.method !== "GET" || operation) && req.headers.get("x-csrf-token") !== viewer.csrf && !oldUpload)
 		return apiError(403, 353, "This request requires a matching csrf cookie and header.");
 	if (req.method === "GET" && operation && isMutation(operation)) return apiError(405, 144, "Use POST for this operation.");
 	// a delegate switched into another account (delegation.ts); the client sends
@@ -296,12 +308,15 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 			// the chat app sends its variables as a JSON string
 			if (typeof vars === "string") vars = parseJson(vars);
 			if (!shapeFits(vars)) return apiError(413, 324, "That request is too large.");
-			return runOperation(name, viewer, vars ?? {});
+			const res = await runOperation(name, viewer, vars ?? {});
+			if (!loadBuild()?.build.stateBase) return res;
+			return Response.json(legacyOperation(name, await res.json()), { status: res.status, headers: res.headers });
 		}
 	} else if (path === "/live_pipeline/events") {
 		return livePipeline();
 	}
-	const rest = await restRoute(req.method, path, viewer, req);
+	// an old build (client/old/) gets its own REST shapes first; the current client never asks for them
+	const rest = (loadBuild()?.build.stateBase ? await adaptiveRoute(req.method, path, viewer, req) : undefined) ?? (await restRoute(req.method, path, viewer, req));
 	if (rest) return rest;
 
 	const key = `${req.method} ${gql >= 0 ? `graphql:${parts[parts.length - 1]}` : path}`;
@@ -352,6 +367,7 @@ setInterval(
 ).unref();
 await loadSettings();
 await resumeVideos(MEDIA_DIR);
+startMediaScan();
 await resumeImports();
 await failInterrupted();
 
@@ -359,7 +375,10 @@ await failInterrupted();
 // the request; caught here it is logged with its path and account
 async function handle(req: Request): Promise<Response | undefined> {
 	try {
-		const res = await asRequest(() => route(req));
+		// the build this request is answered with (client-choice.ts); a page load
+		// may still change it to the account's own pick
+		const dir = requestClient(req)?.dir ?? CLIENT_DIR;
+		const res = await asRequest(() => withClientDir(dir, () => route(req)));
 		return res && (await compressResponse(req, res, new URL(req.url).pathname));
 	} catch (e) {
 		const viewer = await getViewer(req).catch(() => undefined);
@@ -461,6 +480,11 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (!h.ok) return limitedResponse(h);
 		return handleLogin(req);
 	}
+	if (p === "/sessions" && req.method === "POST" && loadBuild()?.build.stateBase) {
+		const h = hit("auth", requestIp(req) ?? "unknown");
+		if (!h.ok) return limitedResponse(h);
+		return handleOldSessions(req);
+	}
 	if (p === "/rules" || p === "/tos" || p === "/privacy") return rulesPage();
 	// X's sign-in screens (jf.x.com), answered here
 	// inside the signed-in client the same screens come through /i/jfapi
@@ -487,7 +511,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (/^\/(settings|i\/flow)\/.*passkey/i.test(p) && !p.startsWith("/settings/xitter/")) return Response.redirect("/settings/xitter/passkeys", 302);
 	// the built-in "All" list (lists.ts)
 	if (p === "/all") return Response.redirect("/i/lists/1", 302);
-	if (p === "/login" || p === "/signup" || p.startsWith("/i/flow/")) {
+	if ((p === "/login" && !loadBuild()?.build.stateBase) || p === "/signup" || p.startsWith("/i/flow/")) {
 		const headers = new Headers({ location: "/" });
 		const code = url.searchParams.get("code");
 		if (code) headers.append("set-cookie", `xitter_invite=${encodeURIComponent(code)}; Path=/; Max-Age=86400; SameSite=Lax; HttpOnly`);
@@ -500,6 +524,10 @@ async function route(req: Request): Promise<Response | undefined> {
 
 	const viewer = await getViewer(req);
 	setRequestLanguage(viewer?.language ?? undefined);
+	if (req.method === "GET" && url.searchParams.has("client") && !API_PREFIX.test(p)) {
+		const switched = await switchByQuery(url, viewer ?? undefined);
+		if (switched) return switched;
+	}
 	const steam = /^\/public\/steam\/(\d+)\/([^/]+)$/.exec(p);
 	if (steam) return steamFile(req, steam[1]!, steam[2]!, url.searchParams.has("thumb"), !!viewer);
 	if (viewer?.role && !(await staffGate(req, viewer))) markStaff();
@@ -524,16 +552,20 @@ async function route(req: Request): Promise<Response | undefined> {
 	}
 	// opened on their own (a link, a bookmark), the settings pages come up inside
 	// the client's Settings, which frames them (tidy.ts)
-	if (viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && SETTINGS_PAGES.has(p))
+	const oldBuild = !!loadBuild()?.build.stateBase;
+	// the 2020 client has no screens of ours to frame them in: they open whole
+	if (viewer && oldBuild && (p === "/settings/xitter" || p.startsWith("/settings/xitter/"))) return Response.redirect(`/account/${p.slice("/settings/xitter/".length)}${url.search}`, 302);
+	if (viewer && !oldBuild && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && SETTINGS_PAGES.has(p))
 		return Response.redirect(`/settings/xitter/${p.slice("/account/".length)}${url.search}`, 302);
 	// and the side bar's pages fill the main column instead (tidy.ts FULL)
-	if (viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && (p === "/account/money" || p.startsWith("/account/money/"))) return Response.redirect(`/i/xmoney${p.slice("/account/money".length)}${url.search}`, 302);
+	if (viewer && !oldBuild && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && (p === "/account/money" || p.startsWith("/account/money/"))) return Response.redirect(`/i/xmoney${p.slice("/account/money".length)}${url.search}`, 302);
 	if (p === "/oauth/authorize") return oauthAuthorize(req, url, viewer);
 	if (p === "/account/apps" && viewer) return connectedAppsRoute(req, viewer);
 	// opened on its own, the index comes up as Settings > Xitter settings, like the pages it lists
-	if ((p === "/account" || p === "/account/") && viewer && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document") return Response.redirect("/settings/xitter", 302);
+	if ((p === "/account" || p === "/account/") && viewer && !oldBuild && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document") return Response.redirect("/settings/xitter", 302);
 	if ((p === "/account" || p === "/account/") && viewer) return accountIndexRoute(req, viewer);
 	if (p === "/account/gifs" && viewer) return gifSettingsRoute(req, viewer);
+	if (p === "/account/client" && viewer) return clientRoute(req, viewer, clientBuilds().find((b) => b.dir === clientDir()));
 	if (p === "/account/post-details" && viewer) return classicDetailRoute(req, viewer);
 	if (p === "/account/circle" && viewer) return circleRoute(req, viewer);
 	if (p === "/account/apps/developer" && viewer) return developerAppsRoute(req, viewer);
@@ -575,15 +607,19 @@ async function route(req: Request): Promise<Response | undefined> {
 	if ((p === "/account/money" || p.startsWith("/account/money/")) && viewer) return moneyRoute(req, viewer);
 	if (p === "/account/merchant" && viewer) return merchantRoute(req, viewer);
 	if (p.startsWith("/i/ton/data/xchat_media/")) return chatMediaRoute(req, viewer, url);
+	const activity = /^\/i\/tfb\/v1\/quick_promote\/lite\/(\d{1,19})$/.exec(p);
+	if (activity && req.method === "GET") return legacyAnalyticsPage(req, activity[1]!, viewer ?? undefined);
 	// pictures and oEmbed for previews of public posts in other apps (embeds.ts)
 	if (p.startsWith("/embed/")) return embedImage(p);
 	if (p === "/oembed") return oembed(url);
 	// the frame X's client opens for a player card (YouTube links)
 	if (isPlayerPage(p)) return viewer ? playerPage(p, viewer.id) : new Response("not found", { status: 404 });
+	if (p.startsWith("/media-scan/")) return serveScanCopy(p, url);
 	// uploads stay inside the instance: only signed-in users get them
 	if (p.startsWith("/media/")) return viewer ? serveMedia(req, p, viewer) : new Response("not found", { status: 404 });
 	// the admin panel: staff only; everyone else gets the client's not-found page
-	if (p.startsWith("/admin/api/")) return adminApi(req, p.slice("/admin/api/".length), viewer);
+	// the panel speaks of the instance's default build (Admin > Client), whatever its staff use
+	if (p.startsWith("/admin/api/")) return withClientDir(CLIENT_DIR, () => adminApi(req, p.slice("/admin/api/".length), viewer));
 	if (p === "/admin/flags.json" && viewer?.role) return Response.json(flagPickerData(null).flags);
 	// a backup, for an admin's browser to save
 	if (p.startsWith("/admin/backups/") && viewer?.role === "admin" && !(await staffGate(req, viewer))) {
@@ -611,7 +647,9 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (preview) return preview;
 	}
 	// signed out: X's own home page with its sign-in form, and the dialog
-	if (!viewer && p !== "/" && !p.startsWith("/i/jf/onboarding")) return Response.redirect("/", 302);
+	// (an old build has its own sign-in page at /login, and /login/error after a wrong password)
+	const oldLogin = !!loadBuild()?.build.stateBase && (p === "/login" || p.startsWith("/login/"));
+	if (!viewer && p !== "/" && !p.startsWith("/i/jf/onboarding") && !oldLogin) return Response.redirect("/", 302);
 	// upstream also guards maintenance here, but our check above runs first and
 	// already covered guests, so this line would never fire. Kept as upstream
 	// wrote it, minus the duplicate, to keep merge conflicts small.
@@ -626,13 +664,20 @@ async function route(req: Request): Promise<Response | undefined> {
 	const look = prefs.look;
 	const painted = look?.kind === "painted" ? look.theme : null;
 	const paint = viewer && painted ? await resolveBackground(viewer.id, painted) : undefined;
-	const page = shell(viewer ?? null, !!parseCookies(req)[MULTI_COOKIE], communityRows.length > 0, flagRows[0]?.education_flags ?? {}, links, look, prefs.accent, paint, viewer?.csrf);
+	const flash = !viewer && p === "/login/error" ? "The username and password you entered did not match our records. Please double-check and try again." : undefined;
+	// signed in, the account's own pick wins over the cookie, which then follows it
+	const cookieClient = parseCookies(req)[CLIENT_COOKIE];
+	const pick: string | undefined = flagRows[0]?.preferences?.web_client;
+	const client = viewer ? chosenClient(pick ?? cookieClient) : requestClient(req);
+	const page = withClientDir(client?.dir ?? CLIENT_DIR, () => shell(viewer ?? null, !!parseCookies(req)[MULTI_COOKIE], communityRows.length > 0, flagRows[0]?.education_flags ?? {}, links, look, prefs.accent, paint, viewer?.csrf, flash));
 	const headers = new Headers({ "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": PAGE_CSP });
+	if (client && pick === client.id && cookieClient !== pick) headers.append("set-cookie", clientCookie(pick));
 	// a guest token left from the signed-out page makes the signed-in client act
 	// as a guest (no csrf header, every write refused)
 	if (viewer && /(?:^|;\s*)gt=/.test(req.headers.get("cookie") ?? "")) headers.append("set-cookie", "gt=; Path=/; Max-Age=0");
 	if (viewer && parseCookies(req).ct0 !== viewer.csrf) headers.append("set-cookie", csrfCookie(viewer.csrf));
-	for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
+	// (the 2020 client keeps its own night_mode, set from its Display settings)
+	if (!client?.old) for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
 	if (!page) return new Response("no pinned client build: run scripts/fetch-client.ts --token or --har", { status: 500, headers });
 	return new Response(page, { headers });
 }

@@ -98,6 +98,21 @@ const DEFAULTS = {
 		global_pin: null as string | null,
 	},
 	automod: { enabled: true, strike_days: 365, ladder: [0, 24, 168, 720, -1] as number[], second_chances: 5 },
+	// claude-mod.ts: Claude reads new posts, profile changes, reports and 2020
+	// DMs (needs ANTHROPIC_API_KEY in the server's environment). It hides clear
+	// violations and files the rest for staff; it never strikes or suspends.
+	claude_mod: {
+		enabled: true,
+		model: "claude-haiku-5-5",
+		// a verdict below this confidence is only filed for staff, never acted on
+		hide_confidence: 0.85,
+		// a ceiling on model calls per day, so a flood can't run up the bill
+		daily_limit: 5000,
+		posts: true,
+		profiles: true,
+		reports: true,
+		dms: true,
+	},
 	// the admin panel itself (admin.ts staffGate): staff must have two-factor on;
 	// only these addresses (IPs or CIDR ranges) reach it, none meaning any
 	security: { staff_2fa: false, admin_ips: [] as string[] },
@@ -125,6 +140,9 @@ const DEFAULTS = {
 	money: { starting_cents: 500, max_transfer_cents: 100_000, like_cents: 50, feed: "", follow_network: false, peer_daily_cents: 100_000, move_balance: true, network_totals: false },
 	// money shop: listings are in money_shop_items; only approved announcements are shown
 	money_shop: { enabled: false, announcement: null as null | { id: string; text: string; buttons: { label: string; url: string }[] } },
+	// client-choice.ts: which web client people get when the instance serves more
+	// than one ("" for the CLIENT_DIR build), and whether each person may pick
+	clients: { default: process.env.DEFAULT_CLIENT ?? "", user_choice: process.env.CLIENT_CHOICE !== "off" },
 	// the client's own feature switches, set by an admin (Admin > Feature
 	// switches); they win over the build's values and Xitter's own (shell.ts)
 	switch_overrides: {} as Record<string, unknown>,

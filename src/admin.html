@@ -635,7 +635,16 @@ const RENDER = {
 			'<div class="cards"><div class="card"><span>Serving</span><b class="code">' + esc(short(c.sha)) + '</b><span class="small dim">pinned ' + esc(when(c.fetchedAt)) + "</span></div>" +
 			'<div class="card"><span>Previous</span><b class="code">' + esc(short(c.previous?.sha)) + "</b>" + (c.previous ? '<span class="small dim">pinned ' + esc(when(c.previous.fetchedAt)) + "</span>" : "") + "</div>" +
 			'<div class="card"><span>On x.com</span><b class="code" id="latest">?</b></div></div>' +
-			'<div class="row" style="margin-top:16px"><button class="btn" id="ccheck">Check x.com</button><button class="btn primary" id="cupdate">Update</button>' + (c.previous ? '<button class="btn" id="cback">Go back to the previous build</button>' : "") + "</div>";
+			'<div class="row" style="margin-top:16px"><button class="btn" id="ccheck">Check x.com</button><button class="btn primary" id="cupdate">Update</button>' + (c.previous ? '<button class="btn" id="cback">Go back to the previous build</button>' : "") + "</div>" +
+			"<h2>Which client people get</h2>" +
+			(c.builds.length > 1
+				? '<p class="dim">This instance serves ' + c.builds.length + ' clients. New visitors and anyone who hasn\'t picked get the default; with picking on, people switch in Settings > Xitter settings > Twitter client (or at <span class="code">/settings/xitter/client</span> from an older client).</p>' +
+					'<div class="row"><label for="cdefault">Default</label><select id="cdefault">' + c.builds.map((b) => '<option value="' + esc(b.id) + '"' + (b.id === c.default ? " selected" : "") + ">" + esc(b.label) + " (" + esc(short(b.sha)) + ")</option>").join("") + "</select>" +
+					'<button class="btn" id="cdefsave">Save default</button></div>' +
+					'<p style="margin-top:12px">' + (c.user_choice ? "People can pick their own client." : "Everyone gets the default client.") + ' <button class="btn" id="cchoice">' + (c.user_choice ? "Stop people picking" : "Let people pick") + "</button></p>"
+				: '<p class="dim">Only one client is served. Add older builds with <span class="code">EXTRA_CLIENT_DIRS</span> in the server\'s environment (for example <span class="code">client/old/2020-11-a0abd565-legacy</span>) and restart, and people can pick between them.</p>');
+		if ($("#cdefsave")) $("#cdefsave").onclick = () => act(() => api("setClients", { default: $("#cdefault").value }), "Default client saved").then(route);
+		if ($("#cchoice")) $("#cchoice").onclick = () => act(() => api("setClients", { user_choice: !c.user_choice }), c.user_choice ? "Everyone gets the default now" : "People can pick their client").then(route);
 		$("#ccheck").onclick = () => act(async () => { const r = await api("checkClient"); $("#latest").textContent = short(r.latest) + (r.latest === r.sha ? " (same)" : ""); });
 		$("#cupdate").onclick = async () => {
 			if (!(await ask("Pin the build x.com serves now? Everyone gets it on their next page load."))) return;
@@ -1506,12 +1515,14 @@ const RENDER = {
 			["open", "actioned", "dismissed"].map((s) => '<button class="btn' + (s === status ? " primary" : "") + '" data-tab="' + s + '">' + s + "</button>").join("") + "</div>" +
 			(reports.length ? '<div class="bar"><input type="search" id="report-search" placeholder="Search reporter, account, post or details" aria-label="Search reports" value="' + esc(savedQuery) + '"><span class="dim small" id="report-count" role="status"></span></div>' : "") +
 			(reports.length ? reports.map((r) => {
-				const reason = reasons[r.reason]?.text || r.reason;
+				const reason = reasons[r.reason]?.text || (r.reason === "csam_match" ? "CSAM match (Cloudflare)" : String(r.reason).startsWith("automod_") ? "Claude: " + String(r.reason).slice(8).replace(/_/g, " ") : r.reason);
 				const target = r.user_id ? person({ id: r.user_id, screen_name: r.screen_name, name: r.name, avatar_url: r.avatar_url, verified_type: r.verified_type, flag: r.flag, status: r.user_status, role: r.role }) : '<span class="dim">deleted account</span>';
 				return '<div class="box" style="margin-bottom:12px" data-report="' + esc(r.id) + '" data-search="' + esc([reason, r.reporter, r.screen_name, r.name, r.details, r.post_text, r.reason, r.id].filter(Boolean).join(" ").toLocaleLowerCase()) + '">' +
-					'<div class="row" style="justify-content:space-between"><div><b>' + esc(reason) + '</b> <span class="dim small">· reported by @' + esc(r.reporter ?? "?") + " · " + esc(when(r.created_at)) + "</span></div>" +
+					'<div class="row" style="justify-content:space-between"><div><b>' + esc(reason) + '</b> <span class="dim small">· ' + (r.reporter ? "reported by @" + esc(r.reporter) : String(r.reason).startsWith("automod_") ? "filed by Claude automod" : r.reason === "csam_match" ? "filed by the media scan" : "reported by a deleted account") + " · " + esc(when(r.created_at)) + "</span></div>" +
 					(r.other_open ? '<span class="pill suspended">' + r.other_open + " more open about this account</span>" : "") + "</div>" +
 					(r.details ? '<p style="white-space:pre-wrap">' + esc(r.details) + "</p>" : "") +
+					// Claude's read of a user's report, while it's still open
+					(status === "open" && r.note ? '<p class="dim small" style="white-space:pre-wrap">' + esc(r.note) + "</p>" : "") +
 					'<div style="margin:10px 0">' + target + (r.actioned_before ? '<div class="dim small" style="margin-top:4px">' + r.actioned_before + " earlier reports were acted on</div>" : "") + "</div>" +
 					(r.post_id ? (r.post_text !== null ? '<div class="box" style="background:var(--bg);border:1px solid var(--line)">' + esc(r.post_text || "(no text)") + (r.post_media ? ' <span class="dim small">· ' + r.post_media + " media</span>" : "") +
 						' <a class="small" target="_blank" href="/' + esc(r.screen_name) + "/status/" + esc(r.post_id) + '">open</a></div>' : '<p class="dim small">The post was deleted.</p>') : '<p class="dim small">Report about the account.</p>') +
