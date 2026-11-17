@@ -207,6 +207,8 @@ try {
 	discordCalls = [];
 	who = { id: `90000${stamp}` };
 	await requestReset(account!.screen_name);
+	// the DM, like the mailed link, is deliberately not awaited by requestReset
+	await Bun.sleep(50);
 	const channel = discordCalls.find((c) => c.url.endsWith("/users/@me/channels"));
 	const message = discordCalls.find((c) => c.url.endsWith("/channels/dm-1/messages"));
 	const content = message ? String(JSON.parse(String(message.init!.body)).content) : "";
