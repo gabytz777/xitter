@@ -1,19 +1,22 @@
-import { MULTI_COOKIE, type Viewer, expireSessions, getViewer, parseCookies, csrfCookie } from "./auth";
+import { MULTI_COOKIE, SESSION_COOKIE, type Viewer, clearedCookies, expireSessions, getViewer, parseCookies, csrfCookie } from "./auth";
+import { multiViewer } from "./accounts";
+import { gbeePage } from "./gbee-page";
 import { CLIENT_DIR, clientDir, clientPathAllowed, getClientFile, getClientFilePath, hasClientFile, withClientDir } from "./client-cache";
 import { CLIENT_COOKIE, chosenClient, clientCookie, clientRoute, requestClient, switchByQuery } from "./client-choice";
 import { PORT, PUBLIC_ORIGIN } from "./config";
 import { migrate, sql } from "./db";
 import { knownOperation, runOperation } from "./graphql";
 import { brandingFile } from "./branding";
-import { handleLogin, handleOldSessions, maintenancePage, rulesPage } from "./login";
+import { handleLogin, handleOldCode, handleOldSessions, maintenancePage, rulesPage } from "./login";
+import { privacyPage, termsPage } from "./legal";
 import { adminApi, audit } from "./admin";
-import { loadSettings, settings } from "./settings";
+import { feature, loadSettings, settings } from "./settings";
 import { flagPickerData } from "./flag-picker";
 import { flagSvg } from "./flags";
 import { onboarding } from "./onboarding";
 import { cachedPatch, patchFile, patchText } from "./patch";
 import { clientError, recordError } from "./errors";
-import { asRequest, markStaff, setRequestLanguage, staffGate } from "./staff-access";
+import { asRequest, markStaff, setHidden, setRequestLanguage, staffGate } from "./staff-access";
 import { backupPath, startBackups } from "./backups";
 import { startUpdateChecks } from "./update-check";
 import { memberInvitesRoute } from "./member-invites";
@@ -23,7 +26,7 @@ import { isPlayerPage, playerPage } from "./player-card";
 import { chatMediaRoute, chatSocket, juiceboxProxy, socketUser } from "./chat";
 import { sweepChatUploads } from "./chat-media";
 import { clientBuilds, loadBuild } from "./build";
-import { MEDIA_DIR, mediaUpload, serveMedia } from "./media";
+import { MEDIA_DIR, mediaUpload, serveAvatar, serveMedia } from "./media";
 import { serveScanCopy, startMediaScan } from "./media-scan";
 import { resumeVideos } from "./video";
 import { livePipeline, restRoute } from "./rest";
@@ -47,6 +50,7 @@ import { gifProxy } from "./gifs";
 import { accountIndexRoute } from "./account-page";
 import { gifSettingsRoute } from "./gif-settings";
 import { classicDetailRoute, postCounts } from "./classic-detail";
+import { parodyLabelsRoute } from "./parody-labels";
 import { legacyAnalyticsPage } from "./legacy-analytics";
 import { circleRoute } from "./circles";
 import { cardImage } from "./explore-cards";
@@ -103,7 +107,7 @@ const MIME: Record<string, string> = {
 // The client also calls outside services on its own (grok.com checkout, ads
 // measurement). Requests from the page may only reach this instance.
 const SETTINGS_PAGES = new Set(
-	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant", "gifs", "post-details", "client"].map((s) => `/account/${s}`),
+	["apps", "invites", "organisation", "decor", "theme", "decoration", "automation", "notices", "instances", "passkeys", "import", "migrate", "api", "notes/appeals", "email", "2fa", "merchant", "gifs", "post-details", "labels", "client"].map((s) => `/account/${s}`),
 );
 
 const PAGE_CSP = "connect-src 'self' blob: data:; font-src 'self'";
@@ -128,7 +132,7 @@ async function servePublic(p: string): Promise<Response> {
 			? new Response(svg, { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'", "x-content-type-options": "nosniff" } })
 			: new Response("not found", { status: 404 });
 	}
-	if (!/^[\w.-]+\.(png|svg|ico|webp)$/.test(name)) return new Response("not found", { status: 404 });
+	if (!/^[\w.-]+\.(png|svg|ico|webp|webm|mp4)$/.test(name)) return new Response("not found", { status: 404 });
 	// a logo uploaded in the admin panel replaces the shipped one
 	const uploaded = brandingFile(name);
 	if (uploaded && (await uploaded.file.exists())) return new Response(uploaded.file, { headers: { "content-type": uploaded.type, "cache-control": "no-cache" } });
@@ -260,6 +264,12 @@ async function serveApi(req: Request, url: URL, viewer: Viewer | undefined): Pro
 		if (!acting) return apiError(403, 200, "You can't act as this account.");
 		if (!delegateMay(acting.actor!.role, req.method, path, operation)) return apiError(403, 200, "Delegates can't do this for the account.");
 		viewer = acting;
+	}
+	const multiUser = req.headers.get("x-web-auth-multi-user-id");
+	if (multiUser && multiUser !== viewer.id && operation === "ViewerBadgeCounts") {
+		const other = await multiViewer(req, viewer, multiUser);
+		if (!other) return apiError(403, 200, "That account isn't signed in here.");
+		viewer = other;
 	}
 	if (viewer.status === "restricted" && restrictedRefuses(req.method, path, operation, url))
 		return apiError(403, 326, "Your account can't interact right now.");
@@ -485,7 +495,14 @@ async function route(req: Request): Promise<Response | undefined> {
 		if (!h.ok) return limitedResponse(h);
 		return handleOldSessions(req);
 	}
-	if (p === "/rules" || p === "/tos" || p === "/privacy") return rulesPage();
+	if (p === "/sessions/code" && (req.method === "GET" || req.method === "POST") && loadBuild()?.build.stateBase) {
+		const h = req.method === "POST" ? hit("auth", requestIp(req) ?? "unknown") : undefined;
+		if (h && !h.ok) return limitedResponse(h);
+		return handleOldCode(req);
+	}
+	if (p === "/rules") return rulesPage();
+	if (p === "/tos") return termsPage();
+	if (p === "/privacy") return privacyPage();
 	// X's sign-in screens (jf.x.com), answered here
 	// inside the signed-in client the same screens come through /i/jfapi
 	if (p.startsWith("/onboarding/web") || p.startsWith("/i/jfapi/onboarding/web")) {
@@ -524,6 +541,7 @@ async function route(req: Request): Promise<Response | undefined> {
 
 	const viewer = await getViewer(req);
 	setRequestLanguage(viewer?.language ?? undefined);
+	if (!p.startsWith("/api/")) setHidden({ parody: !!viewer?.hide_parody_labels, checks: !!viewer?.hide_checkmarks });
 	if (req.method === "GET" && url.searchParams.has("client") && !API_PREFIX.test(p)) {
 		const switched = await switchByQuery(url, viewer ?? undefined);
 		if (switched) return switched;
@@ -554,6 +572,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	// the client's Settings, which frames them (tidy.ts)
 	const oldBuild = !!loadBuild()?.build.stateBase;
 	// the 2020 client has no screens of ours to frame them in: they open whole
+	if (viewer && oldBuild && p === "/i/grok" && req.method === "GET" && feature("grok")) return gbeePage(req, viewer);
 	if (viewer && oldBuild && (p === "/settings/xitter" || p.startsWith("/settings/xitter/"))) return Response.redirect(`/account/${p.slice("/settings/xitter/".length)}${url.search}`, 302);
 	if (viewer && !oldBuild && req.method === "GET" && req.headers.get("sec-fetch-dest") === "document" && SETTINGS_PAGES.has(p))
 		return Response.redirect(`/settings/xitter/${p.slice("/account/".length)}${url.search}`, 302);
@@ -567,6 +586,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p === "/account/gifs" && viewer) return gifSettingsRoute(req, viewer);
 	if (p === "/account/client" && viewer) return clientRoute(req, viewer, clientBuilds().find((b) => b.dir === clientDir()));
 	if (p === "/account/post-details" && viewer) return classicDetailRoute(req, viewer);
+	if (p === "/account/labels" && viewer) return parodyLabelsRoute(req, viewer);
 	if (p === "/account/circle" && viewer) return circleRoute(req, viewer);
 	if (p === "/account/apps/developer" && viewer) return developerAppsRoute(req, viewer);
 	if (p === "/federation/superadmin" || p.startsWith("/federation/superadmin/")) return superadminHomeRoute(req, url, viewer);
@@ -617,6 +637,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	if (p.startsWith("/media-scan/")) return serveScanCopy(p, url);
 	// uploads stay inside the instance: only signed-in users get them
 	if (p.startsWith("/media/")) return viewer ? serveMedia(req, p, viewer) : new Response("not found", { status: 404 });
+	if (p.startsWith("/profile_images/")) return viewer ? serveAvatar(req, p, viewer) : new Response("not found", { status: 404 });
 	// the admin panel: staff only; everyone else gets the client's not-found page
 	// the panel speaks of the instance's default build (Admin > Client), whatever its staff use
 	if (p.startsWith("/admin/api/")) return withClientDir(CLIENT_DIR, () => adminApi(req, p.slice("/admin/api/".length), viewer));
@@ -676,6 +697,7 @@ async function route(req: Request): Promise<Response | undefined> {
 	// as a guest (no csrf header, every write refused)
 	if (viewer && /(?:^|;\s*)gt=/.test(req.headers.get("cookie") ?? "")) headers.append("set-cookie", "gt=; Path=/; Max-Age=0");
 	if (viewer && parseCookies(req).ct0 !== viewer.csrf) headers.append("set-cookie", csrfCookie(viewer.csrf));
+	if (!viewer && (parseCookies(req)[SESSION_COOKIE] || parseCookies(req).twid)) for (const c of clearedCookies()) headers.append("set-cookie", c);
 	// (the 2020 client keeps its own night_mode, set from its Display settings)
 	if (!client?.old) for (const c of nightModeCookies(look)) headers.append("set-cookie", c);
 	if (!page) return new Response("no pinned client build: run scripts/fetch-client.ts --token or --har", { status: 500, headers });

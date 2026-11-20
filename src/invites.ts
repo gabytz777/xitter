@@ -9,7 +9,8 @@ import { sql } from "./db";
 import { flagValue } from "./flags";
 import { newId } from "./ids";
 import { superadminNameHere } from "./superadmins";
-import { getSetting, settings } from "./settings";
+import { NAME_MAX, getSetting, settings } from "./settings";
+import { looksBlank } from "./text-clean";
 
 // Eight digits ("4821-0937"): X's sign-up dialog takes the code in digit boxes,
 // and digits are easy to read out and type on a phone.
@@ -40,10 +41,10 @@ export const isReserved = (name: string) => RESERVED.has(name.toLowerCase()) || 
 // handles staff may give an account in the admin panel: any characters up to
 // 50, except what would break a profile address, a list of names or a mention.
 // Lookalikes of another account's handle are refused separately (held.ts).
-export const STAFF_HANDLE = /^[^\s\p{C}/\\?#@%,:]{1,50}$/u;
+export const STAFF_HANDLE = /^[^\s\p{C}\p{Default_Ignorable_Code_Point}\u2800/\\?#@%,:]{1,50}$/u;
 export const STRICT_HANDLE = /^[A-Za-z0-9_]{1,15}$/;
 export const staffHandleProblem = (name: string): string | null =>
-	!STAFF_HANDLE.test(name) || /^\.+$/.test(name) ? "Handles are up to 50 characters, with no spaces or / \\ ? # @ % , :" : null;
+	!STAFF_HANDLE.test(name) || /^\.+$/.test(name) ? "Handles are up to 50 characters, with no spaces, blank characters or / \\ ? # @ % , :" : null;
 
 export class SignupError extends Error {}
 
@@ -96,19 +97,21 @@ export async function checkSignup(f: SignupForm) {
 	const email = f.email.trim().toLowerCase();
 	if (!EMAIL.test(email) || email.length > 254) throw new SignupError("Enter a valid email address.");
 	const screenName = f.screenName.trim().replace(/^@/, "");
-	const name = f.name.trim() || screenName;
+	const name = looksBlank(f.name) ? screenName : f.name.trim();
 	const problem = usernameProblem(screenName);
 	if (problem) throw new SignupError(problem);
 	if (isReserved(screenName)) throw new SignupError("That username is reserved.");
 	if (await handleHeld(screenName)) throw new SignupError("That username isn't available.");
 	// a blocked word in the handle or name (names.ts): no account at all
 	if (blockedNameIn(screenName, name) || hateInName(screenName, name)) throw new SignupError("That username isn't allowed here.");
-	if ([...name].length > 50) throw new SignupError("Names are at most 50 characters.");
+	if (name.length > NAME_MAX) throw new SignupError(`Names are at most ${NAME_MAX} characters.`);
 	if (f.password.length < 8) throw new SignupError("Passwords are at least 8 characters.");
 	if (f.password.length > 256) throw new SignupError("Passwords are at most 256 characters.");
 	if ((await getSetting("signup_mode")) === "closed") throw new SignupError("Sign-up is closed on this instance.");
 	if ((await sql`select 1 from users where lower(screen_name) = lower(${screenName})`).length) throw new SignupError("That username is taken.");
-	if ((await sql`select 1 from users where lower(email) = ${email}`).length) throw new SignupError("That email is already used by another account.");
+	const [owner] = await sql`select deactivated_at from users where lower(email) = ${email}`;
+	if (owner?.deactivated_at) throw new SignupError("That email belongs to a deactivated account. Sign in to it to restore it, or ask this instance's staff to delete it.");
+	if (owner) throw new SignupError("That email is already used by another account.");
 	const evaded = await evadedSuspension(email, f.ip);
 	if (evaded) {
 		await sql`insert into audit_log (id, actor_id, action, target, detail) values (${newId()}::bigint, null, 'evasion_signup_refused', ${evaded.user},

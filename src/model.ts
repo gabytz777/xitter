@@ -15,7 +15,7 @@ import { homeOf, mentionsIn } from "./mentions";
 import { type MediaRow, absolute, mediaEntity, mediaUrl, posterUrl } from "./media";
 import { placeById } from "./places";
 import { shownSource } from "./platforms";
-import { requestLanguage } from "./staff-access";
+import { hidesChecks, hidesParody, requestLanguage } from "./staff-access";
 import { feature, settings } from "./settings";
 import { SHORT_POST, previewOf, weightedLength } from "./textlen";
 import { badgeUrl } from "./users";
@@ -32,7 +32,11 @@ export function noteText(text: string) {
 	return { text, entities };
 }
 
-const DEFAULT_AVATAR = `${PUBLIC_ORIGIN}/abs/sticky/default_profile_images/default_profile_normal.png`;
+const DEFAULT_AVATAR = `${PUBLIC_ORIGIN}/abs/sticky/default_profile_images/default_profile_400x400.png`;
+export const avatarSrc = (url: string | null | undefined) => {
+	const id = url && /^\/media\/(\d{1,19})$/.exec(url)?.[1];
+	return id ? `${PUBLIC_ORIGIN}/profile_images/${id}_normal.jpg` : absolute(url);
+};
 // an account's picture as a full URL, X's default one when it has none
 export const avatarUrl = (url: string | null | undefined) => absolute(url ?? null) ?? DEFAULT_AVATAR;
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -47,15 +51,16 @@ export function apiDate(d: Date): string {
 const globalId = (kind: string, id: string) => Buffer.from(`${kind}:${id}`).toString("base64");
 
 // An account from another instance wears the badge that instance gave it,
-// unless this instance stopped showing those (Admin > Federation).
-export const remoteCheckHidden = (u: { instance?: string | null }) => !!u.instance && !settings().remote_checkmarks;
-export const shownVerifiedType = (u: User) => (remoteCheckHidden(u) ? null : u.verified_type);
+// unless this instance stopped showing those (Admin > Federation). A viewer
+// can hide every checkmark for themselves (parody-labels.ts).
+export const checkHidden = (u: { instance?: string | null }) => hidesChecks() || (!!u.instance && !settings().remote_checkmarks);
+export const shownVerifiedType = (u: User) => (checkHidden(u) ? null : u.verified_type);
 
 // Affiliates of an organisation wear X's checkmark next to the organisation's
 // badge, as on X, even without a badge of their own, unless the instance
 // switched that off (Settings: affiliate_checkmarks).
 export const affiliateChecked = (u: User) => !!u.org && feature("affiliate_checkmarks");
-export const isVerified = (u: User) => !remoteCheckHidden(u) && (u.verified_type !== null || affiliateChecked(u));
+export const isVerified = (u: User) => !checkHidden(u) && (u.verified_type !== null || affiliateChecked(u));
 // a business or government badge: what makes an account an organisation on
 // its own, and gives it a square picture
 export const hasOrgBadge = (u: User) => u.verified_type === "business" || u.verified_type === "government";
@@ -145,7 +150,7 @@ export function badgeList(u: User): Badge[] {
 // the first badge. The client puts a parody, commentary or fan label there
 // before anything we send. When a label has it, every badge goes through the
 // page script (badges.ts). A bot's other labels go the same way (hiddenLabels).
-const hasParodyLabel = (u: User) => !!u.parody_label && u.parody_label !== "None";
+const hasParodyLabel = (u: User) => !!u.parody_label && u.parody_label !== "None" && !hidesParody();
 export const labelTakesSlot = (u: User) => !!u.automated_by || hasParodyLabel(u) || !!u.label;
 
 // the client's own mask icon, for a staff-made label without a badge; its
@@ -259,8 +264,9 @@ export function userResult(u: User) {
 		__typename: "User",
 		action_counts: { favorites_count: u.stats?.likes ?? 0 },
 		affiliates_highlighted_label: badgeLabel(u),
+		...(oldClient() ? { xitter_badges: badgeList(u) } : {}),
 		...(isOrganization(u) ? { business_account: { affiliates_count: u.affiliates ?? 0 } } : {}),
-		avatar: { image_url: absolute(u.avatar_url) ?? DEFAULT_AVATAR },
+		avatar: { image_url: avatarSrc(u.avatar_url) ?? DEFAULT_AVATAR },
 		...bioLanguage(u),
 		...(u.banner_url ? { banner: { image_url: absolute(u.banner_url) } } : {}),
 		core: { created_at: apiDate(u.created_at), name: u.name, screen_name: u.screen_name },
@@ -269,7 +275,7 @@ export function userResult(u: User) {
 		id: globalId("User", u.id),
 		is_blue_verified: isVerified(u),
 		location: { location: u.location },
-		media_permissions: { can_media_tag: true },
+		media_permissions: { can_media_tag: u.stats?.mediaTaggable ?? true },
 		notifications_settings: { notifications_enabled: !!u.stats?.notifying },
 		// "None": the slot is affiliates_highlighted_label (badgeLabel); extras a
 		// bot hid go through badges.ts. this field's label isn't shown
@@ -306,14 +312,16 @@ export function userResult(u: User) {
 
 // The 2020 client (client/old) has one checkmark and no affiliate badge. Its
 // `verified` carries both: true, "business" or "government" paint the check
-// (patch.ts LEGACY_RULES), and with a badge label it is an object that also
-// names the badge to draw after the name.
-export function oldVerified(blue: boolean, type: string | undefined, label: any): unknown {
+// (patch.ts LEGACY_RULES), and with badges it is an object that also
+// names the badges to draw after the name: the label first, then the rest.
+export function oldVerified(blue: boolean, type: string | undefined, label: any, badges: Badge[] = []): unknown {
 	const check = !blue ? false : type === "Business" ? "business" : type === "Government" ? "government" : true;
-	const img = label?.badge?.url;
-	if (!img) return check;
-	const org = /screen_name=([^&]+)/.exec(label.url?.url ?? "")?.[1];
-	return { t: check, img, name: label.description ?? "", ...(org ? { org } : {}) };
+	const shown: { img: string; name: string }[] = [];
+	if (label?.badge?.url) shown.push({ img: label.badge.url, name: label.description ?? "" });
+	for (const b of badges) if (!shown.some((s) => s.img === b.url)) shown.push({ img: b.url, name: b.description });
+	if (!shown.length) return check;
+	const org = /screen_name=([^&]+)/.exec(label?.url?.url ?? "")?.[1];
+	return { t: check, img: shown[0].img, name: shown[0].name, ...(org ? { org } : {}), ...(shown.length > 1 ? { more: shown.slice(1) } : {}) };
 }
 const oldClient = () => !!loadBuild()?.build.stateBase;
 // a fragment, so the picture loads as ever; shell.ts squares what carries it
@@ -352,11 +360,11 @@ export function legacyUser(u: User) {
 		super_followed_by: false,
 		super_following: false,
 		verified_user_profiles: { super_follows_user_profile: { is_active: false } },
-		verified: oldClient() ? oldVerified(isVerified(u), verification(u).verified_type, (badgeLabel(u) as any).label) : false,
+		verified: oldClient() ? oldVerified(isVerified(u), verification(u).verified_type, (badgeLabel(u) as any).label, badgeList(u)) : false,
 		protected: !!u.protected,
-		profile_image_url_https: oldClient() ? oldAvatar(absolute(u.avatar_url) ?? DEFAULT_AVATAR, pictureShape(u)) : (absolute(u.avatar_url) ?? DEFAULT_AVATAR),
+		profile_image_url_https: oldClient() ? oldAvatar(avatarSrc(u.avatar_url) ?? DEFAULT_AVATAR, pictureShape(u)) : (avatarSrc(u.avatar_url) ?? DEFAULT_AVATAR),
 		...(u.banner_url ? { profile_banner_url: absolute(u.banner_url) } : {}),
-		can_media_tag: true,
+		can_media_tag: u.stats?.mediaTaggable ?? true,
 		// with a default avatar and no bio or banner the client offers its "Set up
 		// profile" onboarding flow, which we don't run; this keeps the Edit profile dialog
 		default_profile_image: false,
@@ -585,7 +593,7 @@ function plainTweet(p: PostRow, withTypename: boolean): Record<string, unknown> 
 		...(p.conversation_policy
 			? { conversation_control: { policy: p.conversation_policy === "CountryOfOrigin" ? "Co" : p.conversation_policy, conversation_owner_results: { result: { __typename: "User", legacy: { screen_name: p.conversation_owner } } } }, ...(["Country", "CountryOfOrigin"].includes(p.conversation_policy) ? { conversation_control_details: { mode: p.conversation_policy, allowed_country_codes: p.conversation_selections ?? [] } } : {}) }
 			: {}),
-		grok_analysis_button: false,
+		grok_analysis_button: feature("grok"),
 		grok_annotations: {},
 		grok_translated_post_with_availability: { is_available: false },
 		legacy: {
@@ -658,7 +666,7 @@ export function repostResult(id: string, by: User, createdAt: Date, original: Po
 		cashtag_attachments: [],
 		core: { user_results: { result: userResult(by) } },
 		edit_control: { edit_tweet_ids: [id], editable_until_msecs: String(createdAt.getTime()), edits_remaining: "0", is_edit_eligible: false },
-		grok_analysis_button: false,
+		grok_analysis_button: feature("grok"),
 		grok_annotations: {},
 		grok_translated_post_with_availability: { is_available: false },
 		is_translatable: false,

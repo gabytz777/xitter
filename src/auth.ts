@@ -26,8 +26,12 @@ export type User = {
 	// the organisation this account is an affiliate of
 	// Settings > Discoverability: people with this email in their contacts may find the account
 	discoverable_by_email?: boolean;
+	allow_media_tagging?: string | null;
 	// Settings > Post details (classic-detail.ts)
 	classic_post_details?: boolean;
+	// Settings > Profile labels (parody-labels.ts)
+	hide_parody_labels?: boolean;
+	hide_checkmarks?: boolean;
 	// the translator globe: blue, gold (moderator) or yellow (approver)
 	translator?: "translator" | "moderator" | "approver" | null;
 	// when the badge was given ("Verified since")
@@ -72,6 +76,7 @@ export type User = {
 		// the viewer's bell for this account, and whether they turned its reposts off
 		notifying?: boolean;
 		repostsMuted?: boolean;
+		mediaTaggable?: boolean;
 	};
 };
 
@@ -177,6 +182,9 @@ import { requestCountry } from "./login-history";
 const viewerCols = () => sql`u.id, u.screen_name, u.name, u.bio, u.location, u.website, u.avatar_url, u.banner_url, u.verified_type, u.flag, u.pronouns, u.status, u.role, u.protected, u.language, u.country, u.created_at, u.instance,
 	u.preferences->>'discoverable_by_email' = 'true' as discoverable_by_email,
 	u.preferences->>'classic_post_details' = 'true' as classic_post_details,
+	u.preferences->>'hide_parody_labels' = 'true' as hide_parody_labels,
+	u.preferences->>'hide_checkmarks' = 'true' as hide_checkmarks,
+	u.preferences->>'allow_media_tagging' as allow_media_tagging,
 	(select coalesce(json_agg(json_build_object('id', b.id::text, 'name', b.name) order by ub.position, b.name), '[]')
 		from user_badges ub join custom_badges b on b.id = ub.badge_id where ub.user_id = u.id) as badges`;
 

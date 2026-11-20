@@ -1,9 +1,12 @@
 // The few REST endpoints the client still uses next to GraphQL.
 
+import { recordError } from "./errors";
+import { dougVideo } from "./doug";
+import { addResponse } from "./grok";
 import { blockedNameIn, blockedWordIn, forbiddenText, suspendForName } from "./names";
 import { hateIn, hateInName } from "./hate";
 import { automodStrike } from "./moderation";
-import { hasBlockedPhrase } from "./settings";
+import { NAME_MAX, hasBlockedPhrase } from "./settings";
 import { hashflagsJson } from "./hashflags";
 import { accountsRoute } from "./accounts";
 import type { Viewer } from "./auth";
@@ -31,7 +34,7 @@ import { loginHistory } from "./login-history";
 import { emailInfo, resendConfirmation } from "./email-address";
 import { pushSettingsRoute } from "./push";
 import { answerRequest, followList, knownFollowerCount, pendingRequests, setFollow, setProtected, suggestedUsers, updateFriendship, userById, userByName, usersByIds } from "./users";
-import { cleanText, oneLine } from "./text-clean";
+import { cleanText, looksBlank, oneLine } from "./text-clean";
 import { translateRoute } from "./translate";
 
 // friendships/show's shape, from the viewer's side (source) and the other account's (target)
@@ -124,13 +127,13 @@ async function profileRoute(path: string, viewer: Viewer, req: Request): Promise
 // /me). Keys are the web form's: name, description, location, url. Every
 // field is checked before any is saved; the message is for the person.
 export async function updateProfileText(viewer: Viewer, f: Record<string, string>): Promise<string | null> {
-	const limits: Record<string, [string, number]> = { name: ["name", 50], description: ["bio", 160], location: ["location", 30], url: ["website", 100] };
+	const limits: Record<string, [string, number]> = { name: ["name", NAME_MAX], description: ["bio", 160], location: ["location", 30], url: ["website", 100] };
 	const changes: Record<string, string> = {};
 	for (const [field, [column, max]] of Object.entries(limits)) {
 		if (!(field in f)) continue;
 		const value = field === "description" ? cleanText(f[field], { lines: 6 }) : oneLine(f[field]);
-		if ([...value].length > max) return `${field} is limited to ${max} characters.`;
-		if (field === "name" && !value) return "Name can't be blank.";
+		if ((field === "name" ? value.length : [...value].length) > max) return `${field} is limited to ${max} characters.`;
+		if (field === "name" && looksBlank(value)) return "Name can't be blank.";
 		if (field === "url" && value && !/^https?:\/\/\S+$/.test(value)) return "Website must be an http or https address.";
 		const hate = field === "name" ? hateInName(value) : hateIn(value);
 		if (hate) {
@@ -169,6 +172,8 @@ const EMPTY_LIST = { users: [], next_cursor: 0, next_cursor_str: "0", previous_c
 
 // `path` has no /i/api prefix
 export async function restRoute(method: string, path: string, viewer: Viewer, req: Request): Promise<Response | undefined> {
+	if (path === "/2/grok/add_response.json") return addResponse(viewer, req);
+	if (path === "/2/grok/doug.json") return dougVideo();
 	if ((method === "GET" && path.endsWith("/capi/passthrough/1")) || (method === "POST" && path === "/v2/cards/preview.json")) {
 		const params = { ...Object.fromEntries(new URL(req.url).searchParams), ...(method === "POST" ? await form(req) : {}) };
 		const id = /^card:\/\/(\d{1,19})$/.exec(params["twitter:string:card_uri"] ?? params.status ?? "")?.[1];
@@ -361,9 +366,12 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 		const findable = form?.get("discoverable_by_email");
 		if (findable === "true" || findable === "false")
 			await sql`update users set preferences = preferences || ${JSON.stringify({ discoverable_by_email: findable })}::text::jsonb where id = ${viewer.id}::bigint`;
+		const tagging = form?.get("allow_media_tagging");
+		if (tagging === "all" || tagging === "following" || tagging === "none")
+			await sql`update users set preferences = preferences || ${JSON.stringify({ allow_media_tagging: tagging })}::text::jsonb where id = ${viewer.id}::bigint`;
 		const lang = form?.get("lang") ?? form?.get("language");
 		if (typeof lang === "string" && /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(lang)) await sql`update users set language = ${lang} where id = ${viewer.id}::bigint`;
-		const [fresh] = await sql`select screen_name, language, protected, preferences->>'discoverable_by_email' = 'true' as discoverable_by_email from users where id = ${viewer.id}::bigint`;
+		const [fresh] = await sql`select screen_name, language, protected, preferences->>'discoverable_by_email' = 'true' as discoverable_by_email, preferences->>'allow_media_tagging' as allow_media_tagging from users where id = ${viewer.id}::bigint`;
 		return Response.json(settingsFor({ ...viewer, ...fresh }) ?? {});
 	}
 	// Settings > Account information > Country
@@ -463,8 +471,38 @@ export async function restRoute(method: string, path: string, viewer: Viewer, re
 		return Response.json({ totalEvents: 0, eventsFailed: 0, shouldRetry: false, retryAfterMs: null, eventsFailedSequenceNumbers: null, message: null });
 	const translation = await translateRoute(path, viewer);
 	if (translation) return translation;
+	if (method === "POST" && path.endsWith("/jot/error_log.json")) void keepClientErrors(req, viewer);
 	if (TELEMETRY.test(path)) return Response.json({});
 	return undefined;
+}
+
+const jotSeen = new Map<string, number>();
+
+async function keepClientErrors(req: Request, viewer: Viewer) {
+	const raw = await req.clone().text().catch(() => "");
+	let body = raw;
+	try {
+		body = decodeURIComponent(raw.replace(/\+/g, " "));
+	} catch {}
+	const entries: string[] = [];
+	try {
+		const logs = JSON.parse(new URLSearchParams(raw).get("log") ?? "[]");
+		for (const l of Array.isArray(logs) ? logs : [logs]) entries.push(typeof l === "string" ? l : JSON.stringify(l));
+	} catch {
+		entries.push(body);
+	}
+	const now = Date.now();
+	if (jotSeen.size > 500) jotSeen.clear();
+	for (const entry of entries.slice(0, 5)) {
+		const text = entry.slice(0, 4000);
+		const key = text.slice(0, 300);
+		if (now - (jotSeen.get(key) ?? 0) < 60_000) continue;
+		jotSeen.set(key, now);
+		const message = /"(?:message|error|description)"\s*:\s*"([^"]{1,400})/.exec(text)?.[1] ?? text.slice(0, 300);
+		const e = new Error(`jot: ${message}`);
+		e.stack = text;
+		await recordError("client", e, { path: new URL(req.url).pathname, userId: viewer.id });
+	}
 }
 
 // Server-sent events channel for live updates. Nothing is pushed yet; the

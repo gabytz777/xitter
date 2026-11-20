@@ -8,6 +8,7 @@
 // support more or take some away (staff-permissions.ts). Every change is
 // written to the audit log.
 
+import { clientBuilds } from "./build";
 import { isSuperadminViewer } from "./superadmin";
 import { oneLine } from "./text-clean";
 import { SUPERADMINS, isSuperadminHome, superadminNameHere, superadminOf } from "./superadmins";
@@ -23,7 +24,8 @@ import { forgetHeld, handleHeld, retireAccount } from "./held";
 import { activeStrikes, shutOut } from "./moderation";
 import { REASONS } from "./reports";
 import { startSweep, sweepState } from "./media-compress";
-import { FEATURES, type Feature, type SignupMode, allSettings, setSetting, settings } from "./settings";
+import { DEFAULT_GUIDE, PROMPT_MAX, claudeModKey } from "./claude-mod";
+import { FEATURES, NAME_MAX, type Feature, type SignupMode, allSettings, setSetting, settings } from "./settings";
 import { SLOTS, brandingState, resetBranding, saveBranding } from "./branding";
 import { createPlatform, renameWebSource } from "./platforms";
 import { TopicError, deleteTopic, listTopics, saveTopic } from "./topics";
@@ -69,7 +71,7 @@ export const AUDIT_ACTIONS = [
 	"rollback_client", "save_automod", "save_operations", "save_security", "save_settings", "self_update", "self_update_rollback", "send_staff_message",
 	"send_test_mail", "set_badge", "set_badges", "set_clients", "set_feature_switch", "set_flag", "set_never_sensitive", "set_notes_access", "set_post_counts",
 	"set_post_notice", "set_post_visibility", "set_profile_label", "set_remote_checkmarks", "set_role", "set_signup_mode", "set_staff_permissions",
-	"set_status", "set_translator", "set_user_counts", "sign_out", "superadmin_emergency_block", "superadmin_emergency_lift", "suspend_blocked_names",
+	"set_status", "set_translator", "set_user_client", "set_user_counts", "sign_out", "superadmin_emergency_block", "superadmin_emergency_lift", "suspend_blocked_names",
 	"temporary_status", "unblock_oauth_app", "update_client", "upload_branding",
 ];
 
@@ -407,7 +409,7 @@ const ACTIONS: Record<string, Action> = {
 		role: "support",
 		run: async (a, b) => {
 			const id = idOf(b.id);
-			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.banner_url, u.based_in_override, u.country, u.signup_country, u.count_overrides, u.decor, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance,
+			const [u] = await sql`select ${userListCols}, ${allows(a.role, "invites") ? sql`u.invite_code` : sql`null::text as invite_code`}, u.bio, u.location, u.website, u.banner_url, u.based_in_override, u.country, u.signup_country, u.count_overrides, u.decor, u.notes_writer, u.never_sensitive, u.org_badge_id::text, u.status_until, u.parody_label, u.label_id::text, u.instance, u.preferences->>'web_client' as web_client,
 				(select coalesce(json_agg(ub.badge_id::text order by ub.position), '[]') from user_badges ub where ub.user_id = u.id) as badge_ids,
 				(select count(*)::int from sessions s where s.user_id = u.id) as sessions,
 				(select count(*)::int from api_tokens t where t.user_id = u.id) as api_tokens,
@@ -426,7 +428,7 @@ const ACTIONS: Record<string, Action> = {
 				join users u on u.id = other.user_id
 				where mine.user_id = ${id}::bigint and mine.ip is not null and mine.created_at > now() - interval '90 days' limit 20`;
 			u.joined_from = u.signup_country ? countryDisplayName(u.signup_country) : "";
-			return { user: u, invited, log, alts, strikes, next_step: ladder.length ? ladder[Math.min(strikes + 1, ladder.length) - 1] : 0 };
+			return { clients: clientBuilds().map(({ id, label }) => ({ id, label })), user: u, invited, log, alts, strikes, next_step: ladder.length ? ladder[Math.min(strikes + 1, ladder.length) - 1] : 0 };
 		},
 	},
 
@@ -435,7 +437,7 @@ const ACTIONS: Record<string, Action> = {
 		run: async (a, b) => {
 			const id = idOf(b.id);
 			await guard(a, id, true);
-			const limits: Record<string, [string, number]> = { name: ["name", 50], screen_name: ["screen_name", 50], bio: ["bio", 160], location: ["location", 30], website: ["website", 100], based_in: ["based_in_override", 50] };
+			const limits: Record<string, [string, number]> = { name: ["name", NAME_MAX], screen_name: ["screen_name", 50], bio: ["bio", 160], location: ["location", 30], website: ["website", 100], based_in: ["based_in_override", 50] };
 			const [old] = await sql`select screen_name from users where id = ${id}::bigint`;
 			const changes: Record<string, string | null> = {};
 			for (const [field, [column, max]] of Object.entries(limits)) {
@@ -444,7 +446,7 @@ const ACTIONS: Record<string, Action> = {
 				// the form always sends the handle; one set before the handle rules
 				// (a symbol in it) must not block saving the rest of the profile
 				if (field === "screen_name" && value === old?.screen_name) continue;
-				if ([...value].length > max) throw new AdminError(`${field} is at most ${max} characters.`);
+				if ((field === "name" ? value.length : [...value].length) > max) throw new AdminError(`${field} is at most ${max} characters.`);
 				if (field === "screen_name" && staffHandleProblem(value)) throw new AdminError(staffHandleProblem(value)!);
 				if (field === "name" && !value) throw new AdminError("Name can't be blank.");
 				if (field === "website" && value && !/^https?:\/\/\S+$/.test(value)) throw new AdminError("Website must be an http or https address.");
@@ -604,7 +606,8 @@ const ACTIONS: Record<string, Action> = {
 			if (id === a.id) throw new AdminError("You can't delete your own account here.");
 			const u = await guard(a, id);
 			if (String(b.confirm ?? "").toLowerCase() !== u.screen_name.toLowerCase()) throw new AdminError("Type the handle to confirm.");
-			if (u.status === "suspended") await retireAccount(id, `deleted while suspended by @${a.screen_name}`);
+			const [{ deactivated }] = await sql`select deactivated_at is not null as deactivated from users where id = ${id}::bigint`;
+			if (u.status === "suspended" && !deactivated) await retireAccount(id, `deleted while suspended by @${a.screen_name}`);
 			await sql`delete from users where id = ${id}::bigint`;
 			await audit(a, "delete_account", id, { screen_name: u.screen_name });
 			return {};
@@ -780,7 +783,7 @@ const ACTIONS: Record<string, Action> = {
 
 	settings: {
 		role: "support",
-		run: async () => ({ settings: await allSettings(), features: FEATURES, branding: brandingState(), slots: SLOTS, compression: sweepState() }),
+		run: async () => ({ settings: await allSettings(), features: FEATURES, branding: brandingState(), slots: SLOTS, compression: sweepState(), claudeMod: { defaultPrompt: DEFAULT_GUIDE, hasKey: claudeModKey() } }),
 	},
 
 	// Settings > Media: files stored before compression was on (media-compress.ts)
@@ -913,6 +916,77 @@ const ACTIONS: Record<string, Action> = {
 			if (typeof b.rules === "string") {
 				await setSetting("rules", b.rules.slice(0, 20000));
 				changed.push("rules");
+			}
+			const legal = { ...settings().legal };
+			let legalChanged = false;
+			for (const key of ["terms", "privacy"] as const)
+				if (typeof b[key] === "string") {
+					await setSetting(key, b[key].slice(0, 50000));
+					legal[`${key}_updated`] = new Date().toISOString().slice(0, 10);
+					legalChanged = true;
+					changed.push(key);
+				}
+			if (b.legal && typeof b.legal === "object") {
+				if (typeof b.legal.operator === "string") legal.operator = b.legal.operator.trim().slice(0, 200);
+				if (typeof b.legal.contact === "string") legal.contact = b.legal.contact.trim().slice(0, 200);
+				if (b.legal.backup_days !== undefined) {
+					const days = Number(b.legal.backup_days);
+					if (!Number.isInteger(days) || days < 0 || days > 3650) throw new AdminError("Backup days must be a whole number from 0 to 3650.");
+					legal.backup_days = days;
+				}
+				legalChanged = true;
+				changed.push("legal");
+			}
+			if (legalChanged) await setSetting("legal", legal);
+			if (b.grok && typeof b.grok === "object") {
+				const g = b.grok;
+				const next = { ...s.grok };
+				if (g.brain === "claude" || g.brain === "bee") next.brain = g.brain;
+				if (typeof g.model === "string") {
+					const m = g.model.trim();
+					if (!/^[a-z0-9.\-]{1,80}$/.test(m)) throw new AdminError("That isn't a model name.");
+					next.model = m;
+				}
+				if (typeof g.bee_url === "string") {
+					const u = g.bee_url.trim();
+					if (u && !/^https?:\/\/[^\s]{1,200}$/.test(u)) throw new AdminError("The bee address is an http(s) URL.");
+					next.bee_url = u;
+				}
+				if (g.daily_per_account !== undefined) {
+					const n = Number(g.daily_per_account);
+					if (!Number.isInteger(n) || n < 0 || n > 100_000) throw new AdminError("Answers a day is a whole number up to 100000.");
+					next.daily_per_account = n;
+				}
+				if (typeof g.prompt === "string") {
+					const t = g.prompt.replace(/\r\n/g, "\n").trim();
+					if (t.length > 8000) throw new AdminError("The instructions are at most 8000 characters.");
+					next.prompt = t;
+				}
+				await setSetting("grok", next);
+				changed.push("grok");
+			}
+			if (b.claude_mod && typeof b.claude_mod === "object") {
+				const c = b.claude_mod;
+				const next = { ...s.claude_mod };
+				for (const k of ["enabled", "posts", "profiles", "reports", "dms", "learn", "borderline"] as const) if (typeof c[k] === "boolean") next[k] = c[k];
+				if (c.hide_confidence !== undefined) {
+					const n = Number(c.hide_confidence);
+					if (!(n >= 0.5 && n <= 1)) throw new AdminError("Hide confidence is between 0.5 and 1.");
+					next.hide_confidence = n;
+				}
+				if (c.daily_limit !== undefined) {
+					const n = Number(c.daily_limit);
+					if (!Number.isInteger(n) || n < 0 || n > 1_000_000) throw new AdminError("The daily limit is a whole number up to 1000000.");
+					next.daily_limit = n;
+				}
+				if (typeof c.prompt === "string") {
+					const text = c.prompt.replace(/\r\n/g, "\n").trim();
+					if (text.length > PROMPT_MAX) throw new AdminError(`The prompt is at most ${PROMPT_MAX} characters.`);
+					// the default saved as is stays the default, so later changes to it reach this instance
+					next.prompt = text === DEFAULT_GUIDE ? "" : text;
+				}
+				await setSetting("claude_mod", next);
+				changed.push("claude_mod");
 			}
 			await audit(a, "save_settings", null, { changed });
 			return {};

@@ -20,9 +20,10 @@ const API_HOSTS = ["api", "upload", "caps", "jf"].flatMap((s) => [`${s}.x.com`, 
 const inRegex = (url: string) => url.replace(/[/.]/g, (c) => "\\" + c);
 
 const RULES: [RegExp, string][] = [
+	[/([\w$]+)\.then\(([\w$]+)=>"linked"===\2\?"xweb":/g, '$1.then($2=>!0?"legacy":'],
 	// The Settings search index is built from X's route list: add our custom GIF
 	// provider page so searching "gif" can open it from the results.
-	[/\blet (\w+)=\(0,[\w$]+\.[\w$]+\)\(\),(\w+)=\[\];(?=for\(let \w+ of \1\)for\(let \w+ of\(\2\.push\()/g, '$&$1.find(group=>group.path==="/settings/account")?.items.push({id:"xitterGifProvider",path:"/settings/xitter/gifs",title:"GIF provider",synonyms:["gif","provider","klipy","tenor","giphy"],isSearchable:true,items:[]});$1.find(group=>group.path==="/settings/account")?.items.push({id:"xitterPostDetails",path:"/settings/xitter/post-details",title:"Post details",synonyms:["post","details","classic","counts","likes","reposts","quotes","twitter"],isSearchable:true,items:[]},{id:"xitterEquicoins",path:"/settings/xitter/merchant",title:"Equicoins",synonyms:["equicoins","money","merchant","payments","purchases"],isSearchable:true,items:[]});'],
+	[/\blet (\w+)=\(0,[\w$]+\.[\w$]+\)\(\),(\w+)=\[\];(?=for\(let \w+ of \1\)for\(let \w+ of\(\2\.push\()/g, '$&$1.find(group=>group.path==="/settings/account")?.items.push({id:"xitterGifProvider",path:"/settings/xitter/gifs",title:"GIF provider",synonyms:["gif","provider","klipy","tenor","giphy"],isSearchable:true,items:[]});$1.find(group=>group.path==="/settings/account")?.items.push({id:"xitterPostDetails",path:"/settings/xitter/post-details",title:"Post details",synonyms:["post","details","classic","counts","likes","reposts","quotes","twitter"],isSearchable:true,items:[]},{id:"xitterProfileLabels",path:"/settings/xitter/labels",title:"Labels and checkmarks",synonyms:["parody","commentary","fan","label","hide","checkmark","verified","blue"],isSearchable:true,items:[]},{id:"xitterEquicoins",path:"/settings/xitter/merchant",title:"Equicoins",synonyms:["equicoins","money","merchant","payments","purchases"],isSearchable:true,items:[]});'],
 	// Settings > Xitter settings: an entry of the client's own in the Settings
 	// list, above Additional resources. Its pane is our index (tidy.ts frames
 	// /settings/xitter), and it stays lit on our pages under /settings/xitter/.
@@ -40,6 +41,8 @@ const RULES: [RegExp, string][] = [
 	[/(restID:\w+\.rest_id,tweetCreateRequest:)(\w+)(,userMentions:\w+\}\))/g, '$1($2?.xitter_conversation_card&&!$2.status?{...$2,status:window.__XITTER_CONVERSATION_DRAFT_LABEL__?.($2.xitter_conversation_card)||"Conversation card"}:$2)$3'],
 	[/(\w+)=(\w+)\.status\|\|"",(\w+)="Failed"===/g, '$1=$2.status||($2.xitter_conversation_card&&window.__XITTER_CONVERSATION_DRAFT_LABEL__?.($2.xitter_conversation_card))||"",$3="Failed"==='],
 	[/(_handleClick=(\w+)=>\(\)=>\{)(let \w+=\2\.scheduling_info&&\2\.scheduling_info\.execute_at;if\(!this\.isDraftsTab)/g, '$1document.dispatchEvent(new CustomEvent("xitter:restore-conversation-cards",{detail:$2.tweet_create_request}));$3'],
+	[/(\{isCondensed:([\w$]+),mediaCount:([\w$]+),withMediaCarousel:([\w$]+)\}\)\{return )\3>1&&/g, "$1$3>4&&"],
+	[/(\.extended_entities\?\.media\?\.length\?\?0\))>1&&([\w$]+\(\))/g, "$1>4&&$2"],
 	[/(_areComposersEmptyOrUnchanged=\(\)=>\{)/g, '$1if(!this.props.isInline&&window.__XITTER_CONVERSATION_HAS_DRAFT__?.())return!1;'],
 	// Settings > Post details, classic (classic-detail.ts): a post's engagements
 	// screen shows its Likes tab, and who liked it, to everyone and not only to
@@ -67,12 +70,14 @@ const RULES: [RegExp, string][] = [
 	[/https:\/\/x\.com(?=["'`$/?#])/g, PUBLIC_ORIGIN],
 	// The profile editor leaves GIFs out of its avatar and banner pickers even
 	// though the upload API and the crop patch below support animated GIFs.
+	[/(new URL\(`x-safari-https:\/\/redirect\.x\.com[\s\S]{0,120}?;)window\.location\.href=[\w$]+\}/g, "$1}"],
 	[/(location:\w+\.rz\.(?:Avatar|ProfileBanner),mediaItem:)/g, "acceptGifs:!0,$1"],
 	// ...and its "Edit media" cropper takes only isImage files, which a GIF
 	// isn't (it is isGif), so it got nothing and spun forever
 	[/(_getMedia=\(\)=>\{let\{media:(\w+)\}=this\.props;return \2&&\2\.mediaFile&&)\2\.mediaFile\.isImage\?/g, "$1($2.mediaFile.isImage||$2.mediaFile.isGif)?"],
 	// the upload host is assembled from a variable, which would force https and drop the port
 	[/`https:\/\/\$\{(\w+)\}\/i\/media\//g, "`${location.origin}/i/media/"],
+	[/cdnDomains:\["pbs\.twimg\.com",/g, `cdnDomains:["${PUBLIC_HOSTNAME}","pbs.twimg.com",`],
 	[/"x\.com"/g, `"${PUBLIC_HOSTNAME}"`],
 	// cookie domain; a cookie scoped to the original domain is dropped by the browser
 	[/"\.x\.com"/g, `"${PUBLIC_HOSTNAME}"`],
@@ -165,12 +170,15 @@ export function brandText(text: string, name: string, code = false): string {
 
 // only the 2020 client's files (client-web-legacy)
 const LEGACY_RULES: [RegExp, string][] = [
+	// its cookies (night_mode among them: Display's dim and lights out) are set
+	// for .twitter.com, which the browser drops here, so a reload forgot them
+	[/domain:"\.twitter\.com"/g, `domain:"${PUBLIC_HOSTNAME}"`],
 	// its only checkmark, painted from `verified` (model.ts oldVerified): gold
 	// for organisations, grey for governments, blue for the rest (the 2020
-	// client drew its one check white on a dark theme); then an affiliate badge
+	// client drew its one check white on a dark theme); then its badges
 	[
 		/(\w+)\.isVerified&&(\w+)\.push\((\w+)\.createElement\((\w+\.a),\{accessibilityLabel:(\w+),style:\[(\w+)\.marginLeft,\6\.defaultBadgeColor,(\w+)\]\}\)\)/g,
-		'(function(xv){var xt=xv&&typeof xv=="object"?xv.t:xv;xt&&$2.push($3.createElement($4,{key:"xc",accessibilityLabel:$5,style:[$6.marginLeft,$6.defaultBadgeColor,$7,xt==="business"?{color:"rgb(226,183,25)"}:xt==="government"?{color:"rgb(130,154,171)"}:{color:"rgb(29,155,240)"}]}));xv&&xv.img&&$2.push($3.createElement("img",{key:"xa",src:xv.img,alt:xv.name,title:xv.name,style:{width:"1.05em",height:"1.05em",borderRadius:3,marginLeft:4,verticalAlign:"-0.15em",objectFit:"cover",flexShrink:0}}))})($1.isVerified)',
+		'(function(xv){var xt=xv&&typeof xv=="object"?xv.t:xv;xt&&$2.push($3.createElement($4,{key:"xc",accessibilityLabel:$5,style:[$6.marginLeft,$6.defaultBadgeColor,$7,xt==="business"?{color:"rgb(226,183,25)"}:xt==="government"?{color:"rgb(130,154,171)"}:{color:"rgb(29,155,240)"}]}));xv&&xv.img&&[{img:xv.img,name:xv.name}].concat(xv.more||[]).forEach(function(b,xi){$2.push($3.createElement("img",{key:"xa"+xi,src:b.img,alt:b.name,title:b.name,style:{width:"1.05em",height:"1.05em",borderRadius:3,marginLeft:4,verticalAlign:"-0.15em",objectFit:"cover",flexShrink:0}}))})})($1.isVerified)',
 	],
 	// the profile header and user cells cast `verified` to a boolean first
 	[/isVerified:!!(\w+)\.verified(?![\w$])/g, "isVerified:$1.verified"],
@@ -187,9 +195,10 @@ const LEGACY_RULES: [RegExp, string][] = [
 	[/(key:"render",value:function\(\)\{var ([\w$]+)=this\.props\.useLatest;)return [\w$]+\.createElement\([\w$]+,\{onContentPreferencesSelect:this\._handleContentPreferencesSelect,onPress:this\._handleSwitchPress,onToggle:this\._handleToggle,useLatest:\2\}\)/g, '$1var xs=this;window.__xitterHome={useLatest:$2,toggle:function(){xs._handleToggle()}};setTimeout(function(){window.dispatchEvent(new Event("xitter:home"))});return null'],
 	// the header says Home on every tab, not "Latest Tweets"
 	[/(=this\._latestTimelineSwitchEnabled&&[\w$]+\?)[\w$]+:([\w$]+)(?=[,;])/g, "$1$2:$2"],
+	[/(([\w$]+)&&([\w$]+)\?([\w$]+)\.createElement\(([\w$.]+),\{accessibilityLabel:([\w$]+),hideWhenXShort:!0,label:\6,layout:([\w$]+),onClick:this\._handleTabClickFactory\("bookmarks",([\w$]+)\),path:"\/i\/bookmarks",renderIcon:Object\(([\w$.]+)\)\(([\w$.]+),([\w$.]+),\7\),withLabel:([\w$]+)\}\):null,)/g, '$1window.__XITTER_GBEE__&&$2?$4.createElement($5,{accessibilityLabel:window.__XITTER_GBEE__,hideWhenXShort:!0,label:window.__XITTER_GBEE__,layout:$7,onClick:this._handleTabClickFactory("gbee",$8),path:"/i/grok",renderIcon:Object($9)(window.__xitterBeeIcon($4,$10),window.__xitterBeeIcon($4,$10),$7),withLabel:$12}):null,'],
 	// More menu entries for what Xitter doesn't run: Topics, and the sites
 	// Twitter had for ads, analytics and media (they lead to x.com)
-	[/(_render(?:Topics|TwitterAds|Analytics|MediaStudio)Item",\(function\([\w$]*\)\{)return /g, "$1return null;"],
+	[/(_render(?:Topics|TwitterAds|Analytics|MediaStudio|HelpCenter)Item",\(function\([\w$]*\)\{)return /g, "$1return null;"],
 ];
 
 // the More menu: after Settings and privacy, what shell.ts puts in __XITTER_MENU__

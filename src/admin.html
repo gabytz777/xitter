@@ -160,6 +160,18 @@
 	.user-admin-facts b { color: var(--text); font-weight: 500; }
 	.user-instance-note { margin: 0 0 16px; padding: 12px 14px; border-left: 3px solid var(--blue); border-radius: 6px; background: var(--panel); }
 	.user-admin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+	.user-tabs { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; padding: 10px 0; background: var(--bg); border-bottom: 1px solid var(--line); }
+	.user-tab { padding: 8px 16px; border: 1px solid var(--line); border-radius: 999px; background: none; color: var(--dim); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+	.user-tab:hover { color: var(--text); background: var(--panel); }
+	.user-tab.on { color: var(--text); border-color: var(--blue); background: var(--panel); }
+	.user-tab-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+	.user-tab-panel[hidden] { display: none; }
+	.user-tab-panel .user-admin-column > .box { margin: 0 !important; }
+	@media (max-width: 900px) { .user-tab-panel { grid-template-columns: 1fr; } }
+	.user-tab-panel .field > input, .user-tab-panel .field > select, .user-tab-panel .field > textarea { width: 100%; min-width: 0; }
+	.user-tab-panel .box > h2 { margin-top: 0; }
+	.user-tab-panel .list > p { padding: 10px 0; border-bottom: 1px solid var(--line); }
+	.user-tab-panel .list > p:last-child { border-bottom: 0; }
 	.user-admin-column { display: grid; align-content: start; gap: 16px; min-width: 0; }
 	.user-admin-column > .box { min-width: 0; margin: 0 !important; }
 	.user-related-grid > .box { display: inline-block; width: 100%; min-width: 0; margin: 0 0 16px !important; vertical-align: top; break-inside: avoid; }
@@ -1529,7 +1541,7 @@ const RENDER = {
 					(status === "open" && can("resolveReport") ? '<div class="field" style="margin-top:12px"><input data-note placeholder="Note for the audit log (optional)"></div><div class="row">' +
 						'<button class="btn" data-do="dismiss">Dismiss</button>' +
 						(r.post_id && r.post_text !== null && can("deletePost") ? '<button class="btn danger" data-do="delete">Delete post</button>' : "") +
-						(r.user_id && can("setStatus") ? '<button class="btn" data-do="restricted">Restrict author</button><button class="btn" data-do="limited">Limit author</button><button class="btn danger" data-do="suspended">Suspend author</button>' : "") +
+						(r.user_id && can("setStatus") ? (can("setTemporaryStatus") ? '<select data-for aria-label="How long the sanction lasts"><option value="">until lifted</option><option value="1">1 hour</option><option value="24">1 day</option><option value="168">1 week</option><option value="720">30 days</option></select>' : "") + '<button class="btn" data-do="restricted">Restrict author</button><button class="btn" data-do="limited">Limit author</button><button class="btn danger" data-do="suspended">Suspend author</button>' : "") +
 						(r.user_id ? '<a class="btn" href="#user/' + esc(r.user_id) + '">Open account</a>' : "") + "</div>"
 						: '<p class="dim small">' + esc(r.status) + (r.handled_by ? " by @" + esc(r.handled_by) : "") + (r.handled_at ? " · " + esc(when(r.handled_at)) : "") + (r.note ? " · " + esc(r.note) : "") + "</p>") +
 					"</div>";
@@ -1555,9 +1567,13 @@ const RENDER = {
 			box.querySelectorAll("[data-do]").forEach((b) => b.onclick = () => act(async () => {
 				const what = b.dataset.do;
 				const note = box.querySelector("[data-note]").value;
-				if (what === "suspended" && !(await ask("Suspend @" + r.screen_name + "?"))) return;
+				const hours = box.querySelector("[data-for]")?.value || "";
+				const span = hours ? "for " + box.querySelector("[data-for]").selectedOptions[0].textContent : "until lifted";
+				if (what === "suspended" && !(await ask("Suspend @" + r.screen_name + " " + span + "?"))) return;
 				if (what === "delete") await api("deletePost", { id: r.post_id });
-				if (["restricted", "limited", "suspended"].includes(what)) await api("setStatus", { id: r.user_id, status: what, reason: note || "report: " + r.reason });
+				const reason = note || "report: " + r.reason;
+				if (["restricted", "limited", "suspended"].includes(what))
+					await (hours ? api("setTemporaryStatus", { id: r.user_id, status: what, hours, reason }) : api("setStatus", { id: r.user_id, status: what, reason }));
 				await api("resolveReport", { id: r.id, status: what === "dismiss" ? "dismissed" : "actioned", note, samePost: true });
 				await route();
 				refreshCounts();
@@ -1834,7 +1850,7 @@ const RENDER = {
 	},
 
 	async settings(main, focus) {
-		const [{ settings: s, features, branding, slots, compression }, { operations: o, automod: am }] = await Promise.all([api("settings"), api("operations")]);
+		const [{ settings: s, features, branding, slots, compression, claudeMod: cm }, { operations: o, automod: am }] = await Promise.all([api("settings"), api("operations")]);
 		const admin = can("admin");
 		const dis = admin ? "" : " disabled";
 		const modes = { invite: "Invite only: a code is needed", open: "Open: anyone can sign up, codes optional", closed: "Closed: no new accounts" };
@@ -1898,6 +1914,15 @@ const RENDER = {
 			'<div class="box"><h2>Rules</h2><p class="dim small">Shown at <a href="/rules" target="_blank">/rules</a> and linked from sign-up. A blank line starts a new paragraph.</p>' +
 			'<textarea id="rules" style="min-height:160px"' + dis + ">" + esc(s.rules) + "</textarea>" +
 			(admin ? '<button class="btn primary" id="saveRules" style="margin-top:8px">Save</button>' : "") + "</div>" +
+			[["terms", "Terms of Service", "/tos"], ["privacy", "Privacy Policy", "/privacy"]].map(([k, title, url]) =>
+				'<div class="box"><h2>' + title + '</h2><p class="dim small">Shown at <a href="' + url + '" target="_blank">' + url + '</a>. Leave it blank for the built-in text, which follows what this instance has switched on. A blank line starts a new paragraph, a paragraph starting with "## " is a heading.</p>' +
+				'<textarea id="' + k + '" style="min-height:160px"' + dis + ">" + esc(s[k]) + "</textarea>" +
+				(admin ? '<button class="btn primary" data-save-legal="' + k + '" style="margin-top:8px">Save</button>' : "") + "</div>").join("") +
+			'<div class="box"><h2>Who runs this instance</h2><p class="dim small">Used by the built-in terms and privacy policy. Blank operator: "the staff of ' + esc(s.instance_name) + '". Backups: how many days any backup, off-site copies included, can be kept; 0 works it out from the backup schedule.</p>' +
+			'<div class="field"><label>Operator</label><input id="legalOperator" placeholder="Your name or team" value="' + esc(s.legal.operator) + '"' + dis + "></div>" +
+			'<div class="field"><label>Contact for privacy and legal questions</label><input id="legalContact" placeholder="email or link" value="' + esc(s.legal.contact) + '"' + dis + "></div>" +
+			'<div class="field"><label>Backups kept for (days)</label><input id="legalBackupDays" type="number" min="0" max="3650" value="' + esc(String(s.legal.backup_days)) + '"' + dis + "></div>" +
+			(admin ? '<button class="btn primary" id="saveLegalInfo">Save</button>' : "") + "</div>" +
 			'<div class="box"><h2>Maintenance</h2><p class="dim small">While it\'s on, everyone except staff sees this message instead of the site.</p>' +
 			'<label class="row" style="margin:6px 0"><input type="checkbox" id="maint"' + (o.maintenance ? " checked" : "") + dis + "> Maintenance mode</label>" +
 			'<div class="field"><label>Message</label><input id="maintMsg" maxlength="500" value="' + esc(o.message) + '"' + dis + "></div>" +
@@ -1919,7 +1944,24 @@ const RENDER = {
 			'<div class="field"><label>From account age (days, 0 for any)</label><input id="aiDays" type="number" min="0" max="3650" value="' + esc(String(s.archive_import.min_age_days)) + '"' + dis + "></div>" +
 			'<label class="archive-import-approval"><input type="checkbox" id="aiApproval"' + (s.archive_import.approval ? " checked" : "") + dis + "> Staff approve each import before it starts</label>" +
 			(admin ? '<div class="archive-import-actions"><button class="btn primary" id="saveArchiveImport">Save</button></div>' : "") +
-			(can("archiveImports") ? '<div class="archive-import-pending"><h2>Waiting for approval</h2><div id="aiPending" class="dim small">Loading…</div></div>' : "") + "</div></div></section>" +
+			(can("archiveImports") ? '<div class="archive-import-pending"><h2>Waiting for approval</h2><div id="aiPending" class="dim small">Loading…</div></div>' : "") + "</div>" +
+			'<div class="box"><h2>Grok</h2><p class="dim small">Who answers in Grok, and in the Grok button on posts, while the Grok feature is on. Claude needs ANTHROPIC_API_KEY on the server; Bee is a tiny model that only buzzes, run by the bee service next to Xitter.</p>' +
+			'<div class="field"><label>Brain</label><select id="grokBrain"' + dis + ">" + [["claude", "Claude"], ["bee", "Bee (buzzes)"]].map(([v, l]) => '<option value="' + v + '"' + (s.grok.brain === v ? " selected" : "") + ">" + l + "</option>").join("") + "</select></div>" +
+			'<div class="field"><label>Claude model</label><input id="grokModel" value="' + esc(s.grok.model) + '"' + dis + "></div>" +
+			'<div class="field"><label>Bee address (blank for http://bee:8080)</label><input id="grokBee" value="' + esc(s.grok.bee_url) + '"' + dis + "></div>" +
+			'<div class="field"><label>Answers a day per account (0 for no limit)</label><input id="grokDaily" type="number" min="0" value="' + esc(String(s.grok.daily_per_account)) + '"' + dis + "></div>" +
+			'<div class="field"><label>Instructions (blank for the default). {instance} and {origin} are filled in.</label><textarea id="grokPrompt" style="min-height:120px;font-family:ui-monospace,monospace;font-size:12px"' + dis + ">" + esc(s.grok.prompt) + "</textarea></div>" +
+			(admin ? '<button class="btn primary" id="saveGrok">Save</button>' : "") + "</div>" +
+			'<div class="box"><h2>Claude moderator</h2><p class="dim small">Claude reads new posts, profile changes, user reports and 2020-client DMs after they\'re saved. Clear violations are hidden and filed under Reports; doubtful ones are filed only if you turn that on below. It never gives strikes. ' +
+			(cm.hasKey ? "" : "<b>No ANTHROPIC_API_KEY on the server, so nothing runs.</b> ") + "</p>" +
+			'<label class="row" style="margin:6px 0"><input type="checkbox" id="cmOn"' + (s.claude_mod.enabled ? " checked" : "") + dis + "> On</label>" +
+			[["posts", "Posts"], ["profiles", "Names and bios"], ["reports", "User reports (settles clear ones)"], ["dms", "2020-client DMs"], ["learn", "Learn from what staff confirm and dismiss"], ["borderline", "Also file doubtful ones (off: only clear violations reach Reports)"]]
+				.map(([k, l]) => '<label class="row" style="margin:4px 0"><input type="checkbox" data-cm="' + k + '"' + (s.claude_mod[k] ? " checked" : "") + dis + "> " + l + "</label>").join("") +
+			'<div class="field"><label>Hide from this confidence (0.5 to 1)</label><input id="cmHide" type="number" min="0.5" max="1" step="0.05" value="' + esc(String(s.claude_mod.hide_confidence)) + '"' + dis + "></div>" +
+			'<div class="field"><label>Model calls a day</label><input id="cmLimit" type="number" min="0" value="' + esc(String(s.claude_mod.daily_limit)) + '"' + dis + "></div>" +
+			'<div class="field"><label>Instructions (' + (s.claude_mod.prompt ? "custom" : "default") + '). {instance} and {origin} are filled in. Your Rules, the item type and the staff feedback are always added, and the item is always treated as data, not instructions.</label>' +
+			'<textarea id="cmPrompt" style="min-height:260px;font-family:ui-monospace,monospace;font-size:12px"' + dis + ">" + esc(s.claude_mod.prompt || cm.defaultPrompt) + "</textarea></div>" +
+			(admin ? '<div class="row" style="margin-top:8px"><button class="btn primary" id="saveClaudeMod">Save</button><button class="btn" id="resetClaudePrompt" type="button">Back to default</button></div>' : "") + "</div></div></section>" +
 			'<section class="settings-section" id="settings-discovery"><h2>Discovery</h2><div class="settings-grid">' +
 			'<div class="box"><h2>Trends</h2><div class="field"><label>Hidden hashtags, one per line</label><textarea id="hiddenTrends"' + dis + ">" + esc(o.hidden_trends.map((t) => "#" + t).join("\n")) + "</textarea></div>" +
 			'<div class="field"><label>Promoted hashtags, shown first</label><textarea id="promotedTrends"' + dis + ">" + esc(o.promoted_trends.map((t) => "#" + t).join("\n")) + "</textarea></div>" +
@@ -1952,7 +1994,7 @@ const RENDER = {
 			}));
 		};
 		stackCards("settings-account", [["Sign-up", "Composer"], ["Name and source", "AI and tools"], ["Core social", "Accounts and integrations"]]);
-		stackCards("settings-safety", [["Blocked phrases", "Import from X"], ["Blocked names"], ["Automod"]]);
+		stackCards("settings-safety", [["Blocked phrases", "Import from X"], ["Blocked names"], ["Automod", "Claude moderator"], ["Grok"]]);
 
 		if (focus) {
 			const section = main.querySelector("#" + focus);
@@ -2024,6 +2066,18 @@ const RENDER = {
 		annList.onclick = (e) => { const x = e.target.closest("[data-remove]"); if (x) { x.closest(".ann-row").remove(); annFull(); } };
 		$("#saveAnn").onclick = () => save({ announcement: { text: $("#annText").value, buttons: [...annList.querySelectorAll(".ann-row")].map((r) => ({ label: r.querySelector("[data-label]").value, url: r.querySelector("[data-url]").value })) } }, "Announcement saved");
 		$("#saveRules").onclick = () => save({ rules: $("#rules").value }, "Rules saved");
+		main.querySelectorAll("[data-save-legal]").forEach((b) => b.onclick = () => save({ [b.dataset.saveLegal]: $("#" + b.dataset.saveLegal).value }, "Saved"));
+		if ($("#saveLegalInfo")) $("#saveLegalInfo").onclick = () => save({ legal: { operator: $("#legalOperator").value, contact: $("#legalContact").value, backup_days: $("#legalBackupDays").value } }, "Saved");
+		if ($("#saveGrok")) $("#saveGrok").onclick = () => save({ grok: { brain: $("#grokBrain").value, model: $("#grokModel").value, bee_url: $("#grokBee").value, daily_per_account: $("#grokDaily").value, prompt: $("#grokPrompt").value } }, "Grok saved");
+		if ($("#saveClaudeMod")) {
+			const claudeMod = (prompt) => {
+				const c = { enabled: $("#cmOn").checked, hide_confidence: $("#cmHide").value, daily_limit: $("#cmLimit").value, prompt };
+				main.querySelectorAll("[data-cm]").forEach((i) => c[i.dataset.cm] = i.checked);
+				return { claude_mod: c };
+			};
+			$("#saveClaudeMod").onclick = () => save(claudeMod($("#cmPrompt").value), "Claude moderator saved");
+			$("#resetClaudePrompt").onclick = () => { if (confirm("Put the default instructions back?")) save(claudeMod(""), "Default instructions back"); };
+		}
 		const listOf = (id) => $(id).value.split("\n").map((x) => x.trim()).filter(Boolean);
 		// accounts that already carry a blocked name, then suspend them in one go
 		if ($("#checkNames")) $("#checkNames").onclick = () => act(async () => {
@@ -2209,7 +2263,7 @@ function userTable(users, orgs = false, pick = false) {
 }
 
 async function renderUser(main, id) {
-	const { user: u, invited, log, alts, strikes, next_step } = await api("user", { id });
+	const { user: u, invited, log, alts, strikes, next_step, clients } = await api("user", { id });
 	const [affiliates, { badges }, { labels }, { notes }, { messages }, sessions, handles] = await Promise.all([
 		api("affiliates", { orgId: id }).then((r) => r.affiliates),
 		api("badges"),
@@ -2243,7 +2297,7 @@ async function renderUser(main, id) {
 			'</div><button class="btn" id="saveCounts" style="margin-top:8px">Save counts</button>' : "") + "</div>" +
 		// badges
 		'<div class="box user-card-identity"><h2>Identity and badges</h2><div class="field"><label>Verification badge</label><select id="badge"' + (can("setBadge") ? "" : " disabled") + ">" +
-		[["", "none"], ["blue", "blue"], ["business", "gold (organisation)"], ["government", "grey (government organisation)"], ["government_individual", "grey (government official)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.verified_type ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
+		[["", "none"], ["blue", "blue"], ["business", "gold (organization)"], ["government", "grey (government organization)"], ["government_individual", "grey (government official)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.verified_type ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
 		'</select></div><div class="field"><label>Translator badge (a globe after the verification badge)</label><select id="translator"' + (canHere("setTranslator") ? "" : " disabled") + ">" +
 		[["", "none"], ["translator", "blue (translator)"], ["moderator", "gold (translator moderator)"], ["approver", "yellow (approver)"]].map(([v, l]) => '<option value="' + v + '"' + ((u.translator ?? "") === v ? " selected" : "") + ">" + l + "</option>").join("") +
 		'</select></div><div class="field"><label>Profile label (under the name, where X shows "Parody account"; <a href="#badges">make one</a>)</label><select id="plabel"' + (can("setProfileLabel") ? "" : " disabled") + ">" +
@@ -2252,6 +2306,9 @@ async function renderUser(main, id) {
 		[{ id: "", name: "none" }].concat(flags).map((f) => '<button type="button" title="' + esc(f.name) + '" data-flag="' + esc(f.id) + '"' + (can("setFlag") ? "" : " disabled") + ">" +
 			(f.id ? '<img alt="" loading="lazy" src="/public/flag-' + esc(f.id) + '.svg">' : "none") + "</button>").join("") + "</div>" +
 		(can("setFlag") ? '<div class="row" style="margin-top:8px"><button class="btn primary" id="saveFlags" disabled>Save flags</button><span class="dim small" id="flagState"></span></div>' : '<p class="dim small">Requires permission to set flags.</p>') + "</div>" +
+		(clients?.length > 1 && canHere("setUserClient") ? '<div class="field"><label>Twitter client</label><div class="row"><select id="userClient" aria-label="Which client this account gets">' +
+			clients.map((c) => '<option value="' + esc(c.id) + '"' + (u.web_client === c.id ? " selected" : "") + ">" + esc(c.label) + "</option>").join("") +
+			'</select><button class="btn" id="saveUserClient">Switch</button></div><p class="dim small">For an account stuck on a client that doesn\'t load. Takes effect on their next page load.</p></div>' : "") +
 		(u.decor ? '<div class="field"><label>Profile decor from Steam</label><div class="dim small">' +
 			esc([u.decor.profile && "game profile " + u.decor.profile.name, u.decor.theme && "theme " + u.decor.theme, u.decor.background && "background " + u.decor.background.name, u.decor.frame && "frame " + u.decor.frame.name].filter(Boolean).join(" · ")) +
 			"</div>" + (canHere("resetDecor") ? '<button class="btn" id="resetDecor" style="margin-top:6px">Reset decor</button>' : "") + "</div>" : "") +
@@ -2272,7 +2329,8 @@ async function renderUser(main, id) {
 		'<div class="field"><label>For</label><select id="for"' + (!can("setTemporaryStatus") || self ? " disabled" : "") + '><option value="">until lifted</option><option value="1">1 hour</option><option value="24">1 day</option><option value="168">1 week</option><option value="720">30 days</option></select></div><div class="row">' +
 		[["active", "Reinstate", ""], ["restricted", "Restrict", "Can read, can't post"], ["limited", "Limit", "Only followers see their posts"], ["suspended", "Suspend", "Signed out, hidden everywhere"]]
 			.map(([s, l, t]) => '<button class="btn' + (s === "suspended" ? " danger" : "") + '" data-status="' + s + '" title="' + esc(t) + '"' + (u.status === s || !can("setStatus") || self ? " disabled" : "") + ">" + l + "</button>").join("") +
-		'</div><p class="dim small">Restrict: can read, can\'t post. Limit: only followers see their posts. Suspend: signed out and hidden everywhere.</p></div>' +
+		"</div>" + (alts?.length && can("setStatus") && !self ? '<label class="row" style="margin:6px 0"><input type="checkbox" id="withAlts"> Also for the ' + alts.length + (alts.length === 1 ? " account" : " accounts") + ' seen from the same addresses: ' + alts.map((a) => "@" + esc(a.screen_name)).join(", ") + "</label>" : "") +
+		'<p class="dim small">Restrict: can read, can\'t post. Limit: only followers see their posts. Suspend: signed out and hidden everywhere.</p></div>' +
 		// access
 		'<div class="box user-card-access"><h2>Access</h2><div class="row">' + (canHere("resetPassword") ? '<button class="btn" id="reset">Reset password</button>' : "") + (canHere("signOut") ? '<button class="btn" id="signout">Sign out everywhere</button>' : "") +
 			(canHere("revokeApiTokens") ? '<button class="btn danger" id="revoketokens"' + (u.api_tokens ? "" : " disabled") + ">Revoke API tokens (" + u.api_tokens + ")</button>" : "") + '</div><div id="secret"></div>' +
@@ -2301,22 +2359,52 @@ async function renderUser(main, id) {
 		"</div><div class=\"user-related-grid\">" +
 		'<section class="box user-affiliates"><h2>Affiliates</h2>' + (canHere("addAffiliate") ? '<div class="bar"><input id="aff" placeholder="@handle to add"><button class="btn primary" id="addaff">Add affiliate</button></div>' : "") +
 			(affiliates.length ? '<div class="scroll"><table class="table">' + affiliates.map((a) => '<tr><td>' + person(a) + "</td><td>" + (can("removeAffiliate") ? '<button class="btn danger" data-unaff="' + esc(a.id) + '">Remove</button>' : "") + "</td></tr>").join("") + "</table></div>" : '<p class="dim small">No affiliates yet.</p>') + "</section>" +
-		(alts?.length ? '<section class="box"><h2>Seen from the same addresses</h2><p class="dim small">Accounts that signed in from an address this one used in the last 90 days. Shared networks may put strangers here too.</p><div class="user-related-links">' + alts.map((a) => '<a href="#user/' + esc(a.id) + '">@' + esc(a.screen_name) + "</a>" + (a.status !== "active" ? ' <span class="pill ' + esc(a.status) + '">' + esc(a.status) + "</span>" : "")).join("") + "</div></section>" : "") +
-		(invited.length ? '<section class="box"><h2>Invited accounts</h2><div class="user-related-links">' + invited.map((i) => '<a href="#user/' + esc(i.id) + '">@' + esc(i.screen_name) + "</a>").join("") + "</div></section>" : "") +
+		(alts?.length ? '<section class="box user-alts"><h2>Seen from the same addresses</h2><p class="dim small">Accounts that signed in from an address this one used in the last 90 days. Shared networks may put strangers here too.</p><div class="user-related-links">' + alts.map((a) => '<a href="#user/' + esc(a.id) + '">@' + esc(a.screen_name) + "</a>" + (a.status !== "active" ? ' <span class="pill ' + esc(a.status) + '">' + esc(a.status) + "</span>" : "")).join("") + "</div></section>" : "") +
+		(invited.length ? '<section class="box user-invited"><h2>Invited accounts</h2><div class="user-related-links">' + invited.map((i) => '<a href="#user/' + esc(i.id) + '">@' + esc(i.screen_name) + "</a>").join("") + "</div></section>" : "") +
 		'<section class="box user-history"><h2>Staff history</h2>' + (log.length ? '<div class="scroll"><table class="table"><tbody>' + log.map((e) => '<tr><td class="small dim">' + esc(when(e.created_at)) + "</td><td>" + (e.automatic ? "Automod" : "@" + esc(e.actor ?? "?")) + " " + esc(e.action.replace(/_/g, " ")) + '</td><td class="small dim code">' + esc(e.detail ? JSON.stringify(e.detail) : "") + "</td></tr>").join("") + "</tbody></table></div>" : '<p class="dim small">No staff actions yet.</p>') + "</section></div>";
 
-	const userGrid = main.querySelector(".user-admin-grid");
-	const userColumns = [document.createElement("div"), document.createElement("div")];
-	userColumns.forEach((column) => column.className = "user-admin-column");
-	const moveCards = (column, selectors) => selectors.forEach((selector) => {
-		const card = main.querySelector(selector);
-		if (card) column.append(card);
+	const userTabs = [
+		["moderation", "Moderation", [".user-card-standing", ".user-card-messages", ".user-alts", ".user-card-notes", ".user-history"]],
+		["profile", "Profile and badges", [".user-card-profile", ".user-card-identity"]],
+		["access", "Access and sessions", [".user-card-access", ".user-card-sessions", ".user-card-handles"]],
+		["related", "Affiliates and invites", [".user-affiliates", ".user-invited"]],
+	].map(([key, label, selectors]) => [key, label, selectors.map((sel) => main.querySelector(sel)).filter(Boolean)]).filter(([, , cards]) => cards.length);
+	const tabBar = document.createElement("div");
+	tabBar.className = "user-tabs";
+	const panels = userTabs.map(([key, label, cards]) => {
+		const tab = document.createElement("button");
+		tab.className = "user-tab";
+		tab.dataset.tab = key;
+		tab.textContent = label;
+		tabBar.append(tab);
+		const panel = document.createElement("div");
+		panel.className = "user-tab-panel";
+		panel.dataset.panel = key;
+		panel.cards = cards;
+		panel.append(...cards);
+		return panel;
 	});
-	moveCards(userColumns[0], [".user-card-profile", ".user-card-standing", ".user-affiliates", ".user-card-messages"]);
-	moveCards(userColumns[1], [".user-card-identity", ".user-history", ".user-card-access", ".user-card-notes", ".user-card-sessions", ".user-card-handles"]);
-	userGrid.replaceChildren(...userColumns);
-	const relatedGrid = main.querySelector(".user-related-grid");
-	if (!relatedGrid.children.length) relatedGrid.remove();
+	const layOut = (panel) => {
+		if (panel.laidOut) return;
+		panel.laidOut = true;
+		const columns = [document.createElement("div"), document.createElement("div")];
+		columns.forEach((column) => column.className = "user-admin-column");
+		panel.replaceChildren(...columns);
+		const wide = getComputedStyle(panel).gridTemplateColumns.split(" ").length > 1;
+		panel.cards.forEach((card) => (wide && columns[1].offsetHeight < columns[0].offsetHeight ? columns[1] : columns[0]).append(card));
+	};
+	main.querySelector(".user-admin-grid").replaceWith(tabBar, ...panels);
+	main.querySelector(".user-related-grid").remove();
+	const showTab = (key) => {
+		if (!userTabs.some(([k]) => k === key)) key = userTabs[0][0];
+		tabBar.querySelectorAll("[data-tab]").forEach((t) => t.classList.toggle("on", t.dataset.tab === key));
+		panels.forEach((panel) => { panel.hidden = panel.dataset.panel !== key; if (!panel.hidden) layOut(panel); });
+		try { localStorage.setItem("xitterUserTab", key); } catch {}
+	};
+	tabBar.querySelectorAll("[data-tab]").forEach((t) => t.onclick = () => showTab(t.dataset.tab));
+	let lastTab = "";
+	try { lastTab = localStorage.getItem("xitterUserTab") || ""; } catch {}
+	showTab(lastTab);
 
 	const again = () => renderUser(main, id);
 	if ($("#saveCounts")) $("#saveCounts").onclick = () => act(() => api("setUserCounts", { id, counts: Object.fromEntries([...main.querySelectorAll("[data-count]")].map((el) => [el.dataset.count, el.value])) }), "Counts saved").then(again);
@@ -2349,16 +2437,24 @@ async function renderUser(main, id) {
 		if ($("#saveFlags")) $("#saveFlags").onclick = () => act(() => api("setFlag", { id, flag: picked.join(",") }), "Flags saved").then(again);
 		drawFlags();
 	}
+	if ($("#saveUserClient")) $("#saveUserClient").onclick = () => act(() => api("setUserClient", { id, client: $("#userClient").value }), "Client switched").then(again);
 	if ($("#resetDecor")) $("#resetDecor").onclick = async () => {
 		if (!(await ask("Take off @" + u.screen_name + "'s profile decor?"))) return;
 		act(() => api("resetDecor", { id }), "Decor reset").then(again);
 	};
 	main.querySelectorAll("[data-status]").forEach((b) => b.onclick = async () => {
-		if (b.dataset.status === "suspended" && !(await ask("Suspend @" + u.screen_name + "?"))) return;
-		const hours = $("#for").value;
-		act(() => hours && b.dataset.status !== "active"
-			? api("setTemporaryStatus", { id, status: b.dataset.status, hours, reason: $("#reason").value })
-			: api("setStatus", { id, status: b.dataset.status, reason: $("#reason").value }), "Standing changed").then(again);
+		const others = $("#withAlts")?.checked ? alts.filter((a) => a.status !== b.dataset.status) : [];
+		if (b.dataset.status === "suspended" && !(await ask("Suspend @" + u.screen_name + (others.length ? " and " + others.length + (others.length === 1 ? " alt" : " alts") : "") + "?"))) return;
+		const hours = $("#for").value, reason = $("#reason").value;
+		const apply = (target) => hours && b.dataset.status !== "active"
+			? api("setTemporaryStatus", { id: target, status: b.dataset.status, hours, reason })
+			: api("setStatus", { id: target, status: b.dataset.status, reason: reason || (target === id ? "" : "alt of @" + u.screen_name) });
+		const changed = await act(() => apply(id).then(() => true));
+		if (!changed) return;
+		const skipped = [];
+		for (const a of others) await apply(a.id).catch((e) => skipped.push("@" + a.screen_name + " (" + e.message + ")"));
+		notice(others.length ? "Standing changed for @" + u.screen_name + " and " + (others.length - skipped.length) + " of " + others.length + " alts" + (skipped.length ? ". Skipped: " + skipped.join(", ") : "") : "Standing changed", skipped.length > 0);
+		again();
 	});
 	if ($("#reset")) $("#reset").onclick = async () => {
 		if (!(await ask("Give @" + u.screen_name + " a new password and sign them out?"))) return;

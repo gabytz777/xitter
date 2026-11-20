@@ -7,7 +7,11 @@
 
 import type { Viewer } from "./auth";
 import { trendScope } from "./explore-settings";
+import { ArticleError } from "./articles";
 import { callOperation } from "./graphql";
+import { PostError } from "./posts";
+import { RateLimitError, limitedResponse } from "./ratelimit";
+import { ReplyControlError } from "./reply-controls";
 import { cachedTrends } from "./search";
 import { legacyDmRoute, legacyUnreadCount } from "./legacy-dm";
 import { restRoute } from "./rest";
@@ -71,7 +75,7 @@ function legacyFromResult(u: Obj): Obj {
 		favourites_count: u.action_counts?.favorites_count ?? 0,
 		statuses_count: u.tweet_counts?.tweets ?? 0,
 		media_count: u.tweet_counts?.media_tweets ?? 0,
-		verified: oldVerified(!!u.is_blue_verified, u.verification?.verified_type ?? u.verified_type, u.affiliates_highlighted_label?.label),
+		verified: oldVerified(!!u.is_blue_verified, u.verification?.verified_type ?? u.verified_type, u.affiliates_highlighted_label?.label, u.xitter_badges),
 		profile_image_url_https: oldAvatar(u.avatar?.image_url, u.profile_image_shape),
 		...(u.banner?.image_url ? { profile_banner_url: u.banner.image_url } : {}),
 		pinned_tweet_ids_str: u.pinned_items?.tweet_ids_str ?? [],
@@ -80,7 +84,7 @@ function legacyFromResult(u: Obj): Obj {
 		has_extended_profile: false,
 		// 2020 DMs (legacy-dm.ts) take anyone not blocked; sending checks that
 		can_dm: true,
-		can_media_tag: true,
+		can_media_tag: u.media_permissions?.can_media_tag ?? true,
 		following: !!rel.following,
 		followed_by: !!rel.followed_by,
 		blocking: !!rel.blocking,
@@ -317,7 +321,21 @@ const TIMELINES: [RegExp, (m: RegExpExecArray, q: URLSearchParams) => [string, O
 ];
 const page = (q: URLSearchParams) => ({ count: Number(q.get("count")) || 20, ...(q.get("cursor") ? { cursor: q.get("cursor") } : {}) });
 
+// The operations refuse by throwing (a blocked word, a post that's gone, a
+// limit used up); as 1.1 errors, which this client shows
 export async function adaptiveRoute(method: string, path: string, viewer: Viewer, req: Request): Promise<Response | undefined> {
+	try {
+		return await route(method, path, viewer, req);
+	} catch (e) {
+		if (e instanceof RateLimitError) return limitedResponse(e.hit);
+		if (e instanceof PostError || e instanceof ReplyControlError || e instanceof ArticleError)
+			return Response.json({ errors: [{ code: e.code, message: e.message }] }, { status: e.code === 144 ? 404 : 403 });
+		if (e instanceof URIError) return Response.json({ errors: [{ code: 214, message: "Bad request." }] }, { status: 400 });
+		throw e;
+	}
+}
+
+async function route(method: string, path: string, viewer: Viewer, req: Request): Promise<Response | undefined> {
 	if (!path.startsWith("/2/") && !path.startsWith("/1.1/")) return undefined;
 	// its direct messages (legacy-dm.ts)
 	const dm = await legacyDmRoute(method, path, viewer, req);

@@ -45,7 +45,7 @@ export async function staffGate(req: Request, viewer: Viewer): Promise<string | 
 	return null;
 }
 
-const staffRequest = new AsyncLocalStorage<{ staff: boolean; language?: string; suspended?: string }>();
+const staffRequest = new AsyncLocalStorage<{ staff: boolean; language?: string; suspended?: string; hideParody?: boolean; hideChecks?: boolean }>();
 
 export const asRequest = <T>(run: () => T) => staffRequest.run({ staff: false }, run);
 
@@ -53,6 +53,17 @@ export const setRequestLanguage = (language: string | undefined) => {
 	const request = staffRequest.getStore();
 	if (request) request.language = language;
 };
+
+// Settings > Labels and checkmarks (parody-labels.ts): this viewer doesn't
+// want to see parody, commentary or fan labels, or checkmarks, on anyone
+export const setHidden = (hide: { parody: boolean; checks: boolean }) => {
+	const request = staffRequest.getStore();
+	if (!request) return;
+	request.hideParody = hide.parody;
+	request.hideChecks = hide.checks;
+};
+export const hidesParody = () => !!staffRequest.getStore()?.hideParody;
+export const hidesChecks = () => !!staffRequest.getStore()?.hideChecks;
 
 export const requestLanguage = () => staffRequest.getStore()?.language;
 

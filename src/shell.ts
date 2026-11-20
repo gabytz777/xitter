@@ -1,15 +1,19 @@
 // The HTML page that boots the client, built from the pinned build snapshot.
 // Everything about the signed-in account is ours.
 
+import { BEE } from "./bee-icon";
+import { grokName } from "./grok";
 import type { User } from "./auth";
 import { loadBuild } from "./build";
-import { feature, settings } from "./settings";
+import { NAME_MAX, feature, settings } from "./settings";
 import { postLimitFor } from "./textlen";
 import { CONVERSATION_CARD_CSS, CONVERSATION_CARD_SCRIPT } from "./conversation-card-ui";
 import { COMPOSER_BUTTON_CSS, COMPOSER_BUTTON_SCRIPT } from "./composer-buttons";
 import { STICKER_PICKER_CSS, STICKER_PICKER_SCRIPT } from "./sticker-picker";
 import { PASSKEY_SCRIPT } from "./passkeys";
 import { DISCORD_SCRIPT } from "./discord";
+import { DOUG_SCRIPT } from "./doug";
+import { PIRATE_SCRIPT } from "./pirate";
 import { FORGOT_SCRIPT, FRESH_SCRIPT, type MenuLink, TIDY_SCRIPT, hideCss, tidyData } from "./tidy";
 import { POST_CONTEXT_SCRIPT } from "./post-context";
 import { ERROR_SCRIPT } from "./errors";
@@ -24,7 +28,7 @@ import { NOTICE_SCRIPT } from "./automod-notice";
 import { FLAG_PICKER_CSS, FLAG_PICKER_SCRIPT, flagPickerData } from "./flag-picker";
 import { PRONOUNS_CSS, PRONOUNS_SCRIPT, pronounsData } from "./pronouns";
 import { CLASSIC_DETAIL_CSS, CLASSIC_DETAIL_SCRIPT } from "./classic-detail";
-import { PUBLIC_ORIGIN } from "./config";
+import { MAX_POST_MEDIA, PUBLIC_ORIGIN } from "./config";
 import { SQUARE_MARK, legacyUser } from "./model";
 import { patchText } from "./patch";
 import { PWA_SCRIPT, pwaHead } from "./pwa";
@@ -44,7 +48,7 @@ export function settingsFor(user: User): Record<string, unknown> {
 		discoverable_by_email: !!user.discoverable_by_email,
 		discoverable_by_mobile_phone: false,
 		personalized_trends: false,
-		allow_media_tagging: "all",
+		allow_media_tagging: user.allow_media_tagging ?? "all",
 		allow_contributor_request: "none",
 		allow_ads_personalization: false,
 		allow_logged_out_device_personalization: false,
@@ -128,7 +132,10 @@ const CLAIMED_FEATURES = Object.fromEntries(["subscriptions_feature_article_comp
 const HOST_SWITCHES = ["responsive_web_media_upload_host"];
 // Xitter's own values, over the pinned build's
 const ownSwitches = (): Record<string, { value: unknown }> => ({
+	user_display_name_max_limit: { value: NAME_MAX },
 	responsive_web_birdwatch_note_writing_enabled: { value: true },
+	rweb_mixed_media_uploads_cap: { value: MAX_POST_MEDIA },
+	rweb_media_carousel_enabled: { value: true },
 	responsive_web_pinned_replies_enabled: { value: true },
 	// Circles (circles.ts): the label on Circle posts stays even with the
 	// feature off; the composer sends its Circle choice only with the second
@@ -164,6 +171,8 @@ const ownSwitches = (): Record<string, { value: unknown }> => ({
 	responsive_web_edit_tweet_composition_enabled: { value: true },
 	responsive_web_edit_tweet_perspective_enabled: { value: true },
 	responsive_web_grok_tweet_translation: { value: false },
+	responsive_web_grok_api_enable_grok_host: { value: false },
+	responsive_web_rich_tweet_landing_enabled: { value: false },
 	responsive_web_translation_feedback_enabled: { value: false },
 });
 const overrideSwitches = () => Object.fromEntries(Object.entries(settings().switch_overrides).map(([k, value]) => [k, { value }]));
@@ -310,6 +319,8 @@ ${FLAG_PICKER_SCRIPT}
 ${signedIn ? COMPOSER_BUTTON_SCRIPT : ""}
 ${signedIn ? STICKER_PICKER_SCRIPT : ""}
 ${signedIn ? CONVERSATION_CARD_SCRIPT : ""}
+${signedIn ? PIRATE_SCRIPT : ""}
+${signedIn ? DOUG_SCRIPT : ""}
 ${signedIn ? CLASSIC_DETAIL_SCRIPT : ""}
 ${signedIn ? MONEY_UI_SCRIPT : ""}
 ${POST_CONTEXT_SCRIPT}
@@ -334,9 +345,17 @@ export const bootScript = (path: string): Buffer | undefined => boots().find((b)
 // database when another build ran last, before its scripts do.
 const BUILD_MARK = "xitter_client_build";
 const markBuild = (sha: string) => `try{localStorage.setItem(${inline(BUILD_MARK)},${inline(sha)})}catch(e){}`;
+const OLD_CLIENT_CACHE_GENERATION = 2;
 const oldLoader = (sha: string, srcs: string[]) => `(function(){var s=${inline(srcs)};function go(){s.forEach(function(u){var e=document.createElement("script");e.src=u;e.async=false;e.charset="utf-8";e.crossOrigin="anonymous";document.body.appendChild(e)})}
-var was;try{was=localStorage.getItem(${inline(BUILD_MARK)})}catch(e){}${markBuild(sha)}
-if(was===${inline(sha)}||!window.indexedDB)return go();var d=indexedDB.deleteDatabase("localforage");d.onsuccess=d.onerror=d.onblocked=go})();`;
+if(/(?:^|;\\s*)night_mode=2/.test(document.cookie)){var nm="night_mode=1; Path=/; Max-Age=31536000; SameSite=Lax";document.cookie=nm;document.cookie=nm+"; domain="+location.hostname}
+var was;try{was=localStorage.getItem(${inline(BUILD_MARK)})}catch(e){}${markBuild(`${sha}:${OLD_CLIENT_CACHE_GENERATION}`)}
+if(was===${inline(`${sha}:${OLD_CLIENT_CACHE_GENERATION}`)}||!window.indexedDB)return go();var done=false;function once(){if(!done){done=true;go()}}
+var OK={themeBackground:["light","dark","darker"],themeColor:["blue","yellow","red","purple","orange","green"],scale:["xSmall","small","normal","large","xLarge"],highContrastEnabled:[true,false],reducedMotionEnabled:[true,false]},r;try{r=indexedDB.open("localforage")}catch(e){return once()}
+r.onerror=r.onblocked=once;r.onupgradeneeded=function(){r.transaction.abort()};
+r.onsuccess=function(){var db=r.result;if(!db.objectStoreNames.contains("keyvaluepairs")){db.close();return once()}
+var t=db.transaction("keyvaluepairs","readwrite"),st=t.objectStore("keyvaluepairs"),g=st.get("device:rweb.settings");
+g.onsuccess=function(){var l=g.result&&g.result.local,k={};if(l&&typeof l==="object")Object.keys(OK).forEach(function(n){var v=l[n];if(n==="themeColor"&&typeof v==="string")v=v.replace(/\\d+$/,"");if(OK[n].indexOf(v)>=0)k[n]=v});st.clear();if(l)st.put({local:k},"device:rweb.settings")};
+t.oncomplete=t.onerror=t.onabort=function(){db.close();once()}}})();`;
 
 // The 2020 client's More menu gets Xitter settings and the side menu's own
 // entries (tidy.ts menuLinks); patch.ts draws them
@@ -345,12 +364,14 @@ const oldMenu = (links: MenuLink[]) => [
 	{ href: "/settings/xitter", text: "Xitter settings", icon: GEAR, viewBox: "0 -960 960 960" },
 	...links.filter((l) => l.where === "menu" || l.where === "both" || l.where === "nav").map((l) => ({ href: l.href, text: l.text, icon: l.icon, viewBox: l.viewBox ?? "0 0 24 24" })),
 ];
+const OLD_BEE = `window.__xitterBeeIcon=function(R,Base){return Base};(function(){function swap(){document.querySelectorAll('a[href="/i/grok"] svg:not([data-gbee])').forEach(function(v){v.setAttribute("data-gbee","");v.setAttribute("viewBox","0 -960 960 960");v.innerHTML='<path d="${BEE}"/>'})}new MutationObserver(swap).observe(document.documentElement,{childList:true,subtree:true})})();`;
 // Our pages can't sit inside the 2020 client the way tidy.ts frames them in the
 // current one, so links to them load the page itself instead of a client route
-const OLD_PAGES = `document.addEventListener("click",function(e){var a=e.target.closest&&e.target.closest("a[href]");if(!a||e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;var u=new URL(a.href,location.href),p=u.pathname;if(u.origin!==location.origin||!(p.indexOf("/account/")===0||p==="/settings/xitter"||p.indexOf("/settings/xitter/")===0))return;e.preventDefault();e.stopPropagation();var b=getComputedStyle(document.body).backgroundColor;document.cookie="xitter_old_theme="+(b==="rgb(0, 0, 0)"?"dark":b.indexOf("rgb(21, 32, 43")===0?"dim":"light")+"; Path=/; Max-Age=31536000; SameSite=Lax";location.assign(p+u.search)},true);`;
+const OLD_PAGES = `document.addEventListener("click",function(e){var a=e.target.closest&&e.target.closest("a[href]");if(!a||e.button||e.metaKey||e.ctrlKey||e.shiftKey)return;var u=new URL(a.href,location.href),p=u.pathname;if(u.origin!==location.origin||!(p.indexOf("/account/")===0||p==="/settings/xitter"||p.indexOf("/settings/xitter/")===0||p==="/admin"||p.indexOf("/admin/")===0||(p==="/i/grok"&&window.__XITTER_GBEE__)))return;e.preventDefault();e.stopPropagation();var b=getComputedStyle(document.body).backgroundColor;document.cookie="xitter_old_theme="+(b==="rgb(0, 0, 0)"?"dark":b.indexOf("rgb(21, 32, 43")===0?"dim":"light")+"; Path=/; Max-Age=31536000; SameSite=Lax";location.assign(p+u.search)},true);`;
 // An organisation's avatar is square, as on X: the 2020 client draws every
 // avatar round (its r-sdzlij class), and its picture's address carries
 // SQUARE_MARK (model.ts oldAvatar) where it should not be
+const OLD_FOOTER = `[data-testid="sidebarColumn"] nav[aria-label="Footer"]{display:none!important}`;
 const OLD_SQUARE = `.r-sdzlij:has(img[src*="${SQUARE_MARK}"]){border-radius:10%!important}`;
 // Home's tabs for the 2020 client (patch.ts puts them atop its timeline): For
 // you and Following are its own top/latest switch, which the sparkle button's
@@ -397,10 +418,10 @@ export function shell(user: User | null, multi = false, inCommunity = false, edu
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0,viewport-fit=cover" />
 <meta name="theme-color" content="#ffffff" /><title>${esc(settings().instance_name)}</title>
 <link rel="icon" type="image/png" href="/public/favicon.png" />
-<style>html,body{height:100%}body{margin:0}${OLD_SQUARE}</style>
+<style>html,body{height:100%}body{margin:0}${OLD_SQUARE}${user ? OLD_FOOTER : ""}</style>
 </head><body><div id="react-root" style="height:100%;display:flex;"></div>
 <script>window.__INITIAL_STATE__=${inline(withFlash(onBase(build.stateBase, initialState(user, build.featureSwitch, inCommunity, educationFlags, accent)), flash))};window.__META_DATA__=${inline(meta)};</script>
-${user ? `<script>window.__XITTER_MENU__=${inline(oldMenu(links))};${OLD_PAGES}${OLD_TABS}</script>` : ""}
+${user ? `<script>window.__XITTER_MENU__=${inline(oldMenu(links))};window.__XITTER_GBEE__=${inline(feature("grok") ? grokName() : null)};${OLD_BEE}${OLD_PAGES}${OLD_TABS}</script>` : ""}
 <script id="nonce-csp"></script>
 <script>${runtimeText}</script>
 <script>${oldLoader(build.sha, build.scripts.map((p) => `${PUBLIC_ORIGIN}/abs${p}`))}</script>

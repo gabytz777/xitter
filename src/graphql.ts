@@ -5,6 +5,7 @@ import { RateLimitError, limitedResponse } from "./ratelimit";
 import { ChatError, chatHandlers } from "./chat";
 import { delegationHandlers } from "./delegation";
 import { automationHandlers } from "./automation";
+import { GrokError, grokHandlers } from "./grok";
 import { analyticsHandlers } from "./analytics";
 import { bookmarkFolderHandlers } from "./bookmark-folders";
 import { communityHandlers } from "./communities";
@@ -26,7 +27,7 @@ import { trendScope } from "./explore-settings";
 import { activeCards, cardsEntry } from "./explore-cards";
 import { isBlockedEitherWay, blockedIds, blockedFor, outOfView, protectedFor } from "./blocks";
 import { feature, settings } from "./settings";
-import { freshAsOf, rankedFeed } from "./ranking";
+import { freshAsOf, newView, rankedFeed } from "./ranking";
 import * as articles from "./articles";
 import type { User, Viewer } from "./auth";
 import { revealSuspended, seesSuspended } from "./staff-access";
@@ -171,12 +172,13 @@ async function globalPin(viewer: Viewer, entries: unknown[], first: boolean) {
 // newer posts gets what arrived since, newest first, above the ranked entries.
 const forYou: Handler = async (viewer, vars) => {
 	const cursor = typeof vars.cursor === "string" ? vars.cursor : "";
-	const ranked = /^r(\d+)\.(\d{1,19})$/.exec(cursor);
+	const ranked = /^r(\d+)\.(\d{1,19})(?:\.(\d{1,10}))?$/.exec(cursor);
 	if (cursor && !ranked) return home(false)(viewer, vars);
 	const count = Math.min(Math.max(Number(vars.count) || 20, 1), 100);
 	const asOf = ranked ? ranked[2] : await freshAsOf(viewer.id);
 	const offset = ranked ? Number(ranked[1]) : 0;
-	const page = await rankedFeed(viewer.id, { asOf, offset, limit: count });
+	const seed = ranked ? Number(ranked[3] ?? 0) : newView();
+	const page = await rankedFeed(viewer.id, { asOf, offset, limit: count, view: seed });
 	// sort indexes run down from asOf in ranked order, below anything newer,
 	// two apart so a boosted post fits between two of them
 	const base = BigInt(asOf);
@@ -191,7 +193,7 @@ const forYou: Handler = async (viewer, vars) => {
 	});
 	if (boosted) entries.splice(2, 0, promotedEntry(boosted, (base - 2n * BigInt(offset + 2) - 1n).toString()));
 	if (!ranked) entries.unshift(cursorEntry("Top", `t${asOf}`, inc(asOf)));
-	if (page.next !== undefined) entries.push(cursorEntry("Bottom", `r${page.next}.${asOf}`, (base - 2n * BigInt(page.next) - 1n).toString()));
+	if (page.next !== undefined) entries.push(cursorEntry("Bottom", `r${page.next}.${asOf}${seed ? `.${seed}` : ""}`, (base - 2n * BigInt(page.next) - 1n).toString()));
 	await globalPin(viewer,entries,!cursor);
 	return homeResponse(entries, feedbackActions);
 };
@@ -1182,6 +1184,7 @@ Object.assign(handlers, {
 	GetUserClaims: () => ({ data: { viewer_v2: { claims: [] } } }),
 } satisfies Record<string, Handler>);
 Object.assign(handlers, automationHandlers);
+Object.assign(handlers, grokHandlers);
 
 // own names only: "constructor" is in every object, and called it hands the viewer back
 export const knownOperation = (name: string) => Object.hasOwn(handlers, name);
@@ -1197,6 +1200,7 @@ export async function runOperation(name: string, viewer: Viewer, vars: Vars): Pr
 		if (e instanceof RateLimitError) return limitedResponse(e.hit);
 		// the chat app reads these as they are
 		if (e instanceof ChatError) return Response.json({ errors: [{ message: e.message, code: e.code }], data: {} });
+		if (e instanceof GrokError) return Response.json({ errors: [{ message: `Error: ${e.message}`, code: 403, extensions: { code: 403 } }], data: {} });
 		// the main client takes the code from extensions and shows the message
 		// after its first ": ", as in X's "_Missing: No status found with that ID."
 		if (e instanceof PostError || e instanceof ReplyControlError || e instanceof articles.ArticleError) {

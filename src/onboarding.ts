@@ -84,7 +84,7 @@ function withEmailField(messages: Message[]): Message[] {
 	const block = parentOf.get(input);
 	const holder = block === undefined ? undefined : parentOf.get(block);
 	if (input < 0 || block === undefined || holder === undefined) throw new Error("setup screen: no name field to copy");
-	const swap: Record<string, string> = { "Name *": "Email *", name: "email", "Full name": "Email" };
+	const swap: Record<string, string> = { "Name *": "Email *", name: "email", "Display name": "Email" };
 	const copies = new Map<number, number>();
 	const copy = (i: number): number => {
 		if (copies.has(i)) return copies.get(i)!;
@@ -107,6 +107,42 @@ function withEmailField(messages: Message[]): Message[] {
 	const at = copy(block);
 	const siblings = root.els[holder].children;
 	siblings.splice(siblings.indexOf(block) + 1, 0, at);
+	return messages;
+}
+
+function withLegalNote(messages: Message[], source: Message[]): Message[] {
+	const [, root] = messages[0];
+	const [, from] = source[0];
+	const text = (r: any, p: number): string | undefined => (r.props[p]?.[0] === 0 ? r.props[p][1] : undefined);
+	const parents = (r: any) => {
+		const m = new Map<number, number>();
+		r.els.forEach((e: any, i: number) => e.children.forEach((c: number) => m.set(c, i)));
+		return m;
+	};
+	const fromParent = parents(from);
+	const lead = from.els.findIndex((e: any) => [...e.props.values()].some((p: number) => text(from, p) === "By continuing, you agree to our "));
+	const line = fromParent.get(lead);
+	const note = line === undefined ? undefined : fromParent.get(line);
+	const rootParent = parents(root);
+	const input = root.els.findIndex((e: any) => e.props.has(17392) && text(root, e.props.get(17392)) === "name");
+	const block = rootParent.get(input);
+	const holder = block === undefined ? undefined : rootParent.get(block);
+	if (note === undefined || holder === undefined) throw new Error("setup screen: no place for the terms note");
+	const copy = (i: number): number => {
+		const old = from.els[i];
+		const props = new Map<number, number>();
+		for (const [k, p] of old.props) {
+			const value = from.props[p];
+			root.props.push(value[0] === 0 && value[1] === "By continuing, you agree to our " ? [0, "By signing up, you agree to our "] : value);
+			props.set(k, root.props.length - 1);
+		}
+		const fresh = { ...old, props, children: [] as number[] };
+		root.els.push(fresh);
+		const at = root.els.length - 1;
+		fresh.children = old.children.map(copy);
+		return at;
+	};
+	root.els[holder].children.push(copy(note));
 	return messages;
 }
 
@@ -138,21 +174,18 @@ const templates = {
 	code: codeLength(without(await load("code"), ["Send again"], 7140), INVITE_LENGTH),
 	// the authenticator code at sign-in: six digits
 	twoFactor: codeLength(without(await load("code"), ["Send again"], 7140), 6),
-	setup: withEmailField(await load("setup")),
+	setup: withLegalNote(withEmailField(await load("setup")), await load("password")),
 	success: await load("success"),
 	passkey: await load("passkey"),
 };
 
-// x.com's legal links become the instance's rules page
+// x.com's legal links become the instance's own pages
 const LINKS: Record<string, string> = {
-	"https://x.com/tos": "/rules",
-	"https://x.com/privacy": "/rules",
-	"https://help.x.com/rules-and-policies/twitter-cookies": "/rules",
+	"https://x.com/tos": "/tos",
+	"https://x.com/privacy": "/privacy",
+	"https://help.x.com/rules-and-policies/twitter-cookies": "/privacy",
 };
 const TEXTS: Record<string, () => string> = {
-	"Terms of Service": () => "Rules",
-	"Privacy Policy": () => "privacy",
-	"Cookie Use": () => "cookies",
 	Login: () => `Sign in to ${settings().instance_name}`,
 	"See what's happening": () => `Sign in to ${settings().instance_name}`,
 	"Select an option below:": () => "Enter your username to continue.",

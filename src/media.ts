@@ -6,13 +6,13 @@
 // converted by video.ts.
 
 import { conversationVideoMap } from "./conversation-cards";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
 import type { SQL } from "bun";
 import type { Viewer } from "./auth";
 import { remoteMediaFile } from "./federation-sync";
-import { PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
+import { MAX_POST_MEDIA, PUBLIC_HOSTNAME, PUBLIC_ORIGIN } from "./config";
 import { blockedFor, protectedFor, suspendedFor } from "./blocks";
 import { isStaffRequest, staffViewer } from "./staff-access";
 import { circleSeen } from "./circles";
@@ -21,11 +21,12 @@ import { isId, newId } from "./ids";
 import { settings } from "./settings";
 import { gifProxy } from "./gifs";
 import { compressUpload } from "./media-compress";
-import { cropGif, maxVideoBytes, posterFile, progress, queueVideo, sourceFile, videoError, videoSupported } from "./video";
+import { cropGif, FFMPEG, maxVideoBytes, posterFile, progress, queueVideo, sourceFile, spawnLimited, videoError, videoSupported } from "./video";
 
 export const MEDIA_DIR = process.env.MEDIA_DIR ?? "media";
 const maxImage = () => settings().limits.image_mb * 1024 * 1024;
 const MAX_GIF = 15 * 1024 * 1024;
+const LEGACY_CLIENT_TOP_BITRATE = 2_176_000;
 const MAX_PENDING_MS = 60 * 60 * 1000;
 
 type Pending = { userId: string; total: number; category: string; video: boolean; chunks: Map<number, number>; received: number; started: number };
@@ -745,13 +746,66 @@ export async function serveMedia(req: Request, pathname: string, viewer: Viewer)
 	return new Response(body, { headers });
 }
 
+const AVATAR_SIZES: Record<string, number> = { mini: 24, normal: 48, bigger: 73, x96: 96, reasonably_small: 128 };
+const AVATAR_STEPS = [24, 48, 73, 96, 128, 200, 400];
+const AVATAR_DIR = () => join(MEDIA_DIR, ".avatars");
+const RESIZABLE = new Set(["image/jpeg", "image/png", "image/webp"]);
+const resizing = new Map<string, Promise<Blob | undefined>>();
+
+function avatarWidth(suffix: string | undefined): number | undefined {
+	if (!suffix) return undefined;
+	if (AVATAR_SIZES[suffix]) return AVATAR_SIZES[suffix];
+	const box = /^(\d{1,4})x\d{1,4}$/.exec(suffix);
+	if (!box) return undefined;
+	const want = Number(box[1]);
+	return AVATAR_STEPS.find((w) => w >= want) ?? undefined;
+}
+
+async function resizedAvatar(served: Served, body: Blob, width: number): Promise<Blob | undefined> {
+	const png = served.mime !== "image/jpeg";
+	const out = join(AVATAR_DIR(), `${served.id}_${width}@2x.${png ? "png" : "jpg"}`);
+	if (existsSync(out)) return Bun.file(out);
+	const key = out;
+	const running = resizing.get(key);
+	if (running) return running;
+	const job = (async () => {
+		mkdirSync(AVATAR_DIR(), { recursive: true });
+		const input = await body.bytes();
+		const tmp = `${out}.${process.pid}.tmp`;
+		const p = spawnLimited([FFMPEG, "-v", "error", "-i", "pipe:0", "-vf", `scale='min(${width * 2},iw)':-1:flags=lanczos`, "-frames:v", "1", ...(png ? ["-f", "image2", "-c:v", "png"] : ["-f", "image2", "-c:v", "mjpeg", "-q:v", "2"]), "-y", tmp], 20_000, "ignore", input);
+		if ((await p.exited) !== 0 || !existsSync(tmp)) {
+			rmSync(tmp, { force: true });
+			return undefined;
+		}
+		renameSync(tmp, out);
+		return Bun.file(out);
+	})().finally(() => resizing.delete(key));
+	resizing.set(key, job);
+	return job;
+}
+
+export async function serveAvatar(req: Request, pathname: string, viewer: Viewer): Promise<Response> {
+	const m = /^\/profile_images\/(\d{1,19})(?:_([a-z_]+|\d{1,4}x\d{1,4}))?\.(?:jpe?g|png)$/.exec(pathname);
+	const original = m && isId(m[1]) && (await remoteMediaFile(m[1]));
+	const served = original && (await servedOf(m![1]));
+	const cache = served && (await cacheFor(viewer, served));
+	if (!m || !original || !served || !cache) return new Response("not found", { status: 404, headers: { "cache-control": PRIVATE } });
+	const width = RESIZABLE.has(served.mime) ? avatarWidth(m[2]) : undefined;
+	const body = (width && (await resizedAvatar(served, original, width))) || original;
+	const type = body === original ? servedType(served.mime) : served.mime === "image/jpeg" ? "image/jpeg" : "image/png";
+	const tag = tagOf(served, body, cache);
+	const headers: Record<string, string> = { "content-type": type, "cache-control": cache, "x-content-type-options": "nosniff", "content-security-policy": MEDIA_CSP, ...(tag.etag ? { etag: tag.etag.replace(/"$/, `-${width ?? 0}"`) } : {}) };
+	if (unchanged(req, headers)) return new Response(null, { status: 304, headers });
+	return new Response(body.stream().pipeThrough(new TransformStream()), { headers: { ...headers, "content-length": String(body.size) } });
+}
+
 // attaches uploads to a new post; only the poster's own unused, finished
-// uploads count. A video goes alone, photos up to four.
+// uploads count. A video goes alone, photos up to MAX_POST_MEDIA.
 export class MediaError extends Error {}
 
 export async function attachMedia(userId: string, postId: string, mediaIds: string[], opts: { db?: SQL; strict?: boolean } = {}) {
 	const db = opts.db ?? sql;
-	const ids = [...new Set(mediaIds.filter(isId).slice(0, 4))];
+	const ids = [...new Set(mediaIds.filter(isId).slice(0, MAX_POST_MEDIA))];
 	if (opts.strict && (ids.length !== mediaIds.length || !isId(postId))) throw new MediaError("Invalid media attachments.");
 	if (!ids.length) return;
 	const [post] = await db`select id from posts where id = ${postId}::bigint and user_id = ${userId}::bigint`;
@@ -858,7 +912,7 @@ function videoEntity(m: MediaRow, postId: string, screenName: string, textLength
 		video_info: {
 			aspect_ratio: [m.width / d, m.height / d],
 			duration_millis: m.duration_ms ?? 0,
-			variants: [{ bitrate: Math.round((m.size * 8) / seconds), content_type: "video/mp4", url: mediaUrl(m.id, m.mime) }],
+			variants: [{ bitrate: Math.min(Math.round((m.size * 8) / seconds), LEGACY_CLIENT_TOP_BITRATE), content_type: "video/mp4", url: mediaUrl(m.id, m.mime) }],
 		},
 	};
 }

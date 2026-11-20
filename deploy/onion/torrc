@@ -1,0 +1,7 @@
+DataDirectory /var/lib/tor
+Log notice stdout
+HiddenServiceDir /var/lib/tor/hs
+HiddenServicePort 80 127.0.0.1:8080
+HiddenServiceNonAnonymousMode 1
+HiddenServiceSingleHopMode 1
+SocksPort 0
